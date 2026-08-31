@@ -59,3 +59,31 @@ flexiData/
 | Variable       | Description                            |
 | -------------- | -------------------------------------- |
 | `DATABASE_URL` | PostgreSQL connection string (required)|
+
+## Deploying to Vercel (with Neon)
+
+1. Merge this branch into `main` (or connect the branch you deploy from).
+2. In Vercel, **Add New → Project** and import the repo. Set the **Root
+   Directory** to `flexiData`.
+3. Add one **Environment Variable** (all three scopes: Production, Preview,
+   Development):
+   - `DATABASE_URL` = your Neon **pooled** connection string ending in
+     `?sslmode=require` (or `?sslmode=verify-full`).
+4. Deploy, then open the site once so it can seed demo data.
+
+### If you see "We hit a snag"
+
+Open the "What went wrong?" details on the error page, or visit `/api/health`.
+Common causes and fixes:
+
+| Message | Fix |
+| --- | --- |
+| `DATABASE_URL is missing` | The env var isn't set — add it in Vercel Settings → Environment Variables, then Redeploy |
+| `password authentication failed` | Wrong password in the URL — re-copy from Neon |
+| `connect ECONNREFUSED` / `timeout` | Neon is blocking Vercel's IPs — in Neon, make sure your project allows connections (disable IP allowlist, or add Vercel's ranges) |
+| `relation "wallets" does not exist` | Run `npx drizzle-kit push` against Neon |
+| `too many connections` | Use the **pooled** Neon URL (contains `-pooler`) |
+
+> ⚠️ Never commit `drizzle.config.json` with a real password, and never put a
+> real `DATABASE_URL` in a file tracked by git. Use Vercel env vars and a local
+> `.env.local` (git-ignored) instead.
