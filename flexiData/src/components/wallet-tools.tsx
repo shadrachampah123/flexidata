@@ -98,7 +98,7 @@ export function WalletTools({ wallet, initialTab }: { wallet: WalletDTO; initial
           status: "successful",
           ref: data.ref,
           headline: `${money(trAmount)} sent!`,
-          message: "The recipient has been notified. Transfers on QuickVend are always free.",
+          message: "The recipient has been notified. Transfers on FlexiData are always free.",
           balance: data.balance,
           lines: [
             { label: "Recipient wallet", value: groupPhone(dest) },
@@ -207,7 +207,7 @@ export function WalletTools({ wallet, initialTab }: { wallet: WalletDTO; initial
             custom={trCustom}
             setCustom={setTrCustom}
             delay={120}
-            note="Transfers between QuickVend wallets are always free and instant."
+            note="Transfers between FlexiData wallets are always free and instant."
           />
           {insufficient && (
             <Link

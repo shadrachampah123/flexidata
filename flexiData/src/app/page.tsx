@@ -6,7 +6,7 @@ import { ServiceGrid } from "@/components/service-grid";
 import { TxList } from "@/components/tx-list";
 import { AlertsBell } from "@/components/alerts-bell";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Card, SectionTitle } from "@/components/ui";
+import { Card, Logo, SectionTitle } from "@/components/ui";
 import { APP_NAME } from "@/lib/constants";
 import { money, ordinal } from "@/lib/format";
 
@@ -28,18 +28,25 @@ export default async function Home() {
   return (
     <div>
       {/* Header */}
-      <header className="animate-fade-up flex items-center gap-3">
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand to-amber-500 font-display text-sm font-bold text-ink shadow-[0_6px_16px_rgba(255,203,5,0.35)]">
-          {first[0]}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-[11px] font-semibold text-zinc-400">{greeting},</p>
-          <h1 className="truncate font-display text-[17px] font-bold leading-tight tracking-tight">
-            {first} <span className="text-zinc-300 dark:text-zinc-600">/ {APP_NAME}</span>
-          </h1>
+      <header className="animate-fade-up">
+        <div className="flex items-center justify-between">
+          <Logo />
+          <div className="flex items-center gap-2">
+            <AlertsBell alerts={alerts} />
+            <ThemeToggle />
+          </div>
         </div>
-        <AlertsBell alerts={alerts} />
-        <ThemeToggle />
+        <div className="mt-4 flex items-center gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand to-amber-500 font-display text-sm font-bold text-ink shadow-[0_6px_16px_rgba(255,203,5,0.35)]">
+            {first[0]}
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] font-semibold text-zinc-400">{greeting},</p>
+            <h1 className="truncate font-display text-[17px] font-bold leading-tight tracking-tight">
+              {first}
+            </h1>
+          </div>
+        </div>
       </header>
 
       {/* Promo ticker */}

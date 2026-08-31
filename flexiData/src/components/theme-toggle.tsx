@@ -1,25 +1,42 @@
 "use client";
 
+import { useSyncExternalStore } from "react";
 import { Moon, Sun } from "lucide-react";
-import { useEffect, useState } from "react";
 import { cn } from "@/lib/format";
 
-export function ThemeToggle({ className }: { className?: string }) {
-  const [dark, setDark] = useState<boolean | null>(null);
+const THEME_KEY = "flexidata-theme";
 
-  useEffect(() => {
-    setDark(document.documentElement.classList.contains("dark"));
-  }, []);
+function subscribe(onChange: () => void) {
+  const el = document.documentElement;
+  const observer = new MutationObserver(onChange);
+  observer.observe(el, { attributes: true, attributeFilter: ["class"] });
+  window.addEventListener("storage", onChange);
+  return () => {
+    observer.disconnect();
+    window.removeEventListener("storage", onChange);
+  };
+}
+
+function getSnapshot(): boolean {
+  return document.documentElement.classList.contains("dark");
+}
+
+function getServerSnapshot(): boolean | null {
+  // Unknown on the server — rendered as a neutral placeholder to keep hydration in sync.
+  return null;
+}
+
+export function ThemeToggle({ className }: { className?: string }) {
+  const dark = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
   const toggle = () => {
     const next = !document.documentElement.classList.contains("dark");
     document.documentElement.classList.toggle("dark", next);
     try {
-      localStorage.setItem("qv-theme", next ? "dark" : "light");
+      localStorage.setItem(THEME_KEY, next ? "dark" : "light");
     } catch {
       /* noop */
     }
-    setDark(next);
   };
 
   return (

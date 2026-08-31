@@ -56,7 +56,7 @@ export function Convert({ wallet }: { wallet: WalletDTO }) {
         headline: pending ? "Confirming transfer" : `${money(data.payout ?? payout)} credited!`,
         message: pending
           ? "Once the network confirms the airtime transfer, cash lands in your wallet automatically."
-          : "Cash has been added to your QuickVend wallet.",
+          : "Cash has been added to your FlexiData wallet.",
         balance: data.balance,
         lines: [
           { label: "Airtime converted", value: money(amount) },
@@ -155,7 +155,7 @@ export function Convert({ wallet }: { wallet: WalletDTO }) {
             </div>
           </div>
           <p className="bg-emerald-500/[0.07] px-5 py-2.5 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
-            Credited directly to your QuickVend wallet • New balance ≈ {money(balance + payout)}
+            Credited directly to your FlexiData wallet • New balance ≈ {money(balance + payout)}
           </p>
         </div>
         <p className="mt-2 px-1 text-[10px] leading-relaxed text-zinc-400 dark:text-zinc-500">

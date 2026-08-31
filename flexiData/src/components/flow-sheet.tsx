@@ -41,15 +41,7 @@ export function FlowSheet({
   processingSteps?: string[];
   result: FlowResult | null;
 }) {
-  const [stepIdx, setStepIdx] = useState(0);
   const steps = processingSteps ?? ["Contacting network…", "Verifying details…", "Finalising…"];
-
-  useEffect(() => {
-    if (phase !== "processing") return;
-    setStepIdx(0);
-    const id = setInterval(() => setStepIdx((i) => (i + 1) % steps.length), 850);
-    return () => clearInterval(id);
-  }, [phase, steps.length]);
 
   const dismissible = phase !== "processing";
   const close = () => {
@@ -89,29 +81,40 @@ export function FlowSheet({
             {ctaLabel}
           </button>
           <p className="mt-3 text-center text-[11px] text-zinc-400 dark:text-zinc-500">
-            Secured by QuickVend Pay • Instant delivery
+            Secured by FlexiData Pay • Instant delivery
           </p>
         </div>
       )}
 
-      {phase === "processing" && (
-        <div className="flex flex-col items-center py-10">
-          <div className="relative">
-            <Loader2 className="h-12 w-12 animate-spin text-brand" strokeWidth={2.2} />
-            <span className="absolute inset-0 -m-2 rounded-full border-2 border-brand/20" />
-          </div>
-          <p key={stepIdx} className="animate-fade-up mt-6 text-sm font-bold">
-            {steps[stepIdx]}
-          </p>
-          <p className="mt-1 text-xs text-zinc-400">Do not close this window</p>
-          <div className="mt-6 h-1 w-40 overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
-            <div className="h-full w-1/2 animate-[marquee_1.1s_linear_infinite] rounded-full bg-brand" />
-          </div>
-        </div>
-      )}
+      {phase === "processing" && <ProcessingView steps={steps} />}
 
       {phase === "result" && result && <ResultView result={result} onClose={onClose} />}
     </Sheet>
+  );
+}
+
+function ProcessingView({ steps }: { steps: string[] }) {
+  const [stepIdx, setStepIdx] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setStepIdx((i) => (i + 1) % steps.length), 850);
+    return () => clearInterval(id);
+  }, [steps.length]);
+
+  return (
+    <div className="flex flex-col items-center py-10">
+      <div className="relative">
+        <Loader2 className="h-12 w-12 animate-spin text-brand" strokeWidth={2.2} />
+        <span className="absolute inset-0 -m-2 rounded-full border-2 border-brand/20" />
+      </div>
+      <p key={stepIdx} className="animate-fade-up mt-6 text-sm font-bold">
+        {steps[stepIdx]}
+      </p>
+      <p className="mt-1 text-xs text-zinc-400">Do not close this window</p>
+      <div className="mt-6 h-1 w-40 overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
+        <div className="h-full w-1/2 animate-[marquee_1.1s_linear_infinite] rounded-full bg-brand" />
+      </div>
+    </div>
   );
 }
 

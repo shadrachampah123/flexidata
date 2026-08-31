@@ -30,7 +30,7 @@ export async function POST() {
       });
     }
 
-    const referralCode = `QV${makeReferralCode()}`;
+    const referralCode = `FD${makeReferralCode()}`;
     await db.insert(agentProfiles).values({
       walletId: wallet.id,
       tier: "Starter",

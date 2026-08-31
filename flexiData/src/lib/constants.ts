@@ -89,5 +89,5 @@ export const AGENT_TIERS: AgentTier[] = [
   },
 ];
 
-export const APP_NAME = "QuickVend";
+export const APP_NAME = "FlexiData";
 export const APP_TAGLINE = "Data & airtime, instantly.";
