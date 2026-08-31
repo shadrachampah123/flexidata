@@ -1,21 +1,8 @@
 import type { Metadata, Viewport } from "next";
-import { Manrope, Space_Grotesk } from "next/font/google";
 import "./globals.css";
 import { BottomNav } from "@/components/bottom-nav";
 import { SideNav } from "@/components/side-nav";
 import { APP_NAME, APP_TAGLINE } from "@/lib/constants";
-
-const manrope = Manrope({
-  subsets: ["latin"],
-  variable: "--font-manrope",
-  display: "swap",
-});
-
-const grotesk = Space_Grotesk({
-  subsets: ["latin"],
-  variable: "--font-grotesk",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: `${APP_NAME} — ${APP_TAGLINE}`,
@@ -32,7 +19,7 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-const themeInit = `(function(){try{var t=localStorage.getItem('qv-theme');if(t==='light'){document.documentElement.classList.remove('dark');}else{document.documentElement.classList.add('dark');}}catch(e){document.documentElement.classList.add('dark');}})()`;
+const themeInit = `(function(){try{var t=localStorage.getItem('flexidata-theme');if(t==='light'){document.documentElement.classList.remove('dark');}else{document.documentElement.classList.add('dark');}}catch(e){document.documentElement.classList.add('dark');}})()`;
 
 export default function RootLayout({
   children,
@@ -43,7 +30,7 @@ export default function RootLayout({
     <script dangerouslySetInnerHTML={{ __html: themeInit }} />
     </head>
     <body
-      className={`${manrope.variable} ${grotesk.variable} bg-cream font-sans text-[#18191f] antialiased dark:bg-night dark:text-[#f2efe4]`}
+      className="bg-cream font-sans text-[#18191f] antialiased dark:bg-night dark:text-[#f2efe4]"
     >
     <SideNav />
     <div className="min-h-dvh md:pl-[84px]">

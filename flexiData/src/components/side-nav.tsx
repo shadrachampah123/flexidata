@@ -35,10 +35,15 @@ export function SideNav() {
     <aside className="fixed inset-y-0 left-0 z-40 hidden w-[84px] flex-col items-center border-r border-black/5 bg-white/80 py-6 backdrop-blur-xl dark:border-line dark:bg-night/80 md:flex">
       <Link
         href="/"
-        className="mb-8 flex h-11 w-11 items-center justify-center rounded-2xl bg-brand text-ink shadow-[0_8px_20px_rgba(255,203,5,0.35)] transition-transform hover:rotate-6 active:scale-90"
+        className="mb-8 flex flex-col items-center gap-2 active:scale-95"
         aria-label={APP_NAME}
       >
-        <Zap className="h-5 w-5" strokeWidth={2.6} />
+        <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-brand text-ink shadow-[0_8px_20px_rgba(255,203,5,0.35)] transition-transform hover:rotate-6">
+          <Zap className="h-5 w-5" strokeWidth={2.6} />
+        </span>
+        <span className="font-display text-[11px] font-bold leading-none tracking-tight">
+          Flexi<span className="text-brand-deep dark:text-brand">Data</span>
+        </span>
       </Link>
       <div className="flex w-full flex-1 flex-col items-center gap-1.5">
         {LINKS.map(({ href, label, icon: Icon }) => {

@@ -16,8 +16,7 @@ import { getActiveAlerts, getWallet } from "@/lib/data";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { PageHeader } from "@/components/page-header";
 import { APP_NAME, APP_TAGLINE } from "@/lib/constants";
-import { fmtPoints } from "@/lib/format";
-import { cn } from "@/lib/format";
+import { cn, fmtPoints } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
@@ -112,12 +111,12 @@ export default async function MorePage() {
           </span>
           <div>
             <p className="font-display text-sm font-bold">Help & Support</p>
-            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">We're online 24/7, including holidays</p>
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">We&rsquo;re online 24/7, including holidays</p>
           </div>
         </div>
         <div className="mt-3 flex items-center gap-2 rounded-xl bg-black/[0.03] px-3 py-2.5 text-xs font-bold dark:bg-white/[0.05]">
           <Mail className="h-4 w-4 text-zinc-400" />
-          support@quickvend.app
+          support@flexidata.app
         </div>
       </div>
 

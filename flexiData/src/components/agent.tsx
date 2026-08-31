@@ -71,7 +71,7 @@ export function Agent({ wallet, profile: initial }: { wallet: WalletDTO; profile
               Earn every day.
             </h2>
             <p className="mt-2 max-w-[300px] text-xs leading-relaxed text-white/60">
-              Become an official QuickVend sub-agent. Buy at wholesale rates, resell at your own
+              Become an official FlexiData sub-agent. Buy at wholesale rates, resell at your own
               margin, and earn commission on every referral.
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
@@ -151,7 +151,7 @@ export function Agent({ wallet, profile: initial }: { wallet: WalletDTO; profile
 
   const nextTier = AGENT_TIERS.find((t) => t.minReferrals > profile.referrals);
   const progressPct = nextTier ? Math.min(100, Math.round((profile.referrals / nextTier.minReferrals) * 100)) : 100;
-  const link = `quickvend.app/r/${profile.referralCode.toLowerCase()}`;
+  const link = `flexidata.app/r/${profile.referralCode.toLowerCase()}`;
 
   return (
     <div className="space-y-5">

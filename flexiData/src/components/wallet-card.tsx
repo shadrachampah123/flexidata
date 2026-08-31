@@ -28,7 +28,7 @@ export function WalletCard({ wallet }: { wallet: WalletDTO }) {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="rounded-lg bg-white/10 px-2 py-1 text-[10px] font-black tracking-[0.18em] text-brand">
-                QV WALLET
+                FLEXIDATA WALLET
               </span>
               {wallet.isAgent && (
                 <span className="rounded-lg bg-brand px-2 py-1 text-[10px] font-black tracking-[0.12em] text-ink">

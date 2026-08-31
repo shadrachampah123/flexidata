@@ -17,6 +17,34 @@ export function BrandMark({ size = "md" }: { size?: "sm" | "md" }) {
   );
 }
 
+export function Logo({
+  className,
+  size = "md",
+}: {
+  className?: string;
+  size?: "sm" | "md" | "lg";
+}) {
+  const box =
+    size === "sm" ? "h-8 w-8" : size === "lg" ? "h-11 w-11 rounded-[0.9rem]" : "h-9 w-9";
+  const icon = size === "sm" ? "h-4 w-4" : size === "lg" ? "h-6 w-6" : "h-5 w-5";
+  const text = size === "sm" ? "text-base" : size === "lg" ? "text-2xl" : "text-xl";
+  return (
+    <span className={cn("inline-flex items-center gap-2.5", className)}>
+      <span
+        className={cn(
+          "flex items-center justify-center rounded-xl bg-brand text-ink shadow-[0_8px_20px_rgba(255,203,5,0.35)]",
+          box,
+        )}
+      >
+        <Zap className={icon} strokeWidth={2.6} />
+      </span>
+      <span className={cn("font-display font-bold leading-none tracking-tight", text)}>
+        Flexi<span className="text-brand-deep dark:text-brand">Data</span>
+      </span>
+    </span>
+  );
+}
+
 export function SectionTitle({
   title,
   action,

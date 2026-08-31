@@ -66,7 +66,7 @@ export function ordinal(n: number): string {
   return n + (s[(v - 20) % 10] || s[v] || s[0]);
 }
 
-export function makeRef(prefix = "QV"): string {
+export function makeRef(prefix = "FD"): string {
   const t = Date.now().toString(36).toUpperCase();
   const r = Math.random().toString(36).slice(2, 6).toUpperCase();
   return `${prefix}-${t}${r}`;

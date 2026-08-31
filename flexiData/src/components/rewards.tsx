@@ -96,7 +96,7 @@ export function Rewards({ wallet, options }: { wallet: WalletDTO; options: Redee
         <div className="relative">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-1.5 rounded-lg bg-white/10 px-2 py-1 text-[10px] font-black tracking-[0.18em] text-brand">
-              <Sparkles className="h-3 w-3" /> QV POINTS
+              <Sparkles className="h-3 w-3" /> FLEXIDATA POINTS
             </span>
             <span className={cn("text-[11px] font-black uppercase tracking-widest", tier.cls)}>
               {tier.name} tier
