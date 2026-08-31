@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -18,6 +18,7 @@ import { NETWORKS } from "@/lib/constants";
 import { Segmented, FieldLabel, NetworkBadge } from "@/components/ui";
 import { PhoneInput } from "@/components/phone-input";
 import { FlowSheet, type FlowResult } from "@/components/flow-sheet";
+import { DropdownPanel } from "@/components/dropdown-panel";
 import { cn, groupPhone, isValidPhone, money } from "@/lib/format";
 
 export function BuyData({
@@ -35,6 +36,8 @@ export function BuyData({
   const [planId, setPlanId] = useState<number | null>(null);
   const [phone, setPhone] = useState("");
   const [dropOpen, setDropOpen] = useState(false);
+  const catTriggerRef = useRef<HTMLButtonElement>(null);
+  const closeDrop = useCallback(() => setDropOpen(false), []);
   const [balance, setBalance] = useState(wallet.balance);
 
   const [phase, setPhase] = useState<"idle" | "confirm" | "processing" | "result">("idle");
@@ -137,7 +140,10 @@ export function BuyData({
       <div className="animate-fade-up relative" style={{ animationDelay: "60ms" }}>
         <FieldLabel>Bundle category</FieldLabel>
         <button
+          ref={catTriggerRef}
           type="button"
+          aria-haspopup="listbox"
+          aria-expanded={dropOpen}
           onClick={() => setDropOpen((o) => !o)}
           className={cn(
             "flex w-full items-center gap-3 rounded-2xl border bg-paper px-4 py-3 text-left transition-all active:scale-[0.99] dark:bg-card",
@@ -157,43 +163,46 @@ export function BuyData({
             className={cn("h-4 w-4 shrink-0 text-zinc-400 transition-transform", dropOpen && "rotate-180")}
           />
         </button>
-        {dropOpen && (
-          <>
-            <button
-              aria-label="Close dropdown"
-              onClick={() => setDropOpen(false)}
-              className="fixed inset-0 z-40 cursor-default bg-transparent"
-            />
-            <ul className="animate-fade-up absolute inset-x-0 top-[calc(100%+6px)] z-50 overflow-hidden rounded-2xl border border-black/[0.06] bg-paper shadow-[0_20px_50px_rgba(0,0,0,0.18)] dark:border-line dark:bg-card2">
-              {cats.map((c) => (
-                <li key={c.id}>
-                  <button
-                    onClick={() => {
-                      setCategory(c.id);
-                      setPlanId(null);
-                      setDropOpen(false);
-                    }}
-                    className="flex w-full items-center gap-3 border-b border-black/[0.04] px-4 py-3 text-left transition-colors last:border-0 hover:bg-black/[0.03] dark:border-line dark:hover:bg-white/[0.04]"
-                  >
-                    <span
-                      className={cn(
-                        "h-2.5 w-2.5 rounded-full border-2",
-                        c.id === activeCat?.id
-                          ? "border-brand bg-brand"
-                          : "border-zinc-300 bg-transparent dark:border-zinc-600",
-                      )}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-[13px] font-bold">{c.label}</span>
-                      <span className="block truncate text-[10px] text-zinc-500">{c.hint}</span>
-                    </span>
-                    {c.id === activeCat?.id && <CheckCircle2 className="h-4 w-4 text-brand-deep dark:text-brand" />}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
+        <DropdownPanel
+          open={dropOpen}
+          anchorRef={catTriggerRef}
+          onClose={closeDrop}
+          label="Bundle category"
+          maxHeight={340}
+        >
+          <ul>
+            {cats.map((c) => (
+              <li key={c.id}>
+                <button
+                  role="option"
+                  aria-selected={c.id === activeCat?.id}
+                  onClick={() => {
+                    setCategory(c.id);
+                    setPlanId(null);
+                    setDropOpen(false);
+                  }}
+                  className="flex w-full items-center gap-3 border-b border-black/[0.04] px-4 py-3 text-left transition-colors last:border-0 hover:bg-black/[0.03] dark:border-line dark:hover:bg-white/[0.04]"
+                >
+                  <span
+                    className={cn(
+                      "h-2.5 w-2.5 shrink-0 rounded-full border-2",
+                      c.id === activeCat?.id
+                        ? "border-brand bg-brand"
+                        : "border-zinc-300 bg-transparent dark:border-zinc-600",
+                    )}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[13px] font-bold">{c.label}</span>
+                    <span className="block truncate text-[10px] text-zinc-500">{c.hint}</span>
+                  </span>
+                  {c.id === activeCat?.id && (
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-brand-deep dark:text-brand" />
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </DropdownPanel>
       </div>
 
       {/* Bundles */}
