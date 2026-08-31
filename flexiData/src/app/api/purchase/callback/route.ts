@@ -10,8 +10,62 @@ import {
 } from "@/lib/data-gateway";
 import { POINTS_RATE } from "@/lib/constants";
 import { groupPhone } from "@/lib/format";
+import {
+  hasAllTransactionColumns,
+  hasTransactionColumn,
+  omitMissingGatewayColumns,
+  supportsTxStatusValue,
+  withSchemaFallback,
+  type SchemaCapabilities,
+} from "@/lib/schema-compat";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Fields the callback needs from the fulfillment ledger. On a database that has
+ * not been migrated for the data gateway these are absent, so they are read as
+ * `null` and skipped on write.
+ */
+const LEDGER_FIELDS = ["provider", "providerReference", "chargedAt", "fulfilledAt", "refundedAt"] as const;
+
+const CALLBACK_BASE_SELECT = {
+  id: transactions.id,
+  ref: transactions.ref,
+  walletId: transactions.walletId,
+  type: transactions.type,
+  status: transactions.status,
+  network: transactions.network,
+  recipient: transactions.recipient,
+  subtitle: transactions.subtitle,
+  amount: transactions.amount,
+  points: transactions.points,
+};
+
+const CALLBACK_LEDGER_SELECT = {
+  provider: transactions.provider,
+  providerReference: transactions.providerReference,
+  chargedAt: transactions.chargedAt,
+  fulfilledAt: transactions.fulfilledAt,
+  refundedAt: transactions.refundedAt,
+};
+
+type CallbackTx = {
+  id: number;
+  ref: string;
+  walletId: number;
+  type: "data" | "airtime" | "conversion" | "deposit" | "transfer" | "redemption";
+  status: "successful" | "pending" | "failed" | "reversed";
+  network: string | null;
+  recipient: string | null;
+  subtitle: string;
+  amount: string;
+  points: number;
+  provider: string | null;
+  providerReference: string | null;
+  chargedAt: Date | null;
+  fulfilledAt: Date | null;
+  refundedAt: Date | null;
+};
 
 function clampText(value: string | null | undefined, max = 240): string | null {
   if (!value) return null;
@@ -49,6 +103,52 @@ function isAuthorized(req: Request): boolean {
   return false;
 }
 
+/**
+ * Resolve the transaction a callback belongs to. `provider_reference` is only
+ * matched when the column exists, and on a legacy schema the ledger fields fall
+ * back to `null` instead of breaking the reconciliation.
+ */
+async function findCallbackTransaction(
+  reference: string | null,
+  providerReference: string | null,
+  compat: SchemaCapabilities,
+): Promise<CallbackTx | null> {
+  const canMatchProviderRef = hasTransactionColumn(compat, "providerReference") && Boolean(providerReference);
+
+  const where =
+    reference && providerReference && canMatchProviderRef
+      ? or(eq(transactions.ref, reference), eq(transactions.providerReference, providerReference))
+      : reference
+        ? eq(transactions.ref, reference)
+        : canMatchProviderRef
+          ? eq(transactions.providerReference, providerReference!)
+          : null;
+
+  if (!where) return null;
+
+  if (hasAllTransactionColumns(compat, [...LEDGER_FIELDS])) {
+    const rows = await db
+      .select({ ...CALLBACK_BASE_SELECT, ...CALLBACK_LEDGER_SELECT })
+      .from(transactions)
+      .where(where)
+      .limit(1);
+    return (rows[0] as CallbackTx) ?? null;
+  }
+
+  const rows = await db.select(CALLBACK_BASE_SELECT).from(transactions).where(where).limit(1);
+  const row = rows[0];
+  if (!row) return null;
+
+  return {
+    ...row,
+    provider: null,
+    providerReference: null,
+    chargedAt: null,
+    fulfilledAt: null,
+    refundedAt: null,
+  };
+}
+
 export async function POST(req: Request) {
   try {
     if (!isAuthorized(req)) {
@@ -63,26 +163,11 @@ export async function POST(req: Request) {
       return Response.json({ ok: false, error: "Missing callback reference" }, { status: 400 });
     }
 
-    let rows;
-    if (reference && normalized.providerReference) {
-      rows = await db
-        .select()
-        .from(transactions)
-        .where(or(eq(transactions.ref, reference), eq(transactions.providerReference, normalized.providerReference)))
-        .limit(1);
-    } else if (reference) {
-      rows = await db.select().from(transactions).where(eq(transactions.ref, reference)).limit(1);
-    } else if (normalized.providerReference) {
-      rows = await db
-        .select()
-        .from(transactions)
-        .where(eq(transactions.providerReference, normalized.providerReference))
-        .limit(1);
-    } else {
-      return Response.json({ ok: false, error: "Missing callback reference" }, { status: 400 });
-    }
+    const tx = await withSchemaFallback(
+      (compat) => findCallbackTransaction(reference, normalized.providerReference, compat),
+      "callback transaction lookup",
+    );
 
-    const tx = rows[0];
     if (!tx) {
       return Response.json({ ok: false, error: "Transaction not found" }, { status: 404 });
     }
@@ -146,23 +231,35 @@ export async function POST(req: Request) {
         .where(eq(wallets.id, wallet.id));
     }
 
-    await db
-      .update(transactions)
-      .set({
-        status: normalized.status,
+    await withSchemaFallback(async (compat) => {
+      // A legacy `tx_status` enum has no "reversed" label; a refund is still a
+      // non-successful outcome there, and the wallet above was already credited.
+      const status = supportsTxStatusValue(compat, normalized.status)
+        ? normalized.status
+        : normalized.status === "reversed"
+          ? "failed"
+          : normalized.status;
+
+      const patch = {
+        status,
         fulfillmentStatus: normalized.fulfillmentStatus,
         subtitle: buildSubtitle(tx.recipient, normalized.status, normalized.providerMessage),
         points: txPoints,
         providerReference: normalized.providerReference ?? tx.providerReference,
-        providerStatus: normalized.providerStatus ?? tx.providerStatus,
+        providerStatus: normalized.providerStatus,
         providerMessage: clampText(normalized.providerMessage),
         fulfilledAt,
         refundedAt,
         chargedAt,
         lastProviderSyncAt: now,
         providerResponse: payload,
-      })
-      .where(eq(transactions.id, tx.id));
+      };
+
+      await db
+        .update(transactions)
+        .set(omitMissingGatewayColumns(compat, "transactions", patch))
+        .where(eq(transactions.id, tx.id));
+    }, "callback reconciliation write");
 
     if (tx.network) {
       if (normalized.floatBalance != null) {

@@ -8,6 +8,16 @@ import {
   transactions,
   wallets,
 } from "@/db/schema";
+import { deriveProviderProductCode } from "@/lib/data-gateway";
+import {
+  BUNDLE_PLAN_INSERT_FIELDS,
+  TRANSACTION_INSERT_FIELDS,
+  buildCompatInsert,
+  getSchemaCapabilities,
+  isGatewaySchemaComplete,
+  isMissingRelationError,
+  withSchemaFallback,
+} from "@/lib/schema-compat";
 import { makeRef } from "@/lib/format";
 
 let seedPromise: Promise<void> | null = null;
@@ -23,10 +33,6 @@ export function ensureSeeded(): Promise<void> {
     });
   }
   return seedPromise;
-}
-
-function providerProductCode(network: string, category: string, label: string): string {
-  return `${network}-${category}-${label}`.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toUpperCase();
 }
 
 function statusToFulfillment(status: "successful" | "pending" | "failed" | "reversed") {
@@ -54,30 +60,41 @@ async function runSeed(): Promise<void> {
     })
     .onConflictDoNothing();
 
-  await db.insert(providerFloatBalances).values([
-    {
-      providerCode: "mock",
-      network: "MTN",
-      currency: "GHS",
-      availableBalance: "2500.00",
-      reservedBalance: "0.00",
-      lowBalanceThreshold: "300.00",
-      lastStatus: "seeded",
-      notes: "Mock provider float for local development",
-      lastSyncedAt: new Date(now),
-    },
-    {
-      providerCode: "mock",
-      network: "TELECEL",
-      currency: "GHS",
-      availableBalance: "2500.00",
-      reservedBalance: "0.00",
-      lowBalanceThreshold: "300.00",
-      lastStatus: "seeded",
-      notes: "Mock provider float for local development",
-      lastSyncedAt: new Date(now),
-    },
-  ]);
+  // The float ledger only exists once the gateway schema has been pushed, so
+  // seeding must not fail when the table is not there yet.
+  const caps = await getSchemaCapabilities();
+  if (caps.floatTable) {
+    try {
+      await db.insert(providerFloatBalances).values([
+        {
+          providerCode: "mock",
+          network: "MTN",
+          currency: "GHS",
+          availableBalance: "2500.00",
+          reservedBalance: "0.00",
+          lowBalanceThreshold: "300.00",
+          lastStatus: "seeded",
+          notes: "Mock provider float for local development",
+          lastSyncedAt: new Date(now),
+        },
+        {
+          providerCode: "mock",
+          network: "TELECEL",
+          currency: "GHS",
+          availableBalance: "2500.00",
+          reservedBalance: "0.00",
+          lowBalanceThreshold: "300.00",
+          lastStatus: "seeded",
+          notes: "Mock provider float for local development",
+          lastSyncedAt: new Date(now),
+        },
+      ]);
+    } catch (error) {
+      if (!isMissingRelationError(error)) throw error;
+      caps.floatTable = false;
+      console.warn("[flexidata] provider_float_balances missing; skipped the float seed");
+    }
+  }
 
   const plans: (typeof bundlePlans.$inferInsert)[] = [];
   const add = (
@@ -93,7 +110,7 @@ async function runSeed(): Promise<void> {
       network,
       category,
       label,
-      providerProductCode: providerProductCode(network, category, label),
+      providerProductCode: deriveProviderProductCode(network, category, label),
       validity,
       price,
       retailPrice: retail,
@@ -142,7 +159,13 @@ async function runSeed(): Promise<void> {
   add("TELECEL", "gifting", "10GB", "30 days", "42.00", "52.00");
   add("TELECEL", "gifting", "20GB", "30 days", "78.00", "98.00");
 
-  await db.insert(bundlePlans).values(plans);
+  await withSchemaFallback(async (compat) => {
+    if (isGatewaySchemaComplete(compat, "bundle_plans")) {
+      await db.insert(bundlePlans).values(plans);
+      return;
+    }
+    await db.execute(buildCompatInsert(compat, "bundle_plans", BUNDLE_PLAN_INSERT_FIELDS, plans));
+  }, "seed bundle plans");
 
   const tx = (
     ref: string,
@@ -184,7 +207,7 @@ async function runSeed(): Promise<void> {
     createdAt: new Date(now - agoMs),
   });
 
-  await db.insert(transactions).values([
+  const seedTxRows = [
     tx(
       makeRef(),
       "data",
@@ -328,7 +351,17 @@ async function runSeed(): Promise<void> {
       null,
       9 * D,
     ),
-  ]);
+  ];
+
+  await withSchemaFallback(async (compat) => {
+    if (isGatewaySchemaComplete(compat, "transactions")) {
+      await db.insert(transactions).values(seedTxRows);
+      return;
+    }
+    await db.execute(
+      buildCompatInsert(compat, "transactions", TRANSACTION_INSERT_FIELDS, seedTxRows),
+    );
+  }, "seed demo transactions");
 
   await db.insert(priceAlerts).values([
     {

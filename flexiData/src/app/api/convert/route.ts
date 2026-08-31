@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { transactions, wallets } from "@/db/schema";
-import { getWalletRow } from "@/lib/data";
+import { wallets } from "@/db/schema";
+import { getWalletRow, insertTransactionRow } from "@/lib/data";
 import { conversionFeeRate } from "@/lib/constants";
 import { groupPhone, isValidPhone, makeRef } from "@/lib/format";
 
@@ -41,7 +41,7 @@ export async function POST(req: Request) {
         .where(eq(wallets.id, wallet.id));
     }
 
-    await db.insert(transactions).values({
+    await insertTransactionRow({
       ref,
       walletId: wallet.id,
       type: "conversion",
@@ -54,7 +54,6 @@ export async function POST(req: Request) {
       network,
       recipient: phone,
     });
-
     return Response.json({
       ok: true,
       status,

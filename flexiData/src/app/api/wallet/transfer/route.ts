@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { transactions, wallets } from "@/db/schema";
-import { getWalletRow } from "@/lib/data";
+import { wallets } from "@/db/schema";
+import { getWalletRow, insertTransactionRow } from "@/lib/data";
 import { groupPhone, isValidPhone, makeRef } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -34,7 +34,7 @@ export async function POST(req: Request) {
     const ref = makeRef("TR");
 
     await db.update(wallets).set({ balance: newBalance.toFixed(2) }).where(eq(wallets.id, wallet.id));
-    await db.insert(transactions).values({
+    await insertTransactionRow({
       ref,
       walletId: wallet.id,
       type: "transfer",
@@ -47,7 +47,6 @@ export async function POST(req: Request) {
       network: null,
       recipient: account,
     });
-
     return Response.json({ ok: true, status: "successful", ref, balance: newBalance });
   } catch (e) {
     console.error("transfer error", e);

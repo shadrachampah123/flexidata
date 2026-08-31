@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { providerFloatBalances } from "@/db/schema";
 import { toGhanaMsisdn } from "@/lib/format";
+import { PROVIDER_FLOAT_TABLE, getSchemaCapabilities, isMissingRelationError } from "@/lib/schema-compat";
 
 export type GatewayTxStatus = "successful" | "pending" | "failed" | "reversed";
 export type GatewayFulfillmentStatus =
@@ -107,6 +108,18 @@ function envMethod(key: string, defaultValue: HttpMethod): HttpMethod {
 function envNumber(key: string, defaultValue: number): number {
   const value = Number(process.env[key]);
   return Number.isFinite(value) && value > 0 ? value : defaultValue;
+}
+
+/**
+ * Deterministic aggregator SKU for a plan, used when the database has no
+ * `bundle_plans.provider_product_code` column (or it has not been populated
+ * with real SKUs yet).
+ */
+export function deriveProviderProductCode(network: string, category: string, label: string): string {
+  return `${network}-${category}-${label}`
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toUpperCase();
 }
 
 export function getDataProviderCode(): string {
@@ -485,20 +498,42 @@ export async function submitDataBundleOrder(order: DataBundleOrder): Promise<Gat
   };
 }
 
+/**
+ * Read the cached float row for a network. The ledger is optional by design: a
+ * database that predates the gateway rollout has no `provider_float_balances`
+ * table yet, and a missing ledger must never block a customer purchase —
+ * `null` means "no float data available".
+ */
 export async function getStoredProviderFloatBalance(
   network: string,
 ): Promise<StoredFloatBalance | null> {
+  const caps = await getSchemaCapabilities();
+  if (!caps.floatTable) return null;
+
   const providerCode = getDataProviderCode();
-  const rows = await db
-    .select()
-    .from(providerFloatBalances)
-    .where(
-      and(
-        eq(providerFloatBalances.providerCode, providerCode),
-        eq(providerFloatBalances.network, network),
-      ),
-    )
-    .limit(1);
+  let rows: (typeof providerFloatBalances.$inferSelect)[];
+
+  try {
+    rows = await db
+      .select()
+      .from(providerFloatBalances)
+      .where(
+        and(
+          eq(providerFloatBalances.providerCode, providerCode),
+          eq(providerFloatBalances.network, network),
+        ),
+      )
+      .limit(1);
+  } catch (error) {
+    if (isMissingRelationError(error)) {
+      caps.floatTable = false;
+      console.warn(
+        `[flexidata] ${PROVIDER_FLOAT_TABLE} is not available yet; float tracking is disabled until the schema is pushed.`,
+      );
+      return null;
+    }
+    throw error;
+  }
 
   const row = rows[0];
   if (!row) return null;
@@ -513,6 +548,10 @@ export async function getStoredProviderFloatBalance(
   };
 }
 
+/**
+ * Persist a float snapshot. Returns false when the ledger is unavailable, which
+ * callers must treat as "skipped" rather than an error.
+ */
 export async function upsertProviderFloatBalance(input: {
   providerCode?: string;
   network: string;
@@ -523,37 +562,51 @@ export async function upsertProviderFloatBalance(input: {
   lastStatus?: string | null;
   notes?: string | null;
   lastSyncedAt?: Date | null;
-}): Promise<void> {
+}): Promise<boolean> {
+  const caps = await getSchemaCapabilities();
+  if (!caps.floatTable) return false;
+
   const providerCode = input.providerCode ?? getDataProviderCode();
   const now = new Date();
 
-  await db
-    .insert(providerFloatBalances)
-    .values({
-      providerCode,
-      network: input.network,
-      availableBalance: input.availableBalance.toFixed(2),
-      reservedBalance: (input.reservedBalance ?? 0).toFixed(2),
-      lowBalanceThreshold: (input.lowBalanceThreshold ?? 0).toFixed(2),
-      lastReference: input.lastReference ?? null,
-      lastStatus: input.lastStatus ?? null,
-      notes: input.notes ?? null,
-      lastSyncedAt: input.lastSyncedAt ?? now,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: [providerFloatBalances.providerCode, providerFloatBalances.network],
-      set: {
-        availableBalance: input.availableBalance.toFixed(2),
-        reservedBalance: (input.reservedBalance ?? 0).toFixed(2),
-        lowBalanceThreshold: (input.lowBalanceThreshold ?? 0).toFixed(2),
-        lastReference: input.lastReference ?? null,
-        lastStatus: input.lastStatus ?? null,
-        notes: input.notes ?? null,
-        lastSyncedAt: input.lastSyncedAt ?? now,
-        updatedAt: now,
-      },
-    });
+  const values = {
+    providerCode,
+    network: input.network,
+    availableBalance: input.availableBalance.toFixed(2),
+    reservedBalance: (input.reservedBalance ?? 0).toFixed(2),
+    lowBalanceThreshold: (input.lowBalanceThreshold ?? 0).toFixed(2),
+    lastReference: input.lastReference ?? null,
+    lastStatus: input.lastStatus ?? null,
+    notes: input.notes ?? null,
+    lastSyncedAt: input.lastSyncedAt ?? now,
+    updatedAt: now,
+  };
+
+  try {
+    await db
+      .insert(providerFloatBalances)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [providerFloatBalances.providerCode, providerFloatBalances.network],
+        set: {
+          availableBalance: values.availableBalance,
+          reservedBalance: values.reservedBalance,
+          lowBalanceThreshold: values.lowBalanceThreshold,
+          lastReference: values.lastReference,
+          lastStatus: values.lastStatus,
+          notes: values.notes,
+          lastSyncedAt: values.lastSyncedAt,
+          updatedAt: values.updatedAt,
+        },
+      });
+    return true;
+  } catch (error) {
+    if (isMissingRelationError(error)) {
+      caps.floatTable = false;
+      return false;
+    }
+    throw error;
+  }
 }
 
 export async function syncProviderFloatBalance(network: "MTN" | "TELECEL"): Promise<number | null> {
