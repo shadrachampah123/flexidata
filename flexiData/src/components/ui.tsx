@@ -74,6 +74,7 @@ export function StatusBadge({ status }: { status: string }) {
     successful: { dot: "bg-emerald-500", text: "text-emerald-600 dark:text-emerald-400" },
     pending: { dot: "bg-amber-500", text: "text-amber-600 dark:text-amber-400", pulse: true },
     failed: { dot: "bg-rose-500", text: "text-rose-600 dark:text-rose-400" },
+    reversed: { dot: "bg-slate-500", text: "text-slate-600 dark:text-slate-400" },
   };
   const s = map[status] ?? map.pending;
   return (

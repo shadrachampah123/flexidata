@@ -4,7 +4,7 @@ A sleek, mobile-first **data bundle & airtime vending app** for Ghana. Buy disco
 Telecel bundles, top up airtime, convert airtime to cash, fund your wallet, schedule auto
 top-ups and earn rewards — all in one place.
 
-> Simulated vending environment — no real money or network charges move here.
+> Simulated by default in local development. Set the data gateway environment variables below to connect a real Ghanaian data-API provider for MTN / Telecel fulfillment.
 
 ## Stack
 
@@ -56,19 +56,33 @@ flexiData/
 
 ## Environment
 
-| Variable       | Description                            |
-| -------------- | -------------------------------------- |
-| `DATABASE_URL` | PostgreSQL connection string (required)|
+| Variable | Description |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL connection string (required) |
+| `DATA_API_PROVIDER` | Data gateway adapter to use: `mock` for local dev, or your production provider slug |
+| `DATA_API_BASE_URL` | Base URL for your Ghanaian data-API gateway/provider |
+| `DATA_API_PURCHASE_PATH` | Relative path used to submit MTN / Telecel data orders |
+| `DATA_API_BALANCE_PATH` | Optional path used to sync provider float balances |
+| `DATA_API_AUTH_TYPE` | Auth mode for the provider: `none`, `basic`, `bearer`, or `headers` |
+| `DATA_API_KEY` / `DATA_API_SECRET` / `DATA_API_TOKEN` | Provider credentials, depending on the auth mode |
+| `DATA_API_ACCOUNT_ID` | Optional merchant/account identifier required by some aggregators |
+| `DATA_API_CALLBACK_URL` | Public callback URL the provider can call after fulfilling a bundle |
+| `DATA_API_WEBHOOK_SECRET` | Shared secret used to verify callback requests |
+| `DATA_API_TIMEOUT_MS` | Backend timeout for provider requests |
+| `DATA_API_SYNC_FLOAT_ON_PURCHASE` | Whether to sync cached float balances before purchase attempts |
 
 ## Deploying to Vercel (with Neon)
 
 1. Merge this branch into `main` (or connect the branch you deploy from).
 2. In Vercel, **Add New → Project** and import the repo. Set the **Root
    Directory** to `flexiData`.
-3. Add one **Environment Variable** (all three scopes: Production, Preview,
-   Development):
+3. Add the required **Environment Variables** (all three scopes: Production,
+   Preview, Development):
    - `DATABASE_URL` = your Neon **pooled** connection string ending in
      `?sslmode=require` (or `?sslmode=verify-full`).
+   - `DATA_API_PROVIDER`, `DATA_API_BASE_URL`, `DATA_API_PURCHASE_PATH`, and the
+     matching auth credentials for your Ghanaian data gateway.
+   - `DATA_API_CALLBACK_URL` = your public `/api/purchase/callback` endpoint.
 4. Deploy, then open the site once so it can seed demo data.
 
 ### If you see "We hit a snag"

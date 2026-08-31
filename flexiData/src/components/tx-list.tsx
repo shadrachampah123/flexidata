@@ -23,7 +23,7 @@ const ICONS: Record<string, { icon: LucideIcon; cls: string }> = {
 export function TxItem({ t, showDate }: { t: TxDTO; showDate?: boolean }) {
   const conf = ICONS[t.type] ?? ICONS.data;
   const Icon = conf.icon;
-  const failed = t.status === "failed";
+  const failed = t.status === "failed" || t.status === "reversed";
   const signed = t.direction === "in" ? t.amount : -t.amount;
 
   return (

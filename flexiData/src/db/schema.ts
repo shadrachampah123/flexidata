@@ -7,6 +7,8 @@ import {
   boolean,
   timestamp,
   pgEnum,
+  jsonb,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 export const txTypeEnum = pgEnum("tx_type", [
@@ -18,10 +20,15 @@ export const txTypeEnum = pgEnum("tx_type", [
   "redemption",
 ]);
 
-export const txStatusEnum = pgEnum("tx_status", [
-  "successful",
-  "pending",
+export const txStatusEnum = pgEnum("tx_status", ["successful", "pending", "failed", "reversed"]);
+
+export const fulfillmentStatusEnum = pgEnum("fulfillment_status", [
+  "queued",
+  "submitted",
+  "processing",
+  "delivered",
   "failed",
+  "refunded",
 ]);
 
 export const directionEnum = pgEnum("direction", ["in", "out"]);
@@ -43,6 +50,7 @@ export const bundlePlans = pgTable("bundle_plans", {
   network: varchar("network", { length: 10 }).notNull(), // MTN | TELECEL
   category: varchar("category", { length: 40 }).notNull(),
   label: varchar("label", { length: 80 }).notNull(),
+  providerProductCode: varchar("provider_product_code", { length: 80 }).notNull(),
   validity: varchar("validity", { length: 60 }).notNull(),
   price: numeric("price", { precision: 10, scale: 2 }).notNull(),
   retailPrice: numeric("retail_price", { precision: 10, scale: 2 }).notNull(),
@@ -56,6 +64,7 @@ export const transactions = pgTable("transactions", {
   walletId: integer("wallet_id").notNull(),
   type: txTypeEnum("type").notNull(),
   status: txStatusEnum("status").notNull(),
+  fulfillmentStatus: fulfillmentStatusEnum("fulfillment_status").notNull().default("queued"),
   direction: directionEnum("direction").notNull(),
   title: varchar("title", { length: 140 }).notNull(),
   subtitle: varchar("subtitle", { length: 200 }).notNull().default(""),
@@ -63,8 +72,42 @@ export const transactions = pgTable("transactions", {
   points: integer("points").notNull().default(0),
   network: varchar("network", { length: 10 }),
   recipient: varchar("recipient", { length: 20 }),
+  provider: varchar("provider", { length: 40 }),
+  providerProductCode: varchar("provider_product_code", { length: 80 }),
+  providerReference: varchar("provider_reference", { length: 120 }),
+  providerStatus: varchar("provider_status", { length: 80 }),
+  providerMessage: varchar("provider_message", { length: 240 }),
+  fulfillmentAttempts: integer("fulfillment_attempts").notNull().default(0),
+  chargedAt: timestamp("charged_at", { withTimezone: true }),
+  fulfilledAt: timestamp("fulfilled_at", { withTimezone: true }),
+  refundedAt: timestamp("refunded_at", { withTimezone: true }),
+  lastProviderSyncAt: timestamp("last_provider_sync_at", { withTimezone: true }),
+  providerPayload: jsonb("provider_payload"),
+  providerResponse: jsonb("provider_response"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const providerFloatBalances = pgTable(
+  "provider_float_balances",
+  {
+    id: serial("id").primaryKey(),
+    providerCode: varchar("provider_code", { length: 40 }).notNull(),
+    network: varchar("network", { length: 10 }).notNull(),
+    currency: varchar("currency", { length: 8 }).notNull().default("GHS"),
+    availableBalance: numeric("available_balance", { precision: 12, scale: 2 }).notNull().default("0"),
+    reservedBalance: numeric("reserved_balance", { precision: 12, scale: 2 }).notNull().default("0"),
+    lowBalanceThreshold: numeric("low_balance_threshold", { precision: 12, scale: 2 }).notNull().default("0"),
+    lastReference: varchar("last_reference", { length: 40 }),
+    lastStatus: varchar("last_status", { length: 80 }),
+    notes: varchar("notes", { length: 240 }),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("provider_float_balances_provider_network_idx").on(table.providerCode, table.network),
+  ],
+);
 
 export const scheduledTopups = pgTable("scheduled_topups", {
   id: serial("id").primaryKey(),

@@ -1,6 +1,13 @@
-import { db } from "@/db";
-import { bundlePlans, priceAlerts, scheduledTopups, transactions, wallets } from "@/db/schema";
 import { sql } from "drizzle-orm";
+import { db } from "@/db";
+import {
+  bundlePlans,
+  priceAlerts,
+  providerFloatBalances,
+  scheduledTopups,
+  transactions,
+  wallets,
+} from "@/db/schema";
 import { makeRef } from "@/lib/format";
 
 let seedPromise: Promise<void> | null = null;
@@ -16,6 +23,17 @@ export function ensureSeeded(): Promise<void> {
     });
   }
   return seedPromise;
+}
+
+function providerProductCode(network: string, category: string, label: string): string {
+  return `${network}-${category}-${label}`.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toUpperCase();
+}
+
+function statusToFulfillment(status: "successful" | "pending" | "failed" | "reversed") {
+  if (status === "successful") return "delivered" as const;
+  if (status === "pending") return "processing" as const;
+  if (status === "reversed") return "refunded" as const;
+  return "failed" as const;
 }
 
 async function runSeed(): Promise<void> {
@@ -36,6 +54,31 @@ async function runSeed(): Promise<void> {
     })
     .onConflictDoNothing();
 
+  await db.insert(providerFloatBalances).values([
+    {
+      providerCode: "mock",
+      network: "MTN",
+      currency: "GHS",
+      availableBalance: "2500.00",
+      reservedBalance: "0.00",
+      lowBalanceThreshold: "300.00",
+      lastStatus: "seeded",
+      notes: "Mock provider float for local development",
+      lastSyncedAt: new Date(now),
+    },
+    {
+      providerCode: "mock",
+      network: "TELECEL",
+      currency: "GHS",
+      availableBalance: "2500.00",
+      reservedBalance: "0.00",
+      lowBalanceThreshold: "300.00",
+      lastStatus: "seeded",
+      notes: "Mock provider float for local development",
+      lastSyncedAt: new Date(now),
+    },
+  ]);
+
   const plans: (typeof bundlePlans.$inferInsert)[] = [];
   const add = (
     network: string,
@@ -50,6 +93,7 @@ async function runSeed(): Promise<void> {
       network,
       category,
       label,
+      providerProductCode: providerProductCode(network, category, label),
       validity,
       price,
       retailPrice: retail,
@@ -103,7 +147,7 @@ async function runSeed(): Promise<void> {
   const tx = (
     ref: string,
     type: "data" | "airtime" | "conversion" | "deposit" | "transfer" | "redemption",
-    status: "successful" | "pending" | "failed",
+    status: "successful" | "pending" | "failed" | "reversed",
     direction: "in" | "out",
     title: string,
     subtitle: string,
@@ -117,6 +161,7 @@ async function runSeed(): Promise<void> {
     walletId: 1,
     type,
     status,
+    fulfillmentStatus: statusToFulfillment(status),
     direction,
     title,
     subtitle,
@@ -124,21 +169,165 @@ async function runSeed(): Promise<void> {
     points,
     network,
     recipient,
+    provider: type === "data" ? "mock" : null,
+    providerProductCode: null,
+    providerReference: type === "data" ? `mock-${ref}` : null,
+    providerStatus: type === "data" ? status : null,
+    providerMessage: type === "data" ? subtitle : null,
+    fulfillmentAttempts: type === "data" ? 1 : 0,
+    chargedAt: direction === "out" && status !== "failed" ? new Date(now - agoMs) : null,
+    fulfilledAt: status === "successful" ? new Date(now - agoMs) : null,
+    refundedAt: status === "reversed" ? new Date(now - agoMs) : null,
+    lastProviderSyncAt: type === "data" ? new Date(now - agoMs) : null,
+    providerPayload: type === "data" ? { seeded: true, ref } : null,
+    providerResponse: type === "data" ? { status, seeded: true, ref } : null,
     createdAt: new Date(now - agoMs),
   });
 
   await db.insert(transactions).values([
-    tx(makeRef(), "data", "pending", "out", "Telecel 10GB Data", "To 020 987 6543", "31.00", 0, "TELECEL", "0209876543", 4 * 60000),
-    tx(makeRef(), "data", "successful", "out", "MTN 5GB SME Data", "To 027 345 6789", "17.50", 35, "MTN", "0273456789", 2 * H),
-    tx(makeRef(), "deposit", "successful", "in", "Wallet Top-up", "MTN MoMo • 053 219 8840", "50.00", 0, "MTN", null, 1 * D),
-    tx(makeRef(), "airtime", "successful", "out", "MTN Airtime GH₵ 10", "To 024 412 3456 • 2% off", "9.80", 20, "MTN", "0244123456", 2 * D),
-    tx(makeRef(), "conversion", "successful", "in", "Airtime → Cash", "From 024 412 3456 • Fee 12%", "17.60", 0, "MTN", "0244123456", 3 * D),
-    tx(makeRef(), "data", "failed", "out", "MTN 15GB UP2U", "To 055 678 9012 • Not charged", "48.00", 0, "MTN", "0556789012", 3 * D + 5 * H),
-    tx(makeRef(), "redemption", "successful", "out", "Points → GH₵ 5 Airtime", "300 pts redeemed", "0.00", -300, null, null, 4 * D),
-    tx(makeRef(), "airtime", "successful", "out", "Telecel Airtime GH₵ 20", "To 020 987 6543 • 2% off", "19.60", 39, "TELECEL", "0209876543", 5 * D),
-    tx(makeRef(), "transfer", "successful", "out", "Wallet Transfer", "To wallet 053 211 8329", "30.00", 0, null, "0532118329", 6 * D),
-    tx(makeRef(), "data", "successful", "out", "MTN 2GB UP2U", "To 050 123 4567", "8.50", 17, "MTN", "0501234567", 8 * D),
-    tx(makeRef(), "deposit", "successful", "in", "Wallet Top-up", "Telecel Cash • 020 987 6543", "100.00", 0, "TELECEL", null, 9 * D),
+    tx(
+      makeRef(),
+      "data",
+      "pending",
+      "out",
+      "Telecel 10GB Data",
+      "To 020 987 6543",
+      "31.00",
+      0,
+      "TELECEL",
+      "0209876543",
+      4 * 60000,
+    ),
+    tx(
+      makeRef(),
+      "data",
+      "successful",
+      "out",
+      "MTN 5GB SME Data",
+      "To 027 345 6789",
+      "17.50",
+      35,
+      "MTN",
+      "0273456789",
+      2 * H,
+    ),
+    tx(
+      makeRef(),
+      "deposit",
+      "successful",
+      "in",
+      "Wallet Top-up",
+      "MTN MoMo • 053 219 8840",
+      "50.00",
+      0,
+      "MTN",
+      null,
+      1 * D,
+    ),
+    tx(
+      makeRef(),
+      "airtime",
+      "successful",
+      "out",
+      "MTN Airtime GH₵ 10",
+      "To 024 412 3456 • 2% off",
+      "9.80",
+      20,
+      "MTN",
+      "0244123456",
+      2 * D,
+    ),
+    tx(
+      makeRef(),
+      "conversion",
+      "successful",
+      "in",
+      "Airtime → Cash",
+      "From 024 412 3456 • Fee 12%",
+      "17.60",
+      0,
+      "MTN",
+      "0244123456",
+      3 * D,
+    ),
+    tx(
+      makeRef(),
+      "data",
+      "failed",
+      "out",
+      "MTN 15GB UP2U",
+      "To 055 678 9012 • Not charged",
+      "48.00",
+      0,
+      "MTN",
+      "0556789012",
+      3 * D + 5 * H,
+    ),
+    tx(
+      makeRef(),
+      "redemption",
+      "successful",
+      "out",
+      "Points → GH₵ 5 Airtime",
+      "300 pts redeemed",
+      "0.00",
+      -300,
+      null,
+      null,
+      4 * D,
+    ),
+    tx(
+      makeRef(),
+      "airtime",
+      "successful",
+      "out",
+      "Telecel Airtime GH₵ 20",
+      "To 020 987 6543 • 2% off",
+      "19.60",
+      39,
+      "TELECEL",
+      "0209876543",
+      5 * D,
+    ),
+    tx(
+      makeRef(),
+      "transfer",
+      "successful",
+      "out",
+      "Wallet Transfer",
+      "To wallet 053 211 8329",
+      "30.00",
+      0,
+      null,
+      "0532118329",
+      6 * D,
+    ),
+    tx(
+      makeRef(),
+      "data",
+      "successful",
+      "out",
+      "MTN 2GB UP2U",
+      "To 050 123 4567",
+      "8.50",
+      17,
+      "MTN",
+      "0501234567",
+      8 * D,
+    ),
+    tx(
+      makeRef(),
+      "deposit",
+      "successful",
+      "in",
+      "Wallet Top-up",
+      "Telecel Cash • 020 987 6543",
+      "100.00",
+      0,
+      "TELECEL",
+      null,
+      9 * D,
+    ),
   ]);
 
   await db.insert(priceAlerts).values([
@@ -162,11 +351,13 @@ async function runSeed(): Promise<void> {
     },
   ]);
 
-  await db.insert(scheduledTopups).values({
-    walletId: 1,
-    network: "MTN",
-    planLabel: "5GB SME Data",
-    price: "17.50",
+  await db
+    .insert(scheduledTopups)
+    .values({
+      walletId: 1,
+      network: "MTN",
+      planLabel: "5GB SME Data",
+      price: "17.50",
       recipient: "0273456789",
       dayOfMonth: 1,
     })
