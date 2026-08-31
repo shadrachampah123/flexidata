@@ -2,7 +2,6 @@
 
 import { useEffect, type ReactNode } from "react";
 import { X } from "lucide-react";
-import { cn } from "@/lib/format";
 
 export function Sheet({
   open,
@@ -52,7 +51,7 @@ export function Sheet({
               </button>
             </div>
           )}
-          <div className={cn()}>{children}</div>
+          <div>{children}</div>
         </div>
       </div>
     </div>
