@@ -72,6 +72,7 @@ export function BuyData({
         body: JSON.stringify({
           kind: "data",
           network,
+          category: activeCat?.id,
           planLabel: plan.label,
           recipient: phone,
         }),
