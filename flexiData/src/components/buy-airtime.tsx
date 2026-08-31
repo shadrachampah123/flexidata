@@ -19,7 +19,7 @@ export function BuyAirtime({ wallet }: { wallet: WalletDTO }) {
   const [network, setNetwork] = useState<Network>("MTN");
   const [amount, setAmount] = useState<number | null>(10);
   const [custom, setCustom] = useState("");
-  const [phone, setPhone] = useState("");
+  const [phone, setPhone] = useState(wallet.number);
   const [balance, setBalance] = useState(wallet.balance);
   const [phase, setPhase] = useState<"idle" | "confirm" | "processing" | "result">("idle");
   const [result, setResult] = useState<FlowResult | null>(null);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   CreditCard,
@@ -28,7 +28,15 @@ const METHODS: Method[] = [
 const FUND_CHIPS = [20, 50, 100, 200, 500];
 const TRANSFER_CHIPS = [10, 20, 50, 100];
 
-export function WalletTools({ wallet, initialTab }: { wallet: WalletDTO; initialTab: "fund" | "transfer" }) {
+export function WalletTools({
+  wallet,
+  initialTab,
+  pendingFundingRef,
+}: {
+  wallet: WalletDTO;
+  initialTab: "fund" | "transfer";
+  pendingFundingRef?: string | null;
+}) {
   const router = useRouter();
   const [tab, setTab] = useState<"fund" | "transfer">(initialTab);
   const [method, setMethod] = useState("momo_mtn");
@@ -54,6 +62,30 @@ export function WalletTools({ wallet, initialTab }: { wallet: WalletDTO; initial
   const insufficient = trAmount > balance;
   const transferReady = trAmount >= 1 && isValidPhone(dest) && !insufficient;
 
+  // Returning from a Paystack redirect: confirm the deposit, then refresh.
+  useEffect(() => {
+    if (!pendingFundingRef) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/payments/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ref: pendingFundingRef }),
+        });
+        const data = (await res.json()) as { ok: boolean; status?: string };
+        if (!cancelled && data.ok) {
+          router.refresh();
+        }
+      } catch {
+        // The webhook will settle it server-side even if this tab is gone.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingFundingRef, router]);
+
   const submit = async () => {
     setPhase("processing");
     try {
@@ -69,10 +101,22 @@ export function WalletTools({ wallet, initialTab }: { wallet: WalletDTO; initial
       const data = (await res.json()) as {
         ok: boolean;
         error?: string;
+        code?: string;
         ref?: string;
         balance?: number;
         method?: string;
+        status?: string;
+        authorizationUrl?: string;
       };
+      if (res.status === 401 || data.code === "unauthenticated") {
+        router.push("/login?next=/wallet");
+        return;
+      }
+      // Real gateway (Paystack): redirect to the hosted checkout.
+      if (data.status === "pending" && data.authorizationUrl) {
+        window.location.href = data.authorizationUrl;
+        return;
+      }
       if (data.error === "insufficient_funds") {
         setResult({ status: "failed", headline: "Insufficient balance", message: "Top up your wallet and try again." });
         setPhase("result");

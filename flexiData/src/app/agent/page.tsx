@@ -1,11 +1,13 @@
-import { getAgentProfile, getWallet } from "@/lib/data";
+import { getAgentProfile } from "@/lib/data";
 import { Agent } from "@/components/agent";
 import { PageHeader } from "@/components/page-header";
+import { requireSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
 export default async function AgentPage() {
-  const [wallet, profile] = await Promise.all([getWallet(), getAgentProfile()]);
+  const { wallet } = await requireSession();
+  const profile = await getAgentProfile(wallet.id);
   return (
     <div>
       <PageHeader

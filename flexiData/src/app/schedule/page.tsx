@@ -1,11 +1,13 @@
-import { getPlans, getSchedules, getWallet } from "@/lib/data";
+import { getPlans, getSchedules } from "@/lib/data";
 import { Schedule } from "@/components/schedule";
 import { PageHeader } from "@/components/page-header";
+import { requireSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
 export default async function SchedulePage() {
-  const [wallet, schedules, plans] = await Promise.all([getWallet(), getSchedules(), getPlans()]);
+  const { wallet } = await requireSession();
+  const [schedules, plans] = await Promise.all([getSchedules(wallet.id), getPlans()]);
   return (
     <div>
       <PageHeader

@@ -1,13 +1,15 @@
 import Link from "next/link";
 import { BellRing, ChevronRight, Flame } from "lucide-react";
-import { getActiveAlerts, getWallet } from "@/lib/data";
+import { getActiveAlerts } from "@/lib/data";
 import { PageHeader } from "@/components/page-header";
+import { requireSession } from "@/lib/session";
 import { cn } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
 export default async function AlertsPage() {
-  const [alerts, wallet] = await Promise.all([getActiveAlerts(), getWallet()]);
+  const { wallet } = await requireSession();
+  const alerts = await getActiveAlerts();
 
   return (
     <div>
@@ -47,8 +49,8 @@ export default async function AlertsPage() {
       <div className="mt-6 flex items-center gap-3 rounded-3xl border border-dashed border-brand/40 bg-brand/[0.06] px-4 py-4">
         <BellRing className="h-5 w-5 shrink-0 text-brand-deep dark:text-brand" />
         <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-          You&rsquo;ll see a banner on your dashboard whenever a new promotional rate drops. No spam —
-          only real savings.
+          You&rsquo;ll see a banner on your dashboard whenever a new promotional rate drops. Manage
+          your notification preferences in <Link href="/settings" className="font-bold underline">Settings</Link>.
         </p>
       </div>
     </div>

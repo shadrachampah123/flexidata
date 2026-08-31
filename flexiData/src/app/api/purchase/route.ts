@@ -1,7 +1,9 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { bundlePlans, transactions, wallets } from "@/db/schema";
-import { getWalletRow, insertTransactionRow } from "@/lib/data";
+import { insertTransactionRow } from "@/lib/data";
+import { requireAccount } from "@/lib/api-auth";
+import { creditReferralReward } from "@/lib/referrals";
 import {
   DataProviderConfigError,
   DataProviderFloatError,
@@ -114,6 +116,11 @@ function clampText(value: string | null | undefined, max = 200): string {
 
 export async function POST(req: Request) {
   try {
+    // Authenticate first — unauthenticated callers must never reach the
+    // money-moving logic or receive anything but a clean 401.
+    const auth = await requireAccount();
+    if (!auth.ok) return auth.response;
+
     const body = (await req.json()) as Body;
     const { kind, network, recipient } = body;
 
@@ -124,7 +131,7 @@ export async function POST(req: Request) {
       return Response.json({ ok: false, error: "Enter a valid recipient number" }, { status: 400 });
     }
 
-    const wallet = await getWalletRow();
+    const wallet = auth.wallet;
     const balance = Number(wallet.balance);
     const ref = makeRef();
 
@@ -237,6 +244,12 @@ export async function POST(req: Request) {
         });
       }
 
+      if (status === "successful") {
+        await creditReferralReward(auth.userId, wallet.id).catch((e) =>
+          console.error("referral reward error", e),
+        );
+      }
+
       return Response.json({
         ok: true,
         status,
@@ -298,6 +311,12 @@ export async function POST(req: Request) {
       };
 
       await insertTransactionRow(airtimeValues);
+
+      if (status === "successful") {
+        await creditReferralReward(auth.userId, wallet.id).catch((e) =>
+          console.error("referral reward error", e),
+        );
+      }
 
       return Response.json({
         ok: true,

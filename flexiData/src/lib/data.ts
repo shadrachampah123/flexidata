@@ -5,6 +5,7 @@ import {
   priceAlerts,
   scheduledTopups,
   transactions,
+  users,
   wallets,
 } from "@/db/schema";
 import { desc, eq, asc } from "drizzle-orm";
@@ -25,6 +26,7 @@ export type WalletDTO = {
   isAgent: boolean;
   agentTier: string | null;
   referralCode: string | null;
+  email: string;
 };
 
 export type PlanDTO = {
@@ -117,14 +119,30 @@ const PLAN_SELECT = {
   sortOrder: bundlePlans.sortOrder,
 };
 
-export async function getWalletRow(): Promise<WalletRow> {
+export class WalletNotFoundError extends Error {
+  constructor() {
+    super("This account has no wallet yet");
+    this.name = "WalletNotFoundError";
+  }
+}
+
+/**
+ * Fetch the wallet row for a signed-in user. Every authenticated flow goes
+ * through here instead of a hard-coded `id = 1`, so users only ever see and
+ * move their own money, points and ledger.
+ */
+export async function getWalletRowForUser(userId: number): Promise<WalletRow> {
   await ensureSeeded();
-  const row = await db.select().from(wallets).where(eq(wallets.id, 1)).limit(1);
-  if (!row[0]) throw new Error("Demo wallet missing");
+  const row = await db
+    .select()
+    .from(wallets)
+    .where(eq(wallets.userId, userId))
+    .limit(1);
+  if (!row[0]) throw new WalletNotFoundError();
   return row[0];
 }
 
-export function toWalletDTO(w: WalletRow): WalletDTO {
+export function toWalletDTO(w: WalletRow, email = ""): WalletDTO {
   return {
     id: w.id,
     name: w.name,
@@ -134,6 +152,7 @@ export function toWalletDTO(w: WalletRow): WalletDTO {
     isAgent: w.isAgent,
     agentTier: w.agentTier,
     referralCode: w.referralCode,
+    email,
   };
 }
 
@@ -154,23 +173,23 @@ function toTxDTO(t: TxRecord): TxDTO {
   };
 }
 
-export async function getRecentTransactions(limit = 6): Promise<TxDTO[]> {
+export async function getRecentTransactions(walletId: number, limit = 6): Promise<TxDTO[]> {
   await ensureSeeded();
   const rows = await db
     .select(TX_SELECT)
     .from(transactions)
-    .where(eq(transactions.walletId, 1))
+    .where(eq(transactions.walletId, walletId))
     .orderBy(desc(transactions.createdAt))
     .limit(limit);
   return rows.map(toTxDTO);
 }
 
-export async function getAllTransactions(): Promise<TxDTO[]> {
+export async function getAllTransactions(walletId: number): Promise<TxDTO[]> {
   await ensureSeeded();
   const rows = await db
     .select(TX_SELECT)
     .from(transactions)
-    .where(eq(transactions.walletId, 1))
+    .where(eq(transactions.walletId, walletId))
     .orderBy(desc(transactions.createdAt))
     .limit(100);
   return rows.map(toTxDTO);
@@ -201,12 +220,12 @@ export async function getActiveAlerts(): Promise<AlertDTO[]> {
   return rows.map((a) => ({ id: a.id, network: a.network, title: a.title, body: a.body, tag: a.tag }));
 }
 
-export async function getSchedules(): Promise<ScheduleDTO[]> {
+export async function getSchedules(walletId: number): Promise<ScheduleDTO[]> {
   await ensureSeeded();
   const rows = await db
     .select()
     .from(scheduledTopups)
-    .where(eq(scheduledTopups.walletId, 1))
+    .where(eq(scheduledTopups.walletId, walletId))
     .orderBy(asc(scheduledTopups.dayOfMonth));
   return rows.map((s) => ({
     id: s.id,
@@ -219,9 +238,13 @@ export async function getSchedules(): Promise<ScheduleDTO[]> {
   }));
 }
 
-export async function getAgentProfile(): Promise<AgentDTO | null> {
+export async function getAgentProfile(walletId: number): Promise<AgentDTO | null> {
   await ensureSeeded();
-  const rows = await db.select().from(agentProfiles).where(eq(agentProfiles.walletId, 1)).limit(1);
+  const rows = await db
+    .select()
+    .from(agentProfiles)
+    .where(eq(agentProfiles.walletId, walletId))
+    .limit(1);
   const a = rows[0];
   if (!a) return null;
   return {
@@ -231,6 +254,32 @@ export async function getAgentProfile(): Promise<AgentDTO | null> {
     commission: Number(a.commission),
     volume: Number(a.volume),
   };
+}
+
+/** Find another user's wallet by their registered phone number (P2P transfer). */
+export async function getWalletByPhone(phone: string): Promise<WalletRow | null> {
+  const rows = await db
+    .select()
+    .from(wallets)
+    .where(eq(wallets.number, phone))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function getUserByEmail(email: string) {
+  const rows = await db
+    .select({
+      id: users.id,
+      name: users.name,
+      email: users.email,
+      phone: users.phone,
+      passwordHash: users.passwordHash,
+      referralCode: users.referralCode,
+    })
+    .from(users)
+    .where(eq(users.email, email.toLowerCase().trim()))
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 /**
@@ -253,9 +302,4 @@ export async function insertTransactionRow(row: typeof transactions.$inferInsert
 
     await db.execute(buildCompatInsert(compat, "transactions", TRANSACTION_INSERT_FIELDS, [row]));
   }, "ledger write");
-}
-
-export async function getWallet(): Promise<WalletDTO> {
-  const w = await getWalletRow();
-  return toWalletDTO(w);
 }

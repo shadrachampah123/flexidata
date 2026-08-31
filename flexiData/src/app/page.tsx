@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { CalendarClock, ChevronRight, Zap } from "lucide-react";
-import { getActiveAlerts, getRecentTransactions, getSchedules, getWallet } from "@/lib/data";
+import { getActiveAlerts, getRecentTransactions, getSchedules } from "@/lib/data";
+import { requireSession } from "@/lib/session";
 import { WalletCard } from "@/components/wallet-card";
 import { ServiceGrid } from "@/components/service-grid";
 import { TxList } from "@/components/tx-list";
@@ -13,11 +14,11 @@ import { money, ordinal } from "@/lib/format";
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  const [wallet, txs, alerts, schedules] = await Promise.all([
-    getWallet(),
-    getRecentTransactions(7),
+  const { user, wallet } = await requireSession();
+  const [txs, alerts, schedules] = await Promise.all([
+    getRecentTransactions(wallet.id, 7),
     getActiveAlerts(),
-    getSchedules(),
+    getSchedules(wallet.id),
   ]);
 
   const first = wallet.name.split(" ")[0];
@@ -37,15 +38,20 @@ export default async function Home() {
           </div>
         </div>
         <div className="mt-4 flex items-center gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand to-amber-500 font-display text-sm font-bold text-ink shadow-[0_6px_16px_rgba(255,203,5,0.35)]">
-            {first[0]}
-          </span>
+          <Link href="/settings" className="shrink-0">
+            <span className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-brand to-amber-500 font-display text-sm font-bold text-ink shadow-[0_6px_16px_rgba(255,203,5,0.35)] transition-transform hover:scale-105">
+              {first[0]}
+            </span>
+          </Link>
           <div className="min-w-0 flex-1">
             <p className="text-[11px] font-semibold text-zinc-400">{greeting},</p>
             <h1 className="truncate font-display text-[17px] font-bold leading-tight tracking-tight">
               {first}
             </h1>
           </div>
+          <span className="hidden rounded-full border border-black/[0.06] px-2.5 py-1 text-[10px] font-bold text-zinc-500 dark:border-line dark:text-zinc-400 sm:block">
+            {wallet.number.replace(/(\d{3})(\d{3})(\d{4})/, "$1 $2 $3")}
+          </span>
         </div>
       </header>
 
@@ -110,13 +116,28 @@ export default async function Home() {
       {/* Recent transactions */}
       <div className="mt-7">
         <SectionTitle title="Recent transactions" action="See all" href="/history" />
-        <Card className="animate-fade-up overflow-hidden">
-          <TxList items={txs} showDate />
-        </Card>
+        {txs.length === 0 ? (
+          <Card className="animate-fade-up p-6 text-center">
+            <p className="text-sm font-bold">No transactions yet</p>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              Fund your wallet or buy your first bundle to get started.
+            </p>
+            <Link
+              href="/wallet"
+              className="mt-4 inline-flex rounded-xl bg-brand px-4 py-2.5 text-xs font-black text-ink"
+            >
+              Fund wallet
+            </Link>
+          </Card>
+        ) : (
+          <Card className="animate-fade-up overflow-hidden">
+            <TxList items={txs} showDate />
+          </Card>
+        )}
       </div>
 
       <p className="mt-8 text-center text-[10px] font-semibold tracking-wide text-zinc-400 dark:text-zinc-600">
-        {APP_NAME} • Simulated vending environment • No real money moves here
+        {APP_NAME} • Signed in as {user.email}
       </p>
     </div>
   );

@@ -75,6 +75,7 @@ export const FLOAT_COLS = [
 ];
 const WALLETS = [
   "id",
+  "user_id",
   "name",
   "number",
   "balance",
@@ -82,6 +83,47 @@ const WALLETS = [
   "is_agent",
   "agent_tier",
   "referral_code",
+  "created_at",
+];
+const USERS = [
+  "id",
+  "name",
+  "email",
+  "phone",
+  "password_hash",
+  "referral_code",
+  "referred_by",
+  "referral_rewarded_at",
+  "email_verified_at",
+  "notify_promos",
+  "notify_tx",
+  "is_admin",
+  "created_at",
+  "updated_at",
+];
+const SESSIONS = [
+  "id",
+  "user_id",
+  "token_hash",
+  "user_agent",
+  "ip",
+  "last_seen_at",
+  "created_at",
+  "expires_at",
+];
+const PASSWORD_RESETS = ["id", "user_id", "token_hash", "used_at", "expires_at", "created_at"];
+const DEPOSIT_REQUESTS = [
+  "id",
+  "ref",
+  "wallet_id",
+  "provider",
+  "method",
+  "amount",
+  "status",
+  "provider_reference",
+  "initiated_at",
+  "completed_at",
+  "provider_payload",
   "created_at",
 ];
 
@@ -92,6 +134,10 @@ function makeSimSchema(migrated: boolean): Schema {
 const schema: Schema = {
   tables: {
     wallets: WALLETS,
+    users: USERS,
+    sessions: SESSIONS,
+    password_resets: PASSWORD_RESETS,
+    deposit_requests: DEPOSIT_REQUESTS,
     transactions: migrated ? [...BASE_TX, ...GATEWAY_TX] : [...BASE_TX],
     bundle_plans: migrated ? [...BASE_PLANS, "provider_product_code"] : [...BASE_PLANS],
     provider_float_balances: migrated ? FLOAT_COLS : [],
@@ -107,7 +153,7 @@ const schema: Schema = {
       "active",
       "created_at",
     ],
-    agent_profiles: [],
+    agent_profiles: ["id", "wallet_id", "tier", "referral_code", "referrals", "commission", "volume", "created_at"],
   },
   enums: {
     tx_status: migrated
@@ -152,6 +198,10 @@ const stripQuotes = (value: string) => value.trim().replace(/"/g, "");
 class FakePg {
   rows: Record<string, Record<string, unknown>[]> = {
     wallets: [],
+    users: [],
+    sessions: [],
+    password_resets: [],
+    deposit_requests: [],
     transactions: [],
     bundle_plans: [],
     provider_float_balances: [],
@@ -313,8 +363,10 @@ class FakePg {
       return { rows: [{ enum_name: name, labels: this.schema.enums[name as "tx_status"] ?? [] }], rowCount: 1 };
     }
 
-    if (/select count\(\*\)::int as c from wallets/.test(lower)) {
-      return { rows: [{ c: this.rows.wallets.length }], rowCount: 1 };
+    const countMatch = lower.match(/select count\(\*\)::int as c from ([a-z_]+)/);
+    if (countMatch) {
+      const table = countMatch[1];
+      return { rows: [{ c: (this.rows[table] ?? []).length }], rowCount: 1 };
     }
 
     let m: RegExpMatchArray | null;

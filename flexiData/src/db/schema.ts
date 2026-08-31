@@ -18,6 +18,7 @@ export const txTypeEnum = pgEnum("tx_type", [
   "deposit",
   "transfer",
   "redemption",
+  "referral",
 ]);
 
 export const txStatusEnum = pgEnum("tx_status", ["successful", "pending", "failed", "reversed"]);
@@ -33,8 +34,72 @@ export const fulfillmentStatusEnum = pgEnum("fulfillment_status", [
 
 export const directionEnum = pgEnum("direction", ["in", "out"]);
 
+export const depositStatusEnum = pgEnum("deposit_status", [
+  "pending",
+  "successful",
+  "failed",
+  "abandoned",
+]);
+
+/**
+ * Registered FlexiData accounts. One user owns exactly one wallet
+ * (`wallets.userId`). Authentication is email + scrypt-hashed password;
+ * sessions live in the `sessions` table.
+ */
+export const users = pgTable(
+  "users",
+  {
+    id: serial("id").primaryKey(),
+    name: varchar("name", { length: 120 }).notNull(),
+    email: varchar("email", { length: 160 }).notNull().unique(),
+    phone: varchar("phone", { length: 20 }).notNull().unique(),
+    passwordHash: varchar("password_hash", { length: 255 }).notNull(),
+    referralCode: varchar("referral_code", { length: 20 }).notNull().unique(),
+    referredBy: integer("referred_by"),
+    referralRewardedAt: timestamp("referral_rewarded_at", { withTimezone: true }),
+    emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true }),
+    notifyPromos: boolean("notify_promos").notNull().default(true),
+    notifyTx: boolean("notify_tx").notNull().default(true),
+    isAdmin: boolean("is_admin").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("users_referred_by_idx").on(table.referredBy)],
+);
+
+/**
+ * Signed-in devices. The raw session token only ever lives in the user's
+ * httpOnly cookie; the database stores its SHA-256 hash so a database leak
+ * cannot be replayed as a session.
+ */
+export const sessions = pgTable("sessions", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  tokenHash: varchar("token_hash", { length: 128 }).notNull().unique(),
+  userAgent: varchar("user_agent", { length: 240 }),
+  ip: varchar("ip", { length: 64 }),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+/** Single-use password reset tokens (hashed at rest, 1 hour expiry). */
+export const passwordResets = pgTable("password_resets", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  tokenHash: varchar("token_hash", { length: 128 }).notNull().unique(),
+  usedAt: timestamp("used_at", { withTimezone: true }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const wallets = pgTable("wallets", {
   id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
   name: varchar("name", { length: 120 }).notNull(),
   number: varchar("number", { length: 20 }).notNull().unique(),
   balance: numeric("balance", { precision: 12, scale: 2 }).notNull().default("0"),
@@ -96,7 +161,9 @@ export const providerFloatBalances = pgTable(
     currency: varchar("currency", { length: 8 }).notNull().default("GHS"),
     availableBalance: numeric("available_balance", { precision: 12, scale: 2 }).notNull().default("0"),
     reservedBalance: numeric("reserved_balance", { precision: 12, scale: 2 }).notNull().default("0"),
-    lowBalanceThreshold: numeric("low_balance_threshold", { precision: 12, scale: 2 }).notNull().default("0"),
+    lowBalanceThreshold: numeric("low_balance_threshold", { precision: 12, scale: 2 })
+      .notNull()
+      .default("0"),
     lastReference: varchar("last_reference", { length: 40 }),
     lastStatus: varchar("last_status", { length: 80 }),
     notes: varchar("notes", { length: 240 }),
@@ -108,6 +175,26 @@ export const providerFloatBalances = pgTable(
     uniqueIndex("provider_float_balances_provider_network_idx").on(table.providerCode, table.network),
   ],
 );
+
+/**
+ * Wallet funding attempts. In mock mode a deposit is credited instantly; with
+ * Paystack the row starts `pending` and is settled by the verify call /
+ * webhook (idempotent on `ref`), exactly like DataPlug/GetDataGH checkout.
+ */
+export const depositRequests = pgTable("deposit_requests", {
+  id: serial("id").primaryKey(),
+  ref: varchar("ref", { length: 40 }).notNull().unique(),
+  walletId: integer("wallet_id").notNull(),
+  provider: varchar("provider", { length: 40 }).notNull().default("mock"),
+  method: varchar("method", { length: 40 }).notNull(),
+  amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+  status: depositStatusEnum("status").notNull().default("pending"),
+  providerReference: varchar("provider_reference", { length: 120 }),
+  initiatedAt: timestamp("initiated_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  providerPayload: jsonb("provider_payload"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const scheduledTopups = pgTable("scheduled_topups", {
   id: serial("id").primaryKey(),
