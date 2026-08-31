@@ -1,12 +1,12 @@
-import { db } from "@/db";
 import { sql } from "drizzle-orm";
+import { db } from "@/db";
+import { describeSchemaCompatibility } from "@/lib/schema-compat";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
     await db.execute(sql`select 1`);
-    return Response.json({ ok: true, database: "connected" });
   } catch (e) {
     return Response.json(
       {
@@ -18,4 +18,31 @@ export async function GET() {
       { status: 500 },
     );
   }
+
+  // A pre-gateway schema is survivable (the app degrades), but it must be
+  // visible here so a stuck deployment is diagnosable at a glance.
+  const schema = await describeSchemaCompatibility();
+  const degraded = schema.status === "legacy";
+
+  return Response.json({
+    ok: true,
+    database: "connected",
+    gatewaySchema: schema.status,
+    dataGateway: {
+      schema: schema.status,
+      providerFloatTable: schema.providerFloatTable,
+      missing: schema.missing,
+      fallbacks: schema.fallbacks,
+      ...(degraded ? { hint: schema.hint } : {}),
+      ...(schema.status === "unknown"
+        ? { note: "Could not read the catalog; gateway columns are assumed present." }
+        : {}),
+    },
+    ...(degraded
+      ? {
+          warning:
+            "The data gateway schema is out of date; provider fulfillment tracking is running with compatibility fallbacks.",
+        }
+      : {}),
+  });
 }

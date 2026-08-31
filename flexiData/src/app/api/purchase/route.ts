@@ -1,17 +1,25 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { bundlePlans, transactions, wallets } from "@/db/schema";
-import { getWalletRow } from "@/lib/data";
+import { getWalletRow, insertTransactionRow } from "@/lib/data";
 import {
   DataProviderConfigError,
   DataProviderFloatError,
   DataProviderRequestError,
+  deriveProviderProductCode,
   ensureProviderFloatCapacity,
   getStoredProviderFloatBalance,
   projectProviderFloatUsage,
   submitDataBundleOrder,
   upsertProviderFloatBalance,
 } from "@/lib/data-gateway";
+import {
+  BUNDLE_PLAN_INSERT_FIELDS,
+  buildCompatInsert,
+  hasBundlePlanColumn,
+  withSchemaFallback,
+  type SchemaCapabilities,
+} from "@/lib/schema-compat";
 import { AIRTIME_DISCOUNT, POINTS_RATE } from "@/lib/constants";
 import { groupPhone, isValidPhone, makeRef } from "@/lib/format";
 
@@ -31,6 +39,72 @@ function rollLocalStatus(): "successful" | "pending" | "failed" {
   if (r < 0.88) return "successful";
   if (r < 0.96) return "pending";
   return "failed";
+}
+
+type FoundPlan = {
+  id: number;
+  network: string;
+  category: string;
+  label: string;
+  price: string;
+  providerProductCode: string;
+};
+
+/**
+ * Plan lookup that tolerates a database without `provider_product_code`: the
+ * aggregator SKU is then derived from the plan identity instead of failing the
+ * whole purchase.
+ */
+async function findBundlePlan(
+  network: string,
+  category: string,
+  label: string,
+  compat: SchemaCapabilities,
+): Promise<FoundPlan | null> {
+  const where = and(
+    eq(bundlePlans.network, network),
+    eq(bundlePlans.category, category),
+    eq(bundlePlans.label, label),
+  );
+
+  if (hasBundlePlanColumn(compat, "providerProductCode")) {
+    const rows = await db
+      .select({
+        id: bundlePlans.id,
+        network: bundlePlans.network,
+        category: bundlePlans.category,
+        label: bundlePlans.label,
+        price: bundlePlans.price,
+        providerProductCode: bundlePlans.providerProductCode,
+      })
+      .from(bundlePlans)
+      .where(where)
+      .limit(1);
+
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      ...row,
+      providerProductCode:
+        row.providerProductCode?.trim() || deriveProviderProductCode(network, category, label),
+    };
+  }
+
+  const rows = await db
+    .select({
+      id: bundlePlans.id,
+      network: bundlePlans.network,
+      category: bundlePlans.category,
+      label: bundlePlans.label,
+      price: bundlePlans.price,
+    })
+    .from(bundlePlans)
+    .where(where)
+    .limit(1);
+
+  const row = rows[0];
+  if (!row) return null;
+  return { ...row, providerProductCode: deriveProviderProductCode(network, category, label) };
 }
 
 function clampText(value: string | null | undefined, max = 200): string {
@@ -59,18 +133,10 @@ export async function POST(req: Request) {
     let subtitle = `To ${groupPhone(recipient)}`;
 
     if (kind === "data") {
-      const rows = await db
-        .select()
-        .from(bundlePlans)
-        .where(
-          and(
-            eq(bundlePlans.network, network),
-            eq(bundlePlans.category, body.category ?? ""),
-            eq(bundlePlans.label, body.planLabel ?? ""),
-          ),
-        )
-        .limit(1);
-      const plan = rows[0];
+      const plan = await withSchemaFallback(
+        (compat) => findBundlePlan(network, body.category ?? "", body.planLabel ?? "", compat),
+        "bundle plan lookup",
+      );
       if (!plan) return Response.json({ ok: false, error: "Bundle not found" }, { status: 404 });
 
       cost = Number(plan.price);
@@ -116,7 +182,7 @@ export async function POST(req: Request) {
           .where(eq(wallets.id, wallet.id));
       }
 
-      await db.insert(transactions).values({
+      const txValues: typeof transactions.$inferInsert = {
         ref,
         walletId: wallet.id,
         type: "data",
@@ -140,7 +206,11 @@ export async function POST(req: Request) {
         lastProviderSyncAt: new Date(),
         providerPayload: gateway.rawRequest,
         providerResponse: gateway.rawResponse,
-      });
+      };
+
+      // `insertTransactionRow` skips the fulfillment/provider columns when the
+      // database has not been migrated yet, so the order is still recorded.
+      await insertTransactionRow(txValues);
 
       if (gateway.floatBalance != null) {
         const storedFloat = await getStoredProviderFloatBalance(network);
@@ -209,12 +279,13 @@ export async function POST(req: Request) {
           .where(eq(wallets.id, wallet.id));
       }
 
-      await db.insert(transactions).values({
+      const airtimeValues: typeof transactions.$inferInsert = {
         ref,
         walletId: wallet.id,
         type: "airtime",
         status,
-        fulfillmentStatus: status === "successful" ? "delivered" : status === "pending" ? "processing" : "failed",
+        fulfillmentStatus:
+          status === "successful" ? ("delivered" as const) : status === "pending" ? ("processing" as const) : ("failed" as const),
         direction: "out",
         title,
         subtitle: status === "failed" ? `${subtitle} • Not charged` : subtitle,
@@ -224,7 +295,9 @@ export async function POST(req: Request) {
         recipient,
         chargedAt: status === "failed" ? null : new Date(),
         fulfilledAt: status === "successful" ? new Date() : null,
-      });
+      };
+
+      await insertTransactionRow(airtimeValues);
 
       return Response.json({
         ok: true,

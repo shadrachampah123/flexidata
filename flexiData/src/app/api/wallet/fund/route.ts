@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { transactions, wallets } from "@/db/schema";
-import { getWalletRow } from "@/lib/data";
+import { wallets } from "@/db/schema";
+import { getWalletRow, insertTransactionRow } from "@/lib/data";
 import { makeRef } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -32,7 +32,7 @@ export async function POST(req: Request) {
 
     await db.update(wallets).set({ balance: newBalance.toFixed(2) }).where(eq(wallets.id, wallet.id));
 
-    await db.insert(transactions).values({
+    await insertTransactionRow({
       ref,
       walletId: wallet.id,
       type: "deposit",
@@ -45,7 +45,6 @@ export async function POST(req: Request) {
       network: conf.network,
       recipient: null,
     });
-
     return Response.json({ ok: true, status: "successful", ref, balance: newBalance, method: conf.label });
   } catch (e) {
     console.error("fund error", e);

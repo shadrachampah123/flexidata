@@ -9,6 +9,12 @@ import {
 } from "@/db/schema";
 import { desc, eq, asc } from "drizzle-orm";
 import { ensureSeeded } from "@/lib/seed";
+import {
+  TRANSACTION_INSERT_FIELDS,
+  buildCompatInsert,
+  isGatewaySchemaComplete,
+  withSchemaFallback,
+} from "@/lib/schema-compat";
 
 export type WalletDTO = {
   id: number;
@@ -75,6 +81,42 @@ export type AgentDTO = {
 
 export type WalletRow = typeof wallets.$inferSelect;
 
+/**
+ * Columns the UI needs from `transactions`. Deliberately excludes the gateway
+ * columns (`fulfillment_status`, `provider_*`, ...) so history and home screens
+ * still render on a database that has not been migrated for the data gateway
+ * yet. `src/app/api/purchase/*` opt into those columns via schema-compat.
+ */
+const TX_SELECT = {
+  id: transactions.id,
+  ref: transactions.ref,
+  type: transactions.type,
+  status: transactions.status,
+  direction: transactions.direction,
+  title: transactions.title,
+  subtitle: transactions.subtitle,
+  amount: transactions.amount,
+  points: transactions.points,
+  network: transactions.network,
+  recipient: transactions.recipient,
+  createdAt: transactions.createdAt,
+};
+
+type TxRecord = Pick<typeof transactions.$inferSelect, keyof typeof TX_SELECT>;
+
+/** Columns the UI needs from `bundle_plans` (no provider SKU dependency). */
+const PLAN_SELECT = {
+  id: bundlePlans.id,
+  network: bundlePlans.network,
+  category: bundlePlans.category,
+  label: bundlePlans.label,
+  validity: bundlePlans.validity,
+  price: bundlePlans.price,
+  retailPrice: bundlePlans.retailPrice,
+  badge: bundlePlans.badge,
+  sortOrder: bundlePlans.sortOrder,
+};
+
 export async function getWalletRow(): Promise<WalletRow> {
   await ensureSeeded();
   const row = await db.select().from(wallets).where(eq(wallets.id, 1)).limit(1);
@@ -95,7 +137,7 @@ export function toWalletDTO(w: WalletRow): WalletDTO {
   };
 }
 
-function toTxDTO(t: typeof transactions.$inferSelect): TxDTO {
+function toTxDTO(t: TxRecord): TxDTO {
   return {
     id: t.id,
     ref: t.ref,
@@ -115,7 +157,7 @@ function toTxDTO(t: typeof transactions.$inferSelect): TxDTO {
 export async function getRecentTransactions(limit = 6): Promise<TxDTO[]> {
   await ensureSeeded();
   const rows = await db
-    .select()
+    .select(TX_SELECT)
     .from(transactions)
     .where(eq(transactions.walletId, 1))
     .orderBy(desc(transactions.createdAt))
@@ -126,7 +168,7 @@ export async function getRecentTransactions(limit = 6): Promise<TxDTO[]> {
 export async function getAllTransactions(): Promise<TxDTO[]> {
   await ensureSeeded();
   const rows = await db
-    .select()
+    .select(TX_SELECT)
     .from(transactions)
     .where(eq(transactions.walletId, 1))
     .orderBy(desc(transactions.createdAt))
@@ -136,7 +178,7 @@ export async function getAllTransactions(): Promise<TxDTO[]> {
 
 export async function getPlans(): Promise<PlanDTO[]> {
   await ensureSeeded();
-  const rows = await db.select().from(bundlePlans).orderBy(asc(bundlePlans.sortOrder));
+  const rows = await db.select(PLAN_SELECT).from(bundlePlans).orderBy(asc(bundlePlans.sortOrder));
   return rows.map((p) => ({
     id: p.id,
     network: p.network,
@@ -189,6 +231,28 @@ export async function getAgentProfile(): Promise<AgentDTO | null> {
     commission: Number(a.commission),
     volume: Number(a.volume),
   };
+}
+
+/**
+ * Write a ledger row using only the `transactions` columns the database has.
+ *
+ * Drizzle names every column of the table definition in an INSERT (filling in
+ * `default`), so on a database that predates the data gateway migration a plain
+ * `db.insert(transactions)` fails with `column "fulfillment_status" does not
+ * exist` — which would take down the wallet, airtime, convert and rewards
+ * screens too, not just bundle purchases. The explicit column list keeps those
+ * flows working, and the gateway columns are stored as soon as the schema is
+ * pushed.
+ */
+export async function insertTransactionRow(row: typeof transactions.$inferInsert): Promise<void> {
+  await withSchemaFallback(async (compat) => {
+    if (isGatewaySchemaComplete(compat, "transactions")) {
+      await db.insert(transactions).values(row);
+      return;
+    }
+
+    await db.execute(buildCompatInsert(compat, "transactions", TRANSACTION_INSERT_FIELDS, [row]));
+  }, "ledger write");
 }
 
 export async function getWallet(): Promise<WalletDTO> {

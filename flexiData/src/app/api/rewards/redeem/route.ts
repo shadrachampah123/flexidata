@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { transactions, wallets } from "@/db/schema";
-import { getWalletRow } from "@/lib/data";
+import { wallets } from "@/db/schema";
+import { getWalletRow, insertTransactionRow } from "@/lib/data";
 import { REDEEM_OPTIONS } from "@/lib/constants";
 import { makeRef } from "@/lib/format";
 
@@ -36,7 +36,7 @@ export async function POST(req: Request) {
       data: `Points → ${option.amount}GB Data`,
     };
 
-    await db.insert(transactions).values({
+    await insertTransactionRow({
       ref,
       walletId: wallet.id,
       type: "redemption",
@@ -49,7 +49,6 @@ export async function POST(req: Request) {
       network: option.kind === "data" ? "MTN" : null,
       recipient: wallet.number,
     });
-
     return Response.json({ ok: true, status: "successful", ref, points: newPoints, balance: newBalance });
   } catch (e) {
     console.error("redeem error", e);
