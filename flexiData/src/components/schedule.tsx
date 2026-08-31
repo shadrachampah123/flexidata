@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   CalendarClock,
   CheckCircle2,
@@ -14,6 +14,7 @@ import { NETWORKS, type Network } from "@/lib/constants";
 import { Segmented, FieldLabel } from "@/components/ui";
 import { PhoneInput } from "@/components/phone-input";
 import { FlowSheet, type FlowResult } from "@/components/flow-sheet";
+import { DropdownPanel } from "@/components/dropdown-panel";
 import { cn, groupPhone, isValidPhone, money, ordinal } from "@/lib/format";
 
 export function Schedule({ schedules: initial, plans }: { schedules: ScheduleDTO[]; plans: PlanDTO[] }) {
@@ -23,6 +24,8 @@ export function Schedule({ schedules: initial, plans }: { schedules: ScheduleDTO
   const [phone, setPhone] = useState("");
   const [day, setDay] = useState(1);
   const [dropOpen, setDropOpen] = useState(false);
+  const planTriggerRef = useRef<HTMLButtonElement>(null);
+  const closeDrop = useCallback(() => setDropOpen(false), []);
   const [phase, setPhase] = useState<"idle" | "confirm" | "processing" | "result">("idle");
   const [result, setResult] = useState<FlowResult | null>(null);
 
@@ -183,7 +186,10 @@ export function Schedule({ schedules: initial, plans }: { schedules: ScheduleDTO
           <div className="relative">
             <FieldLabel>Bundle</FieldLabel>
             <button
+              ref={planTriggerRef}
               type="button"
+              aria-haspopup="listbox"
+              aria-expanded={dropOpen}
               onClick={() => setDropOpen((o) => !o)}
               className={cn(
                 "flex w-full items-center gap-3 rounded-2xl border bg-black/[0.02] px-4 py-3 text-left transition-all dark:bg-white/[0.03]",
@@ -203,33 +209,40 @@ export function Schedule({ schedules: initial, plans }: { schedules: ScheduleDTO
               </span>
               <ChevronDown className={cn("h-4 w-4 shrink-0 text-zinc-400 transition-transform", dropOpen && "rotate-180")} />
             </button>
-            {dropOpen && (
-              <>
-                <button aria-label="Close" onClick={() => setDropOpen(false)} className="fixed inset-0 z-40 cursor-default" />
-                <ul className="animate-fade-up absolute inset-x-0 top-[calc(100%+6px)] z-50 max-h-[260px] overflow-y-auto rounded-2xl border border-black/[0.06] bg-paper shadow-[0_20px_50px_rgba(0,0,0,0.18)] dark:border-line dark:bg-card2">
-                  {networkPlans.map((p) => (
-                    <li key={p.id}>
-                      <button
-                        onClick={() => {
-                          setPlanId(p.id);
-                          setDropOpen(false);
-                        }}
-                        className="flex w-full items-center gap-3 border-b border-black/[0.04] px-4 py-3 text-left transition-colors last:border-0 hover:bg-black/[0.03] dark:border-line dark:hover:bg-white/[0.04]"
-                      >
-                        <span className="min-w-0 flex-1">
-                          <span className="block text-[13px] font-bold">{p.label}</span>
-                          <span className="block text-[10px] text-zinc-500">{p.validity}</span>
-                        </span>
-                        <span className="font-display text-[13px] font-bold text-brand-deep dark:text-brand">
-                          {money(p.price)}
-                        </span>
-                        {p.id === planId && <CheckCircle2 className="h-4 w-4 text-brand-deep dark:text-brand" />}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
+            <DropdownPanel
+              open={dropOpen}
+              anchorRef={planTriggerRef}
+              onClose={closeDrop}
+              label="Bundle"
+              maxHeight={280}
+            >
+              <ul>
+                {networkPlans.map((p) => (
+                  <li key={p.id}>
+                    <button
+                      role="option"
+                      aria-selected={p.id === planId}
+                      onClick={() => {
+                        setPlanId(p.id);
+                        setDropOpen(false);
+                      }}
+                      className="flex w-full items-center gap-3 border-b border-black/[0.04] px-4 py-3 text-left transition-colors last:border-0 hover:bg-black/[0.03] dark:border-line dark:hover:bg-white/[0.04]"
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[13px] font-bold">{p.label}</span>
+                        <span className="block text-[10px] text-zinc-500">{p.validity}</span>
+                      </span>
+                      <span className="font-display shrink-0 text-[13px] font-bold text-brand-deep dark:text-brand">
+                        {money(p.price)}
+                      </span>
+                      {p.id === planId && (
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-brand-deep dark:text-brand" />
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </DropdownPanel>
           </div>
 
           <PhoneInput value={phone} onChange={setPhone} />
