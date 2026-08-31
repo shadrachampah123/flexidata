@@ -1,7 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
-import { BottomNav } from "@/components/bottom-nav";
-import { SideNav } from "@/components/side-nav";
+import { AppChrome } from "@/components/app-chrome";
 import { APP_NAME, APP_TAGLINE } from "@/lib/constants";
 
 export const metadata: Metadata = {
@@ -26,20 +25,12 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" suppressHydrationWarning className="dark">
-    <head>
-    <script dangerouslySetInnerHTML={{ __html: themeInit }} />
-    </head>
-    <body
-      className="bg-cream font-sans text-[#18191f] antialiased dark:bg-night dark:text-[#f2efe4]"
-    >
-    <SideNav />
-    <div className="min-h-dvh md:pl-[84px]">
-      <main className="mx-auto w-full max-w-[520px] px-4 pb-32 pt-5 md:max-w-[560px] md:pb-16 md:pt-8">
-        {children}
-      </main>
-    </div>
-    <BottomNav />
-    </body>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeInit }} />
+      </head>
+      <body className="bg-cream font-sans text-[#18191f] antialiased dark:bg-night dark:text-[#f2efe4]">
+        <AppChrome>{children}</AppChrome>
+      </body>
     </html>
   );
 }

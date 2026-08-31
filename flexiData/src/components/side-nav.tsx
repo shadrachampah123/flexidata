@@ -8,6 +8,7 @@ import {
   History,
   House,
   LayoutGrid,
+  Settings,
   Smartphone,
   Users,
   Wallet,
@@ -26,6 +27,7 @@ const LINKS = [
   { href: "/wallet", label: "Wallet", icon: Wallet },
   { href: "/agent", label: "Agent", icon: Users },
   { href: "/history", label: "History", icon: History },
+  { href: "/settings", label: "Settings", icon: Settings },
   { href: "/more", label: "More", icon: LayoutGrid },
 ];
 

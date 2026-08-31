@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { wallets } from "@/db/schema";
-import { getWalletRow, insertTransactionRow } from "@/lib/data";
+import { insertTransactionRow } from "@/lib/data";
+import { requireAccount } from "@/lib/api-auth";
 import { REDEEM_OPTIONS } from "@/lib/constants";
 import { makeRef } from "@/lib/format";
 
@@ -11,11 +12,14 @@ type Body = { optionId?: string };
 
 export async function POST(req: Request) {
   try {
+    const auth = await requireAccount();
+    if (!auth.ok) return auth.response;
+    const { wallet } = auth;
+
     const body = (await req.json()) as Body;
     const option = REDEEM_OPTIONS.find((o) => o.id === body.optionId);
     if (!option) return Response.json({ ok: false, error: "Reward not found" }, { status: 404 });
 
-    const wallet = await getWalletRow();
     if (wallet.points < option.cost) {
       return Response.json({ ok: false, error: "Not enough points for this reward" }, { status: 400 });
     }

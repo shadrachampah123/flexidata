@@ -26,6 +26,15 @@ export function phoneDigits(value: string): string {
   return value.replace(/\D/g, "").slice(0, 10);
 }
 
+/** Normalize any Ghanaian number input (0XX, 233XX, or 9-digit) to 0XXXXXXXXX. */
+export function normalizePhoneDigits(value: string): string {
+  const digits = value.replace(/\D/g, "");
+  if (digits.startsWith("233") && digits.length === 12) return `0${digits.slice(3)}`;
+  if (digits.length === 10 && digits.startsWith("0")) return digits;
+  if (digits.length === 9) return `0${digits}`;
+  return digits.slice(0, 10);
+}
+
 export function isValidPhone(digits: string): boolean {
   return /^\d{9,10}$/.test(digits);
 }

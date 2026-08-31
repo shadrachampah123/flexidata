@@ -58,12 +58,101 @@ async function main() {
     describeSchemaCompatibility,
     resetSchemaCapabilitiesCache,
   } = require("@/lib/schema-compat");
+
+  // Ensure the catalog/plan seed has populated the in-memory DB before we put
+  // the authenticated fixture user + wallet in place.
+  await ensureSeeded();
+
+  const pool = getPool();
+  // Fixture account (id 1) owned by fixture user (id 1). Real apps create these
+  // at registration; the harness injects them so it can drive the routes as a
+  // signed-in user.
+  if (!pool.rows.users.some((r: any) => r.id === 1)) {
+    pool.rows.users.push({
+      id: 1,
+      name: "Harness User",
+      email: "harness@flexidata.app",
+      phone: "0244123456",
+      password_hash: "scrypt:x:x",
+      referral_code: "FD-HARNESS-0001",
+      referred_by: null,
+      referral_rewarded_at: null,
+      email_verified_at: null,
+      notify_promos: true,
+      notify_tx: true,
+      is_admin: false,
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+  }
+  if (!pool.rows.wallets.some((r: any) => r.id === 1)) {
+    pool.rows.wallets.push({
+      id: 1,
+      user_id: 1,
+      name: "Harness User",
+      number: "0244123456",
+      balance: "128.50",
+      points: 2450,
+      is_agent: false,
+      agent_tier: null,
+      referral_code: "FD-HARNESS-0001",
+      created_at: new Date(),
+    });
+  }
+  if (!pool.rows.agent_profiles.some((r: any) => r.wallet_id === 1)) {
+    pool.rows.agent_profiles.push({
+      id: 1,
+      wallet_id: 1,
+      tier: "Starter",
+      referral_code: "FD-HARNESS-0001",
+      referrals: 0,
+      commission: "0",
+      volume: "0",
+      created_at: new Date(),
+    });
+  }
+  // Second fixture account — the P2P transfer target.
+  if (!pool.rows.wallets.some((r: any) => r.number === "0532118329")) {
+    pool.rows.users.push({
+      id: 2,
+      name: "Fixture Recipient",
+      email: "recipient@flexidata.app",
+      phone: "0532118329",
+      password_hash: "scrypt:x:x",
+      referral_code: "FD-HARNESS-0002",
+      referred_by: null,
+      referral_rewarded_at: null,
+      email_verified_at: null,
+      notify_promos: true,
+      notify_tx: true,
+      is_admin: false,
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+    pool.rows.wallets.push({
+      id: 2,
+      user_id: 2,
+      name: "Fixture Recipient",
+      number: "0532118329",
+      balance: "10.00",
+      points: 0,
+      is_agent: false,
+      agent_tier: null,
+      referral_code: "FD-HARNESS-0002",
+      created_at: new Date(),
+    });
+  }
+
   const { getAllTransactions, getPlans } = require("@/lib/data");
+
+  // The app is multi-user now; route handlers authenticate the caller first.
+  // Outside production, FLEXIDATA_TEST_USER_ID pins the current user (fixture
+  // user id 1) without needing Next's cookie runtime.
+  process.env.FLEXIDATA_TEST_USER_ID = "1";
+
   const purchaseRoute = require("@/app/api/purchase/route");
   const callbackRoute = require("@/app/api/purchase/callback/route");
   const healthRoute = require("@/app/api/health/route");
-
-  const pool = getPool();
 
   if (strictMode) {
     // Seed with the fallbacks on so demo data exists, then flip the kill
@@ -119,22 +208,16 @@ async function main() {
   }
   check("seed completes", seedError === null, seedError instanceof Error ? `${seedError.message} :: ${String((seedError as any).cause ?? "")}` : String(seedError ?? ""));
   check("bundle plans seeded", pool.rows.bundle_plans.length === 34, pool.rows.bundle_plans.length);
-  check("transactions seeded", pool.rows.transactions.length === 11, pool.rows.transactions.length);
+  // Transactions are per-user and only exist after real activity; a fresh
+  // account starts with an empty ledger.
+  check("no demo transactions seeded", pool.rows.transactions.length === 0, pool.rows.transactions.length);
 
   const caps = await getSchemaCapabilities();
   if (migrated) {
     check("float ledger seeded", pool.rows.provider_float_balances.length === 2, pool.rows.provider_float_balances.length);
-    const seeded = pool.rows.transactions[0] ?? {};
-    check("gateway columns persisted", seeded.fulfillment_status != null && "provider" in seeded, seeded.fulfillment_status);
     check("caps: float table present", caps.floatTable === true, caps.floatTable);
     check("caps: schema not drifted", caps.drifted === false, caps.drifted);
   } else {
-    const seeded = pool.rows.transactions[0] ?? {};
-    check(
-      "gateway columns skipped on legacy",
-      !("fulfillment_status" in seeded) && !("provider" in seeded) && seeded.ref != null,
-      Object.keys(seeded),
-    );
     check(
       "float rows not attempted",
       pool.captured.every((c) => c.table !== "provider_float_balances"),
@@ -169,7 +252,7 @@ async function main() {
     historyError = error;
   }
   check("history ok", historyError === null, String(historyError ?? ""));
-  check("history readable", history.length === 11 && Boolean(history[0].date), history.length);
+  check("history readable (empty ledger for new user)", Array.isArray(history), history.length);
 
   // 3. Purchase through the gateway, then the ledger write.
   const purchaseResponse = await purchaseRoute.POST(
@@ -182,18 +265,21 @@ async function main() {
     }),
   );
   const purchase = await purchaseResponse.json();
+  if (purchaseResponse.status !== 200 || purchase.ok !== true) {
+    console.log("PURCHASE ERROR:", JSON.stringify(purchase));
+  }
   check("purchase returns 200", purchaseResponse.status === 200, purchase);
   check("purchase ok", purchase.ok === true, purchase);
   const dataWrites = pool.captured.filter((c) => c.kind === "insert" && c.table === "transactions");
   const lastWrite = dataWrites[dataWrites.length - 1] ?? { kind: "none", table: "none", columns: [] };
-  check("purchase recorded a transaction", pool.rows.transactions.length === 12, pool.rows.transactions.length);
+  check("purchase recorded a transaction", pool.rows.transactions.length === 1, pool.rows.transactions.length);
   if (migrated) {
     check(
       "purchase persisted provider fields",
       lastWrite.columns.includes("provider_reference") && lastWrite.columns.includes("fulfillment_status"),
       lastWrite.columns,
     );
-    const txRow = pool.rows.transactions[11];
+    const txRow = pool.rows.transactions[0];
     check("provider reference stored", typeof txRow.provider_reference === "string" && txRow.provider_reference.startsWith("mock-"), txRow.provider_reference);
   } else {
     check(

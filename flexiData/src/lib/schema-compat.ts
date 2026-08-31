@@ -182,6 +182,28 @@ function asRows<T>(result: unknown): T[] {
 }
 
 /**
+ * Parse a Postgres array literal (`{a,b,"c d"}`) into a JS string array.
+ * `node-postgres` does not convert `text[]` columns to JS arrays, so the
+ * capability probe receives them as strings — without this parsing every
+ * table looked empty and the app wrongly reported a "legacy" schema.
+ */
+function parsePgArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === "string");
+  if (typeof value !== "string") return [];
+  const trimmed = value.trim();
+  if (trimmed.length < 2 || trimmed[0] !== "{" || trimmed[trimmed.length - 1] !== "}") return [];
+  const inner = trimmed.slice(1, -1);
+  if (!inner) return [];
+  const out: string[] = [];
+  const re = /"((?:[^"\\]|\\.)*)"|([^,]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(inner)) !== null) {
+    out.push((match[1] ?? match[2] ?? "").replace(/\\"/g, '"').trim());
+  }
+  return out;
+}
+
+/**
  * Assume a fully migrated schema. Wrong guesses are self-healing: the first
  * query that fails with a schema error downgrades the cached capabilities.
  */
@@ -217,9 +239,9 @@ async function probeCapabilities(): Promise<SchemaCapabilities> {
     `);
 
     const columnsByTable = new Map<string, string[]>();
-    for (const row of asRows<{ table_name: string; columns: string[] | null }>(catalog)) {
+    for (const row of asRows<{ table_name: string; columns: string[] | string | null }>(catalog)) {
       if (!row?.table_name) continue;
-      columnsByTable.set(row.table_name, Array.isArray(row.columns) ? row.columns : []);
+      columnsByTable.set(row.table_name, parsePgArray(row.columns));
     }
 
     const txColumns = columnsByTable.get("transactions") ?? [];
@@ -243,8 +265,8 @@ async function probeCapabilities(): Promise<SchemaCapabilities> {
       group by t.enum_name
     `);
 
-    const labels = asRows<{ enum_name: string; labels: string[] | null }>(enums)[0]?.labels;
-    if (Array.isArray(labels) && labels.length > 0) {
+    const labels = parsePgArray(asRows<{ enum_name: string; labels: string[] | string | null }>(enums)[0]?.labels);
+    if (labels.length > 0) {
       caps.txStatusValues = new Set(labels);
     }
 

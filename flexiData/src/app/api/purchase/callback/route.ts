@@ -53,7 +53,14 @@ type CallbackTx = {
   id: number;
   ref: string;
   walletId: number;
-  type: "data" | "airtime" | "conversion" | "deposit" | "transfer" | "redemption";
+  type:
+    | "data"
+    | "airtime"
+    | "conversion"
+    | "deposit"
+    | "transfer"
+    | "redemption"
+    | "referral";
   status: "successful" | "pending" | "failed" | "reversed";
   network: string | null;
   recipient: string | null;

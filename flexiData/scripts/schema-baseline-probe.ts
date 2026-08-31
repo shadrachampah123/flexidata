@@ -11,7 +11,39 @@
 import { installSim } from "./schema-sim";
 
 const migrated = process.env.MIGRATED === "true";
+// Route handlers now authenticate the caller; pin the fixture user (id 1) via
+// the non-production test seam and seed that account into the fake database.
+process.env.FLEXIDATA_TEST_USER_ID = "1";
 const { pool: getPool } = installSim({ migrated });
+
+getPool().rows.users.push({
+  id: 1,
+  name: "Probe User",
+  email: "probe@flexidata.app",
+  phone: "0244123456",
+  password_hash: "scrypt:x:x",
+  referral_code: "FD-PROBE-0001",
+  referred_by: null,
+  referral_rewarded_at: null,
+  email_verified_at: null,
+  notify_promos: true,
+  notify_tx: true,
+  is_admin: false,
+  created_at: new Date(),
+  updated_at: new Date(),
+});
+getPool().rows.wallets.push({
+  id: 1,
+  user_id: 1,
+  name: "Probe User",
+  number: "0244123456",
+  balance: "128.50",
+  points: 2450,
+  is_agent: false,
+  agent_tier: null,
+  referral_code: "FD-PROBE-0001",
+  created_at: new Date(),
+});
 
 function jsonRequest(url: string, body: unknown) {
   return new Request(`http://localhost${url}`, {

@@ -1,17 +1,42 @@
 # FlexiData
 
-A sleek, mobile-first **data bundle & airtime vending app** for Ghana. Buy discounted MTN &
-Telecel bundles, top up airtime, convert airtime to cash, fund your wallet, schedule auto
-top-ups and earn rewards — all in one place.
+A sleek, mobile-first **data bundle & airtime vending app** for Ghana — built around the
+same feature set as Ghana's leading data-selling platforms (DataPlug, RemaData,
+MyDataBundle, GetDataGH, DataSika): real user accounts, a funded wallet, instant MTN &
+Telecel bundle delivery, referral rewards and a vendor/agent program.
 
-> Simulated by default in local development. Set the data gateway environment variables below to connect a real Ghanaian data-API provider for MTN / Telecel fulfillment.
+## Features
+
+- **Create account** — name, email, Ghanaian phone number and password, with optional
+  referral code. Every account gets its own wallet starting at GH₵ 0.00.
+- **Login** with email **or** phone number + password.
+- **Forgot password** — a single-use, 1-hour reset link is emailed (in development the
+  link is also returned by the API and logged to the console, so the flow is testable
+  without an email provider).
+- **Settings** — edit profile, change password, notification preferences, manage active
+  devices/sessions, copy your referral code, and **log out**.
+- **Wallet** — fund via MTN MoMo / Telecel Cash / card (simulated instantly in dev;
+  [Paystack](https://paystack.com) in production, settled by verify + webhook) and
+  transfer money to any other registered FlexiData user.
+- **Shop** — discounted MTN (UP2U, SME non-expiry, Corporate, Social) & Telecel bundles,
+  airtime at 2% off, and airtime-to-cash conversion.
+- **Rewards** — points on every purchase, redeemable for cash/airtime/data, plus a
+  referral bonus when a friend you invited makes their first purchase.
+- **Agent program** — activate a vendor profile with your own referral code, tiers and
+  commission tracking.
+
+> Data fulfillment runs against the mock provider in local development. Point the data
+> gateway environment variables below at a real Ghanaian data-API aggregator for live
+> MTN / Telecel delivery.
 
 ## Stack
 
-- **Next.js 16** (App Router, Turbopack)
+- **Next.js 16** (App Router, Turbopack, `proxy.ts` route protection)
 - **React 19**
 - **Tailwind CSS 4**
 - **Drizzle ORM** + **PostgreSQL**
+- Zero-dependency auth: scrypt password hashing, HMAC-signed session cookies,
+  server-side `sessions` table (Node `crypto` only)
 - Self-hosted variable fonts (Manrope + Space Grotesk)
 
 ## Getting started
@@ -20,13 +45,16 @@ top-ups and earn rewards — all in one place.
 cd flexiData
 npm install
 
-# 1. Configure the database
-cp .env.example .env.local   # then edit DATABASE_URL to point at your Postgres
+# 1. Configure the environment
+cp .env.example .env.local
+#   - set DATABASE_URL to your Postgres
+#   - set AUTH_SECRET to a long random string:
+#       node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 
 # 2. Create the schema
 npx drizzle-kit push
 
-# 3. Run the app (seeds demo data on first request)
+# 3. Run the app (seeds the shared bundle catalog on first request)
 npm run dev
 ```
 
@@ -60,6 +88,11 @@ flexiData/
 | Variable | Description |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string (required) |
+| `AUTH_SECRET` | Long random string used to sign session cookies / reset tokens (required) |
+| `APP_BASE_URL` | Public deployment URL for password-reset links & payment callbacks (e.g. `https://flexidata.app`) |
+| `PAYMENTS_PROVIDER` | `mock` (instant simulated MoMo/card funding) or `paystack` for real Ghanaian mobile money/card checkout |
+| `PAYSTACK_SECRET_KEY` | Paystack secret key — required when `PAYMENTS_PROVIDER=paystack` |
+| `NOTIFY_WEBHOOK_URL` | Webhook that sends transactional email; when empty, reset links are logged/returned in dev |
 | `DATA_API_PROVIDER` | Data gateway adapter to use: `mock` for local dev, or your production provider slug |
 | `DATA_API_BASE_URL` | Base URL for your Ghanaian data-API gateway/provider |
 | `DATA_API_PURCHASE_PATH` | Relative path used to submit MTN / Telecel data orders |
@@ -83,10 +116,20 @@ flexiData/
    Preview, Development):
    - `DATABASE_URL` = your Neon **pooled** connection string ending in
      `?sslmode=require` (or `?sslmode=verify-full`).
-   - `DATA_API_PROVIDER`, `DATA_API_BASE_URL`, `DATA_API_PURCHASE_PATH`, and the
-     matching auth credentials for your Ghanaian data gateway.
-   - `DATA_API_CALLBACK_URL` = your public `/api/purchase/callback` endpoint.
-4. Deploy, then open the site once so it can seed demo data.
+   - `AUTH_SECRET` = a long random string
+     (`node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"`).
+   - `APP_BASE_URL` = your public `https://<domain>` (used for reset links and
+     Paystack callbacks).
+   - For **live payments**: `PAYMENTS_PROVIDER=paystack` + `PAYSTACK_SECRET_KEY`,
+     and set the Paystack webhook URL to
+     `https://<domain>/api/payments/webhook` in the Paystack dashboard.
+   - For **password reset emails**: `NOTIFY_WEBHOOK_URL` pointing to an email
+     relay that accepts `{ to, subject, text, html }` JSON.
+   - For **live data delivery**: `DATA_API_PROVIDER`, `DATA_API_BASE_URL`,
+     `DATA_API_PURCHASE_PATH`, the matching auth credentials for your Ghanaian
+     data gateway, and `DATA_API_CALLBACK_URL` = your public
+     `/api/purchase/callback` endpoint.
+4. Deploy, then open the site once so it can seed the bundle catalog.
 
 ### If you see "We hit a snag"
 

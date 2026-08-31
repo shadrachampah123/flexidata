@@ -34,7 +34,7 @@ export function BuyData({
   const [network, setNetwork] = useState<Network>("MTN");
   const [category, setCategory] = useState("");
   const [planId, setPlanId] = useState<number | null>(null);
-  const [phone, setPhone] = useState("");
+  const [phone, setPhone] = useState(wallet.number);
   const [dropOpen, setDropOpen] = useState(false);
   const catTriggerRef = useRef<HTMLButtonElement>(null);
   const closeDrop = useCallback(() => setDropOpen(false), []);

@@ -1,14 +1,16 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { agentProfiles, wallets } from "@/db/schema";
-import { getWalletRow } from "@/lib/data";
+import { requireAccount } from "@/lib/api-auth";
 import { makeReferralCode } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
 export async function POST() {
   try {
-    const wallet = await getWalletRow();
+    const auth = await requireAccount();
+    if (!auth.ok) return auth.response;
+    const { wallet } = auth;
 
     const existing = await db
       .select()
@@ -16,7 +18,7 @@ export async function POST() {
       .where(eq(agentProfiles.walletId, wallet.id))
       .limit(1);
 
-    if (existing[0]) {
+    if (existing[0] && wallet.isAgent) {
       return Response.json({
         ok: true,
         profile: {
@@ -30,12 +32,12 @@ export async function POST() {
       });
     }
 
-    const referralCode = `FD${makeReferralCode()}`;
-    await db.insert(agentProfiles).values({
-      walletId: wallet.id,
-      tier: "Starter",
-      referralCode,
-    });
+    const referralCode = wallet.referralCode ?? `FD${makeReferralCode()}`;
+    // Activate the pre-created agent slot (created at registration).
+    await db
+      .update(agentProfiles)
+      .set({ referralCode, tier: "Starter" })
+      .where(eq(agentProfiles.walletId, wallet.id));
     await db
       .update(wallets)
       .set({ isAgent: true, agentTier: "Starter", referralCode })

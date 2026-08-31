@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { scheduledTopups } from "@/db/schema";
-import { getWalletRow } from "@/lib/data";
+import { requireAccount } from "@/lib/api-auth";
 import { isValidPhone } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +16,10 @@ type CreateBody = {
 
 export async function POST(req: Request) {
   try {
+    const auth = await requireAccount();
+    if (!auth.ok) return auth.response;
+    const { wallet } = auth;
+
     const body = (await req.json()) as CreateBody;
     const { network, planLabel } = body;
     const price = Number(body.price);
@@ -34,7 +38,6 @@ export async function POST(req: Request) {
       return Response.json({ ok: false, error: "Pick a day between 1 and 28" }, { status: 400 });
     }
 
-    const wallet = await getWalletRow();
     const inserted = await db
       .insert(scheduledTopups)
       .values({
@@ -70,12 +73,15 @@ type MutateBody = { id?: number; active?: boolean };
 
 export async function PATCH(req: Request) {
   try {
+    const auth = await requireAccount();
+    if (!auth.ok) return auth.response;
+    const { wallet } = auth;
+
     const body = (await req.json()) as MutateBody;
     const id = Number(body.id);
     if (!Number.isInteger(id) || typeof body.active !== "boolean") {
       return Response.json({ ok: false, error: "Invalid request" }, { status: 400 });
     }
-    const wallet = await getWalletRow();
     await db
       .update(scheduledTopups)
       .set({ active: body.active })
@@ -89,12 +95,15 @@ export async function PATCH(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
+    const auth = await requireAccount();
+    if (!auth.ok) return auth.response;
+    const { wallet } = auth;
+
     const body = (await req.json()) as MutateBody;
     const id = Number(body.id);
     if (!Number.isInteger(id)) {
       return Response.json({ ok: false, error: "Invalid request" }, { status: 400 });
     }
-    const wallet = await getWalletRow();
     await db
       .delete(scheduledTopups)
       .where(and(eq(scheduledTopups.id, id), eq(scheduledTopups.walletId, wallet.id)));

@@ -1,29 +1,23 @@
 import { sql } from "drizzle-orm";
 import { db } from "@/db";
-import {
-  bundlePlans,
-  priceAlerts,
-  providerFloatBalances,
-  scheduledTopups,
-  transactions,
-  wallets,
-} from "@/db/schema";
+import { bundlePlans, priceAlerts, providerFloatBalances } from "@/db/schema";
 import { deriveProviderProductCode } from "@/lib/data-gateway";
 import {
   BUNDLE_PLAN_INSERT_FIELDS,
-  TRANSACTION_INSERT_FIELDS,
   buildCompatInsert,
+  downgradeCapabilitiesFromError,
   getSchemaCapabilities,
   isGatewaySchemaComplete,
   isMissingRelationError,
   withSchemaFallback,
 } from "@/lib/schema-compat";
-import { makeRef } from "@/lib/format";
 
+/**
+ * Idempotent seed for *shared catalog* data only: bundle plans, price alerts
+ * and the (mock) provider float. Per-user data — wallets, transactions,
+ * schedules — is created when a visitor registers an account, never faked.
+ */
 let seedPromise: Promise<void> | null = null;
-
-const H = 3600 * 1000;
-const D = 24 * H;
 
 export function ensureSeeded(): Promise<void> {
   if (!seedPromise) {
@@ -35,364 +29,151 @@ export function ensureSeeded(): Promise<void> {
   return seedPromise;
 }
 
-function statusToFulfillment(status: "successful" | "pending" | "failed" | "reversed") {
-  if (status === "successful") return "delivered" as const;
-  if (status === "pending") return "processing" as const;
-  if (status === "reversed") return "refunded" as const;
-  return "failed" as const;
-}
-
 async function runSeed(): Promise<void> {
-  const rows = await db.execute(sql`select count(*)::int as c from wallets`);
-  const count = (rows.rows[0] as { c: number }).c;
-  if (count > 0) return;
+  // Bundle plans are the catalog the whole shop is built on.
+  const planRows = await db.execute(sql`select count(*)::int as c from bundle_plans`);
+  const planCount = (planRows.rows[0] as { c: number }).c;
 
-  const now = Date.now();
+  if (planCount === 0) {
+    const plans: (typeof bundlePlans.$inferInsert)[] = [];
+    const add = (
+      network: string,
+      category: string,
+      label: string,
+      validity: string,
+      price: string,
+      retail: string,
+      badge: string | null = null,
+    ) =>
+      plans.push({
+        network,
+        category,
+        label,
+        providerProductCode: deriveProviderProductCode(network, category, label),
+        validity,
+        price,
+        retailPrice: retail,
+        badge,
+        sortOrder: plans.length,
+      });
 
-  await db
-    .insert(wallets)
-    .values({
-      id: 1,
-      name: "Kwame Boateng",
-      number: "0532198840",
-      balance: "128.50",
-      points: 2450,
-    })
-    .onConflictDoNothing();
+    add("MTN", "up2u", "1GB", "3 days", "4.50", "6.00");
+    add("MTN", "up2u", "2GB", "7 days", "8.50", "11.00");
+    add("MTN", "up2u", "4GB", "30 days", "15.00", "20.00", "POPULAR");
+    add("MTN", "up2u", "6GB", "30 days", "21.00", "28.00");
+    add("MTN", "up2u", "10GB", "30 days", "34.00", "42.00");
+    add("MTN", "up2u", "15GB", "30 days", "48.00", "62.00");
 
-  // The float ledger only exists once the gateway schema has been pushed, so
-  // seeding must not fail when the table is not there yet.
-  const caps = await getSchemaCapabilities();
-  if (caps.floatTable) {
-    try {
+    add("MTN", "sme", "1GB", "Non-expiry", "4.00", "5.50");
+    add("MTN", "sme", "2GB", "Non-expiry", "7.50", "10.00");
+    add("MTN", "sme", "5GB", "Non-expiry", "17.50", "23.00", "POPULAR");
+    add("MTN", "sme", "10GB", "Non-expiry", "33.00", "42.00");
+    add("MTN", "sme", "20GB", "Non-expiry", "62.00", "78.00");
+    add("MTN", "sme", "50GB", "Non-expiry", "148.00", "185.00");
+
+    add("MTN", "corporate", "5GB", "30 days", "22.00", "27.00");
+    add("MTN", "corporate", "10GB", "30 days", "40.00", "50.00", "B2B");
+    add("MTN", "corporate", "25GB", "30 days", "92.00", "112.00");
+    add("MTN", "corporate", "50GB", "30 days", "175.00", "210.00");
+    add("MTN", "corporate", "100GB", "30 days", "330.00", "400.00");
+
+    add("MTN", "social", "WhatsApp 1GB", "7 days", "2.00", "3.00");
+    add("MTN", "social", "Social Mix 2.5GB", "14 days", "6.00", "8.00", "HOT");
+    add("MTN", "social", "TikTok + X 1GB", "7 days", "3.00", "4.50");
+    add("MTN", "social", "Streaming 3GB", "7 days", "7.50", "10.00");
+
+    add("TELECEL", "tdata", "1GB", "3 days", "3.80", "5.00");
+    add("TELECEL", "tdata", "2.5GB", "7 days", "8.00", "11.00");
+    add("TELECEL", "tdata", "5GB", "30 days", "16.00", "21.00", "POPULAR");
+    add("TELECEL", "tdata", "10GB", "30 days", "31.00", "40.00");
+    add("TELECEL", "tdata", "15GB", "30 days", "45.00", "58.00");
+    add("TELECEL", "tdata", "30GB", "30 days", "85.00", "108.00");
+
+    add("TELECEL", "just4u", "1.5GB Daily Vibe", "1 day", "4.00", "5.50");
+    add("TELECEL", "just4u", "3GB Weekend", "3 days", "6.50", "9.00", "HOT");
+    add("TELECEL", "just4u", "7GB Red Vibes", "7 days", "14.00", "19.00");
+    add("TELECEL", "just4u", "12GB Super", "30 days", "26.00", "34.00");
+
+    add("TELECEL", "gifting", "5GB", "30 days", "23.00", "28.00");
+    add("TELECEL", "gifting", "10GB", "30 days", "42.00", "52.00");
+    add("TELECEL", "gifting", "20GB", "30 days", "78.00", "98.00");
+
+    // On a legacy database (pre-gateway migration) `provider_product_code`
+    // does not exist; the compat insert names only the columns that are there.
+    await withSchemaFallback(async (compat) => {
+      if (isGatewaySchemaComplete(compat, "bundle_plans")) {
+        await db.insert(bundlePlans).values(plans);
+        return;
+      }
+      await db.execute(buildCompatInsert(compat, "bundle_plans", BUNDLE_PLAN_INSERT_FIELDS, plans));
+    }, "seed bundle plans");
+  }
+
+  // Provider float (mock adapter) — needed by the data purchase flow.
+  // The table ships in the current schema; only guard against a database that
+  // has not been migrated yet.
+  try {
+    const existing = await db.execute(sql`select count(*)::int as c from provider_float_balances`);
+    const floatCount = (existing.rows[0] as { c: number }).c;
+    if (floatCount === 0) {
+      const now = new Date();
       await db.insert(providerFloatBalances).values([
         {
           providerCode: "mock",
           network: "MTN",
           currency: "GHS",
-          availableBalance: "2500.00",
+          availableBalance: "25000.00",
           reservedBalance: "0.00",
           lowBalanceThreshold: "300.00",
           lastStatus: "seeded",
-          notes: "Mock provider float for local development",
-          lastSyncedAt: new Date(now),
+          notes: "Mock provider float for development",
+          lastSyncedAt: now,
         },
         {
           providerCode: "mock",
           network: "TELECEL",
           currency: "GHS",
-          availableBalance: "2500.00",
+          availableBalance: "25000.00",
           reservedBalance: "0.00",
           lowBalanceThreshold: "300.00",
           lastStatus: "seeded",
-          notes: "Mock provider float for local development",
-          lastSyncedAt: new Date(now),
+          notes: "Mock provider float for development",
+          lastSyncedAt: now,
         },
       ]);
+    }
     } catch (error) {
       if (!isMissingRelationError(error)) throw error;
-      caps.floatTable = false;
+      // Reflect the missing table in the cached capabilities so the rest of
+      // the request (and /api/health) doesn't optimistically assume it exists.
+      const caps = await getSchemaCapabilities();
+      downgradeCapabilitiesFromError(caps, error);
       console.warn("[flexidata] provider_float_balances missing; skipped the float seed");
     }
+
+  // Promotional price alerts shown on the dashboard.
+  const alertRows = await db.execute(sql`select count(*)::int as c from price_alerts`);
+  const alertCount = (alertRows.rows[0] as { c: number }).c;
+  if (alertCount === 0) {
+    await db.insert(priceAlerts).values([
+      {
+        network: "MTN",
+        title: "Flash drop — 10GB UP2U now GH₵ 29.50",
+        body: "Weekend promo ends Sunday 11:59 PM. Limited pool, first come first served.",
+        tag: "-22%",
+      },
+      {
+        network: "TELECEL",
+        title: "Just4U 7GB Red Vibes at GH₵ 11.99",
+        body: "Personalised red deals refreshed for this weekend only.",
+        tag: "-14%",
+      },
+      {
+        network: "MTN",
+        title: "Agent unlock — SME 20GB at GH₵ 58",
+        body: "Registered agents get this wholesale rate all week.",
+        tag: "AGENT",
+      },
+    ]);
   }
-
-  const plans: (typeof bundlePlans.$inferInsert)[] = [];
-  const add = (
-    network: string,
-    category: string,
-    label: string,
-    validity: string,
-    price: string,
-    retail: string,
-    badge: string | null = null,
-  ) =>
-    plans.push({
-      network,
-      category,
-      label,
-      providerProductCode: deriveProviderProductCode(network, category, label),
-      validity,
-      price,
-      retailPrice: retail,
-      badge,
-      sortOrder: plans.length,
-    });
-
-  add("MTN", "up2u", "1GB", "3 days", "4.50", "6.00");
-  add("MTN", "up2u", "2GB", "7 days", "8.50", "11.00");
-  add("MTN", "up2u", "4GB", "30 days", "15.00", "20.00", "POPULAR");
-  add("MTN", "up2u", "6GB", "30 days", "21.00", "28.00");
-  add("MTN", "up2u", "10GB", "30 days", "34.00", "42.00");
-  add("MTN", "up2u", "15GB", "30 days", "48.00", "62.00");
-
-  add("MTN", "sme", "1GB", "Non-expiry", "4.00", "5.50");
-  add("MTN", "sme", "2GB", "Non-expiry", "7.50", "10.00");
-  add("MTN", "sme", "5GB", "Non-expiry", "17.50", "23.00", "POPULAR");
-  add("MTN", "sme", "10GB", "Non-expiry", "33.00", "42.00");
-  add("MTN", "sme", "20GB", "Non-expiry", "62.00", "78.00");
-  add("MTN", "sme", "50GB", "Non-expiry", "148.00", "185.00");
-
-  add("MTN", "corporate", "5GB", "30 days", "22.00", "27.00");
-  add("MTN", "corporate", "10GB", "30 days", "40.00", "50.00", "B2B");
-  add("MTN", "corporate", "25GB", "30 days", "92.00", "112.00");
-  add("MTN", "corporate", "50GB", "30 days", "175.00", "210.00");
-  add("MTN", "corporate", "100GB", "30 days", "330.00", "400.00");
-
-  add("MTN", "social", "WhatsApp 1GB", "7 days", "2.00", "3.00");
-  add("MTN", "social", "Social Mix 2.5GB", "14 days", "6.00", "8.00", "HOT");
-  add("MTN", "social", "TikTok + X 1GB", "7 days", "3.00", "4.50");
-  add("MTN", "social", "Streaming 3GB", "7 days", "7.50", "10.00");
-
-  add("TELECEL", "tdata", "1GB", "3 days", "3.80", "5.00");
-  add("TELECEL", "tdata", "2.5GB", "7 days", "8.00", "11.00");
-  add("TELECEL", "tdata", "5GB", "30 days", "16.00", "21.00", "POPULAR");
-  add("TELECEL", "tdata", "10GB", "30 days", "31.00", "40.00");
-  add("TELECEL", "tdata", "15GB", "30 days", "45.00", "58.00");
-  add("TELECEL", "tdata", "30GB", "30 days", "85.00", "108.00");
-
-  add("TELECEL", "just4u", "1.5GB Daily Vibe", "1 day", "4.00", "5.50");
-  add("TELECEL", "just4u", "3GB Weekend", "3 days", "6.50", "9.00", "HOT");
-  add("TELECEL", "just4u", "7GB Red Vibes", "7 days", "14.00", "19.00");
-  add("TELECEL", "just4u", "12GB Super", "30 days", "26.00", "34.00");
-
-  add("TELECEL", "gifting", "5GB", "30 days", "23.00", "28.00");
-  add("TELECEL", "gifting", "10GB", "30 days", "42.00", "52.00");
-  add("TELECEL", "gifting", "20GB", "30 days", "78.00", "98.00");
-
-  await withSchemaFallback(async (compat) => {
-    if (isGatewaySchemaComplete(compat, "bundle_plans")) {
-      await db.insert(bundlePlans).values(plans);
-      return;
-    }
-    await db.execute(buildCompatInsert(compat, "bundle_plans", BUNDLE_PLAN_INSERT_FIELDS, plans));
-  }, "seed bundle plans");
-
-  const tx = (
-    ref: string,
-    type: "data" | "airtime" | "conversion" | "deposit" | "transfer" | "redemption",
-    status: "successful" | "pending" | "failed" | "reversed",
-    direction: "in" | "out",
-    title: string,
-    subtitle: string,
-    amount: string,
-    points: number,
-    network: string | null,
-    recipient: string | null,
-    agoMs: number,
-  ) => ({
-    ref,
-    walletId: 1,
-    type,
-    status,
-    fulfillmentStatus: statusToFulfillment(status),
-    direction,
-    title,
-    subtitle,
-    amount,
-    points,
-    network,
-    recipient,
-    provider: type === "data" ? "mock" : null,
-    providerProductCode: null,
-    providerReference: type === "data" ? `mock-${ref}` : null,
-    providerStatus: type === "data" ? status : null,
-    providerMessage: type === "data" ? subtitle : null,
-    fulfillmentAttempts: type === "data" ? 1 : 0,
-    chargedAt: direction === "out" && status !== "failed" ? new Date(now - agoMs) : null,
-    fulfilledAt: status === "successful" ? new Date(now - agoMs) : null,
-    refundedAt: status === "reversed" ? new Date(now - agoMs) : null,
-    lastProviderSyncAt: type === "data" ? new Date(now - agoMs) : null,
-    providerPayload: type === "data" ? { seeded: true, ref } : null,
-    providerResponse: type === "data" ? { status, seeded: true, ref } : null,
-    createdAt: new Date(now - agoMs),
-  });
-
-  const seedTxRows = [
-    tx(
-      makeRef(),
-      "data",
-      "pending",
-      "out",
-      "Telecel 10GB Data",
-      "To 020 987 6543",
-      "31.00",
-      0,
-      "TELECEL",
-      "0209876543",
-      4 * 60000,
-    ),
-    tx(
-      makeRef(),
-      "data",
-      "successful",
-      "out",
-      "MTN 5GB SME Data",
-      "To 027 345 6789",
-      "17.50",
-      35,
-      "MTN",
-      "0273456789",
-      2 * H,
-    ),
-    tx(
-      makeRef(),
-      "deposit",
-      "successful",
-      "in",
-      "Wallet Top-up",
-      "MTN MoMo • 053 219 8840",
-      "50.00",
-      0,
-      "MTN",
-      null,
-      1 * D,
-    ),
-    tx(
-      makeRef(),
-      "airtime",
-      "successful",
-      "out",
-      "MTN Airtime GH₵ 10",
-      "To 024 412 3456 • 2% off",
-      "9.80",
-      20,
-      "MTN",
-      "0244123456",
-      2 * D,
-    ),
-    tx(
-      makeRef(),
-      "conversion",
-      "successful",
-      "in",
-      "Airtime → Cash",
-      "From 024 412 3456 • Fee 12%",
-      "17.60",
-      0,
-      "MTN",
-      "0244123456",
-      3 * D,
-    ),
-    tx(
-      makeRef(),
-      "data",
-      "failed",
-      "out",
-      "MTN 15GB UP2U",
-      "To 055 678 9012 • Not charged",
-      "48.00",
-      0,
-      "MTN",
-      "0556789012",
-      3 * D + 5 * H,
-    ),
-    tx(
-      makeRef(),
-      "redemption",
-      "successful",
-      "out",
-      "Points → GH₵ 5 Airtime",
-      "300 pts redeemed",
-      "0.00",
-      -300,
-      null,
-      null,
-      4 * D,
-    ),
-    tx(
-      makeRef(),
-      "airtime",
-      "successful",
-      "out",
-      "Telecel Airtime GH₵ 20",
-      "To 020 987 6543 • 2% off",
-      "19.60",
-      39,
-      "TELECEL",
-      "0209876543",
-      5 * D,
-    ),
-    tx(
-      makeRef(),
-      "transfer",
-      "successful",
-      "out",
-      "Wallet Transfer",
-      "To wallet 053 211 8329",
-      "30.00",
-      0,
-      null,
-      "0532118329",
-      6 * D,
-    ),
-    tx(
-      makeRef(),
-      "data",
-      "successful",
-      "out",
-      "MTN 2GB UP2U",
-      "To 050 123 4567",
-      "8.50",
-      17,
-      "MTN",
-      "0501234567",
-      8 * D,
-    ),
-    tx(
-      makeRef(),
-      "deposit",
-      "successful",
-      "in",
-      "Wallet Top-up",
-      "Telecel Cash • 020 987 6543",
-      "100.00",
-      0,
-      "TELECEL",
-      null,
-      9 * D,
-    ),
-  ];
-
-  await withSchemaFallback(async (compat) => {
-    if (isGatewaySchemaComplete(compat, "transactions")) {
-      await db.insert(transactions).values(seedTxRows);
-      return;
-    }
-    await db.execute(
-      buildCompatInsert(compat, "transactions", TRANSACTION_INSERT_FIELDS, seedTxRows),
-    );
-  }, "seed demo transactions");
-
-  await db.insert(priceAlerts).values([
-    {
-      network: "MTN",
-      title: "Flash drop — 10GB UP2U now GH₵ 29.50",
-      body: "Weekend promo ends Sunday 11:59 PM. Limited pool, first come first served.",
-      tag: "-22%",
-    },
-    {
-      network: "TELECEL",
-      title: "Just4U 7GB Red Vibes at GH₵ 11.99",
-      body: "Personalised red deals refreshed for this weekend only.",
-      tag: "-14%",
-    },
-    {
-      network: "MTN",
-      title: "Agent unlock — SME 20GB at GH₵ 58",
-      body: "Registered agents get this wholesale rate all week.",
-      tag: "AGENT",
-    },
-  ]);
-
-  await db
-    .insert(scheduledTopups)
-    .values({
-      walletId: 1,
-      network: "MTN",
-      planLabel: "5GB SME Data",
-      price: "17.50",
-      recipient: "0273456789",
-      dayOfMonth: 1,
-    })
-    .onConflictDoNothing();
 }

@@ -1,11 +1,11 @@
-import { getWallet } from "@/lib/data";
 import { Convert } from "@/components/convert";
 import { PageHeader } from "@/components/page-header";
+import { requireSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
 export default async function ConvertPage() {
-  const wallet = await getWallet();
+  const { wallet } = await requireSession();
   return (
     <div>
       <PageHeader
