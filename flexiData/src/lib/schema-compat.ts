@@ -43,6 +43,76 @@ export const BUNDLE_PLAN_GATEWAY_FIELDS = {
 export const PROVIDER_FLOAT_TABLE = "provider_float_balances";
 
 /**
+ * Tables the app writes to during sign-up, listed separately from the gateway
+ * objects above because the two drift for different reasons: the gateway
+ * columns arrive with the data-gateway migration, while these arrive with
+ * whatever migration last touched account creation. A database that is one
+ * migration behind takes the whole sign-up flow down (Drizzle names every
+ * column of the table definition, so `insert into "users"` names columns the
+ * deployed table does not have yet), and sign-up is the one write path that had
+ * no compatibility fallback.
+ */
+export const SIGNUP_TABLES = ["users", "wallets", "agent_profiles"] as const;
+
+/**
+ * Every column sign-up writes, mapped from the key used in the values object to
+ * the real SQL column. Kept here (next to the probe that reads the catalog) so
+ * the insert builder and the drift report can never disagree about what a
+ * "current" schema looks like.
+ */
+export const SIGNUP_INSERT_FIELDS = {
+  users: {
+    name: "name",
+    email: "email",
+    phone: "phone",
+    passwordHash: "password_hash",
+    referralCode: "referral_code",
+    referredBy: "referred_by",
+    referralRewardedAt: "referral_rewarded_at",
+    emailVerifiedAt: "email_verified_at",
+    notifyPromos: "notify_promos",
+    notifyTx: "notify_tx",
+    isAdmin: "is_admin",
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+  },
+  wallets: {
+    userId: "user_id",
+    name: "name",
+    number: "number",
+    balance: "balance",
+    points: "points",
+    isAgent: "is_agent",
+    agentTier: "agent_tier",
+    referralCode: "referral_code",
+    createdAt: "created_at",
+  },
+  agent_profiles: {
+    walletId: "wallet_id",
+    tier: "tier",
+    referralCode: "referral_code",
+    referrals: "referrals",
+    commission: "commission",
+    volume: "volume",
+    createdAt: "created_at",
+  },
+} as const satisfies Record<(typeof SIGNUP_TABLES)[number], Record<string, string>>;
+
+/**
+ * Columns on those tables that are `NOT NULL` **without** a database default.
+ *
+ * The optional ones above can simply be left out of the insert when a database
+ * is a migration behind (the database default fills them in). These cannot: an
+ * insert without them fails for a different reason. A database missing any of
+ * them is not something to degrade around, it is something to report.
+ */
+export const SIGNUP_REQUIRED_COLUMNS = {
+  users: ["name", "email", "phone", "password_hash", "referral_code"],
+  wallets: ["name", "number"],
+  agent_profiles: ["wallet_id", "referral_code"],
+} as const satisfies Record<(typeof SIGNUP_TABLES)[number], readonly string[]>;
+
+/**
  * Every writeable column of `transactions`, mapped from the Drizzle field name
  * to the SQL column name. Drizzle's `insert` always names all columns of the
  * table definition (using `default` for the ones not supplied), so a pre-gateway
@@ -115,6 +185,13 @@ export type SchemaCapabilities = {
   bundlePlans: Set<string>;
   /** Labels the `tx_status` enum accepts. Empty when unknown. */
   txStatusValues: Set<string>;
+  /**
+   * Columns that really exist, per table (gateway tables plus
+   * {@link SIGNUP_TABLES}). A table absent from this map is *unknown*, not
+   * empty — callers assume its columns exist, matching the optimistic default
+   * the rest of this module uses when the catalog cannot be read.
+   */
+  tableColumns: Map<string, Set<string>>;
   /** When true the catalog was read but gateway objects are missing. */
   drifted: boolean;
   detectedAt: number;
@@ -214,6 +291,8 @@ function optimisticCapabilities(): SchemaCapabilities {
     transactions: new Set(GATEWAY_COLUMNS.transactions),
     bundlePlans: new Set(GATEWAY_COLUMNS.bundle_plans),
     txStatusValues: new Set(["successful", "pending", "failed", ...EXTENDED_TX_STATUS_VALUES]),
+    // Unknown, not empty: callers must keep assuming every column exists.
+    tableColumns: new Map(),
     drifted: false,
     detectedAt: Date.now(),
   };
@@ -228,10 +307,22 @@ async function probeCapabilities(): Promise<SchemaCapabilities> {
   const caps = optimisticCapabilities();
 
   try {
+    // One round trip for every table whose shape the app has to adapt to: the
+    // gateway tables, the float ledger, and the tables sign-up writes to.
+    const watched = ["transactions", "bundle_plans", PROVIDER_FLOAT_TABLE, ...SIGNUP_TABLES]
+      .map((table) => `('${table}')`)
+      .join(", ");
+
     const catalog = await db.execute(sql`
       select t.table_name as table_name,
-             coalesce(array_agg(c.column_name), '{}'::text[]) as columns
-      from (values ('transactions'), ('bundle_plans'), ('${sql.raw(PROVIDER_FLOAT_TABLE)}')) as t(table_name)
+             -- The FILTER clause matters: without it a table with no columns
+             -- aggregates to the single-element array {NULL}, which made a
+             -- missing table look like a table with one column called "NULL".
+             coalesce(
+               array_agg(c.column_name) filter (where c.column_name is not null),
+               '{}'::text[]
+             ) as columns
+      from (values ${sql.raw(watched)}) as t(table_name)
       left join information_schema.columns c
         on c.table_name = t.table_name
        and c.table_schema = current_schema()
@@ -253,6 +344,9 @@ async function probeCapabilities(): Promise<SchemaCapabilities> {
     caps.floatTable = floatColumns.length > 0;
     caps.transactions = columnsFor("transactions", txColumns);
     caps.bundlePlans = columnsFor("bundle_plans", planColumns);
+    caps.tableColumns = new Map(
+      [...columnsByTable].map(([table, columns]) => [table, new Set(columns)] as const),
+    );
 
     const enums = await db.execute(sql`
       select t.enum_name as enum_name,
@@ -294,6 +388,9 @@ function completeCapabilities(): SchemaCapabilities {
     transactions: new Set(GATEWAY_COLUMNS.transactions),
     bundlePlans: new Set(GATEWAY_COLUMNS.bundle_plans),
     txStatusValues: new Set(["successful", "pending", "failed", ...EXTENDED_TX_STATUS_VALUES]),
+    // Deliberately empty: strict mode must fail loudly on drift, and an absent
+    // table here means "assume present", so the real insert raises the error.
+    tableColumns: new Map(),
     drifted: false,
     detectedAt: Date.now(),
   };
@@ -568,22 +665,54 @@ export function isGatewaySchemaComplete(caps: SchemaCapabilities, table: Gateway
 }
 
 /**
- * `INSERT` for a table that may be missing the gateway columns. Only columns
- * present in the database (and actually supplied) are named, so the statement
- * stays valid on both schema revisions.
+ * Columns of `table` that are known to be **absent** from the database.
+ *
+ * Returns an empty list both when everything is present and when the catalog
+ * could not be read — an unknown schema stays optimistic and lets the query
+ * itself decide, which is the behaviour the rest of this module relies on.
  */
-export function buildCompatInsert(
+export function missingTableColumns(
   caps: SchemaCapabilities,
-  table: GatewayTableName,
+  table: string,
+  columns: readonly string[],
+): string[] {
+  const present = caps.tableColumns.get(table);
+  if (!present) return [];
+  return columns.filter((column) => !present.has(column));
+}
+
+/** True when every listed column of `table` exists (or the schema is unknown). */
+export function hasTableColumns(
+  caps: SchemaCapabilities,
+  table: string,
+  columns: readonly string[],
+): boolean {
+  return missingTableColumns(caps, table, columns).length === 0;
+}
+
+/**
+ * `INSERT INTO <table> (…) VALUES (…)` naming only the columns the caller
+ * supplies and the database actually has.
+ *
+ * Drizzle's typed `insert` always names *every* column of the table definition
+ * (using `default` for the rest), so a table that is one migration behind
+ * rejects it outright with `column "…" does not exist` — which is how a single
+ * missed migration turned every sign-up into
+ * "Something went wrong. Please try again.". This names nothing the deployed
+ * table does not have, which is also why columns with a database default can
+ * simply be left out.
+ *
+ * @param fields maps the keys used in `rows` to real column names.
+ * @param skip   columns to leave out because they do not exist.
+ */
+export function buildTableInsert(
+  table: string,
   fields: Record<string, string>,
   rows: Record<string, unknown>[],
+  skip: ReadonlySet<string> = new Set(),
+  returning?: string,
 ) {
-  const gatewayColumns = new Set(GATEWAY_COLUMNS[table]);
-  const present = table === "transactions" ? caps.transactions : caps.bundlePlans;
-
-  const writable = Object.entries(fields).filter(
-    ([, column]) => !gatewayColumns.has(column) || present.has(column),
-  );
+  const writable = Object.entries(fields).filter(([, column]) => !skip.has(column));
   const used = writable.filter(([field]) => rows.some((row) => row[field] !== undefined));
 
   if (used.length === 0) {
@@ -598,7 +727,73 @@ export function buildCompatInsert(
     (row) => sql`(${sql.join(used.map(([field]) => sql`${row[field] ?? null}`), sql`, `)})`,
   );
 
-  return sql`insert into ${sql.identifier(table)} (${columnList}) values ${sql.join(tuples, sql`, `)}`;
+  const statement = sql`insert into ${sql.identifier(table)} (${columnList}) values ${sql.join(tuples, sql`, `)}`;
+  return returning ? sql`${statement} returning ${sql.identifier(returning)}` : statement;
+}
+
+/**
+ * `INSERT` for a table that may be missing the gateway columns. Only columns
+ * present in the database (and actually supplied) are named, so the statement
+ * stays valid on both schema revisions.
+ */
+export function buildCompatInsert(
+  caps: SchemaCapabilities,
+  table: GatewayTableName,
+  fields: Record<string, string>,
+  rows: Record<string, unknown>[],
+) {
+  const gatewayColumns = new Set(GATEWAY_COLUMNS[table]);
+  const present = table === "transactions" ? caps.transactions : caps.bundlePlans;
+  const skip = new Set([...gatewayColumns].filter((column) => !present.has(column)));
+
+  return buildTableInsert(table, fields, rows, skip);
+}
+
+export type SignupSchemaReport = {
+  /** `unknown` when the catalog could not be read. */
+  status: "current" | "drifted" | "unknown";
+  /** Columns sign-up can work around (nullable or defaulted). */
+  missing: string[];
+  /** Columns sign-up cannot work without. Non-empty means sign-up is blocked. */
+  requiredMissing: string[];
+  hint?: string;
+};
+
+/**
+ * Drift report for the tables sign-up writes to, surfaced on `/api/health`.
+ *
+ * This is the check that was missing: the app knew how to survive a database
+ * that had not been migrated for the data gateway, but nobody was watching the
+ * tables account creation writes to, so a single missed migration there took
+ * sign-up down with nothing but "Something went wrong" to show for it.
+ */
+export async function describeSignupCompatibility(): Promise<SignupSchemaReport> {
+  const caps = await resolveCapabilities();
+  const missing: string[] = [];
+  const requiredMissing: string[] = [];
+
+  for (const table of SIGNUP_TABLES) {
+    const all = Object.values(SIGNUP_INSERT_FIELDS[table]);
+    missing.push(...missingTableColumns(caps, table, all).map((column) => `${table}.${column}`));
+    requiredMissing.push(
+      ...missingTableColumns(caps, table, SIGNUP_REQUIRED_COLUMNS[table]).map(
+        (column) => `${table}.${column}`,
+      ),
+    );
+  }
+
+  const probed = caps.probed && caps.tableColumns.size > 0;
+  const status = !probed ? "unknown" : missing.length > 0 ? "drifted" : "current";
+
+  return {
+    status,
+    missing,
+    requiredMissing,
+    hint:
+      missing.length > 0
+        ? "Run `npx drizzle-kit push` against this database to bring the sign-up tables up to date."
+        : undefined,
+  };
 }
 
 /** Human-readable drift summary, surfaced on `/api/health`. */

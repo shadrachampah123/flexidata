@@ -4,6 +4,14 @@ import { agentProfiles, users, wallets } from "@/db/schema";
 import { generateReferralCode, hashPassword, verifyPassword } from "@/lib/auth";
 import { ensureSeeded } from "@/lib/seed";
 import { isValidPhone } from "@/lib/format";
+import {
+  SIGNUP_INSERT_FIELDS,
+  SIGNUP_REQUIRED_COLUMNS,
+  SIGNUP_TABLES,
+  buildTableInsert,
+  getSchemaCapabilities,
+  missingTableColumns,
+} from "@/lib/schema-compat";
 
 export type RegistrationInput = {
   name: string;
@@ -80,6 +88,75 @@ function uniqueViolationMessage(error: unknown): string | null {
   return null;
 }
 
+type SignupTable = (typeof SIGNUP_TABLES)[number];
+
+/** The transaction handle Drizzle hands to `db.transaction(...)`. */
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** `db.execute` returns a `QueryResult` here, and a bare array under the test harness. */
+function resultRows(result: unknown): Record<string, unknown>[] {
+  if (Array.isArray(result)) return result as Record<string, unknown>[];
+  const rows = (result as { rows?: unknown } | null)?.rows;
+  return Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
+}
+
+/**
+ * Insert a row naming only the columns the database actually has, and return
+ * its `id`.
+ *
+ * Drizzle's typed `insert` always names every column of the table definition,
+ * so a table one migration behind rejects it with
+ * `column "…" does not exist` — which is exactly how a migration that never
+ * reached production turned every sign-up into a bare
+ * "Something went wrong. Please try again.".
+ */
+async function insertReturningId(
+  tx: Tx,
+  table: SignupTable,
+  values: Record<string, unknown>,
+  skip: ReadonlySet<string>,
+): Promise<number> {
+  const statement = buildTableInsert(table, SIGNUP_INSERT_FIELDS[table], [values], skip, "id");
+  const row = resultRows(await tx.execute(statement))[0];
+  const id = row?.id;
+  if (id === undefined || id === null) {
+    throw new Error(`Inserting into ${table} did not return an id.`);
+  }
+  return Number(id);
+}
+
+/**
+ * Check the tables sign-up writes to before writing to them.
+ *
+ * Optional columns (nullable, or `NOT NULL` with a database default) are simply
+ * left out of the insert when the database does not have them yet. Required
+ * ones cannot be, so a database missing those is reported instead of being
+ * worked around — otherwise the failure just moves and stays just as opaque.
+ */
+async function signupColumnDrift(): Promise<{
+  skip: Record<SignupTable, Set<string>>;
+  missing: string[];
+  requiredMissing: string[];
+}> {
+  const caps = await getSchemaCapabilities();
+  const skip = {} as Record<SignupTable, Set<string>>;
+  const missing: string[] = [];
+  const requiredMissing: string[] = [];
+
+  for (const table of SIGNUP_TABLES) {
+    const absent = new Set(
+      missingTableColumns(caps, table, Object.values(SIGNUP_INSERT_FIELDS[table])),
+    );
+    skip[table] = absent;
+    for (const column of absent) missing.push(`${table}.${column}`);
+    for (const column of missingTableColumns(caps, table, SIGNUP_REQUIRED_COLUMNS[table])) {
+      requiredMissing.push(`${table}.${column}`);
+    }
+  }
+
+  return { skip, missing, requiredMissing };
+}
+
 /**
  * Create a real user account + wallet (and the matching agent-profile slot the
  * agent program expects). Every account starts at GH₵ 0.00 and funds its wallet
@@ -152,41 +229,100 @@ export async function registerUser(input: RegistrationInput): Promise<Registrati
   // All three inserts share one transaction. A user row committed without its
   // wallet leaves that email and phone permanently blocked ("already exists")
   // with no way for the visitor to finish signing up.
+  const { skip, missing, requiredMissing } = await signupColumnDrift();
+
+  if (requiredMissing.length > 0) {
+    console.error(
+      `[flexidata] sign-up is blocked: the database is missing ${requiredMissing.join(", ")}. ` +
+        "Run `npx drizzle-kit push` against this database.",
+    );
+    return {
+      ok: false,
+      error: "Account setup is temporarily unavailable. Please try again shortly.",
+    };
+  }
+
+  // A database that has not been migrated for these columns yet must fail
+  // loudly rather than silently, but it must not take sign-up down with it.
+  const degraded = missing.length > 0;
+  if (degraded) {
+    console.warn(
+      `[flexidata] sign-up is running against an out-of-date schema (${missing.join(", ")} missing); ` +
+        "those columns are being skipped. Run `npx drizzle-kit push` to store them.",
+    );
+  }
+
   try {
     const created = await db.transaction(async (tx) => {
-      const inserted = await tx
-        .insert(users)
-        .values({
-          name,
-          email,
-          phone,
-          passwordHash: hashPassword(password),
-          referralCode,
-          referredBy,
-        })
-        .returning({ id: users.id });
+      // Fast path: a fully migrated database keeps using the typed Drizzle
+      // insert. Only a drifted one falls back to naming columns explicitly,
+      // which is the only way to write to a table that is a migration behind.
+      const userId = degraded
+        ? await insertReturningId(
+            tx,
+            "users",
+            {
+              name,
+              email,
+              phone,
+              passwordHash: hashPassword(password),
+              referralCode,
+              referredBy,
+            },
+            skip.users,
+          )
+        : (
+            await tx
+              .insert(users)
+              .values({
+                name,
+                email,
+                phone,
+                passwordHash: hashPassword(password),
+                referralCode,
+                referredBy,
+              })
+              .returning({ id: users.id })
+          )[0].id;
 
-      const userId = inserted[0].id;
-
-      const walletInserted = await tx
-        .insert(wallets)
-        .values({
-          userId,
-          name,
-          number: phone,
-          balance: "0.00",
-          points: 0,
-          referralCode,
-        })
-        .returning({ id: wallets.id });
+      const walletId = degraded
+        ? await insertReturningId(
+            tx,
+            "wallets",
+            { userId, name, number: phone, balance: "0.00", points: 0, referralCode },
+            skip.wallets,
+          )
+        : (
+            await tx
+              .insert(wallets)
+              .values({
+                userId,
+                name,
+                number: phone,
+                balance: "0.00",
+                points: 0,
+                referralCode,
+              })
+              .returning({ id: wallets.id })
+          )[0].id;
 
       // Agent profile slot (kept in sync with the wallet until the user activates).
-      await tx
-        .insert(agentProfiles)
-        .values({ walletId: walletInserted[0].id, tier: "Starter", referralCode })
-        .onConflictDoNothing();
+      if (degraded) {
+        const statement = buildTableInsert(
+          "agent_profiles",
+          SIGNUP_INSERT_FIELDS.agent_profiles,
+          [{ walletId, tier: "Starter", referralCode }],
+          skip.agent_profiles,
+        );
+        await tx.execute(sql`${statement} on conflict do nothing`);
+      } else {
+        await tx
+          .insert(agentProfiles)
+          .values({ walletId, tier: "Starter", referralCode })
+          .onConflictDoNothing();
+      }
 
-      return { userId, walletId: walletInserted[0].id };
+      return { userId, walletId };
     });
 
     return { ok: true, ...created };

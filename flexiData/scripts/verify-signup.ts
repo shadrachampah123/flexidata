@@ -23,6 +23,7 @@ import { agentProfiles, users, wallets } from "@/db/schema";
 import { normalizePhone, registerUser } from "@/lib/accounts";
 import { repairReferrerIndex } from "@/lib/seed";
 import { groupPhone } from "@/lib/format";
+import { resetSchemaCapabilitiesCache } from "@/lib/schema-compat";
 
 const TAG = Math.random().toString(36).slice(2, 8).toUpperCase();
 
@@ -219,6 +220,57 @@ async function main() {
   });
   createdEmails.push(blockedEmail);
   check("email still usable after the conflict is removed", retry.ok, retry);
+
+  // --- A database that is a migration behind -------------------------------
+  // Drizzle's `insert` names every column of the table definition, so a table
+  // that has not been migrated yet rejects it with
+  // `column "referral_rewarded_at" does not exist`. That turned *every* sign-up
+  // into a 500 "Something went wrong. Please try again." on any deployment
+  // whose migration had not landed — which is how this shipped. Sign-up must
+  // degrade like the rest of the app instead.
+  {
+    const dropped = [
+      "alter table users drop column if exists email_verified_at",
+      "alter table users drop column if exists referral_rewarded_at",
+      "alter table wallets drop column if exists referral_code",
+    ];
+    const restored = [
+      "alter table users add column if not exists email_verified_at timestamp with time zone",
+      "alter table users add column if not exists referral_rewarded_at timestamp with time zone",
+      "alter table wallets add column if not exists referral_code varchar(20)",
+    ];
+    try {
+      for (const ddl of dropped) await db.execute(sql.raw(ddl));
+      // The probe is cached, so it has to be re-read after the schema changes.
+      resetSchemaCapabilitiesCache();
+
+      const behindEmail = email("behind");
+      createdEmails.push(behindEmail);
+      const behind = await registerUser({
+        name: "Behind By One Migration",
+        email: behindEmail,
+        phone: phoneFrom(40),
+        password: "Passw0rd123",
+        referralCode: code,
+      });
+      check("signup works when optional columns have not been migrated yet", behind.ok, behind);
+
+      const stored = await db
+        .select({ id: users.id, referredBy: users.referredBy, number: wallets.number })
+        .from(users)
+        .leftJoin(wallets, sql`${wallets.userId} = ${users.id}`)
+        .where(inArray(users.email, [behindEmail]))
+        .limit(1);
+      check(
+        "the partial row still has its wallet and referrer",
+        !!stored[0]?.number && stored[0]?.referredBy !== null,
+        stored[0],
+      );
+    } finally {
+      for (const ddl of restored) await db.execute(sql.raw(ddl));
+      resetSchemaCapabilitiesCache();
+    }
+  }
 
   return finish();
 }
