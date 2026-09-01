@@ -70,6 +70,8 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run lint`      | Run ESLint                           |
 | `npm run typecheck` | Type-check with TypeScript           |
 | `npm run verify:schema-compat` | Run the data-gateway schema fallback scenarios |
+| `npm run verify:schema-baseline` | Probe a pre-gateway database for the fallback behaviour |
+| `npm run verify:signup` | Sign-up regression checks against a real database (needs `DATABASE_URL`) |
 
 ## Project layout
 
@@ -144,6 +146,55 @@ Common causes and fixes:
 | `relation "wallets" does not exist` | Run `npx drizzle-kit push` against Neon |
 | `column "fulfillment_status" does not exist` / `relation "provider_float_balances" does not exist` | The data gateway columns have not been pushed. The app keeps running with [compatibility fallbacks](#schema-compatibility-fallbacks) (provider tracking is skipped); run `npx drizzle-kit push` to switch it on |
 | `too many connections` | Use the **pooled** Neon URL (contains `-pooler`) |
+| Sign-up says "Something went wrong. Please try again." for anyone using a referral code | The database still had the old **unique** `users_referred_by_idx`. Current code repairs it on boot — see [Sign-up fixes](#sign-up-fixes) |
+| Sign-up rejects a `+233…` number with "Enter a valid Ghanaian phone number" | Pull the latest code — `normalizePhone` now accepts `+233`, `233` and `00233` |
+
+## Sign-up fixes
+
+Three defects made account creation fail:
+
+1. **`users.referred_by` was UNIQUE.** Only one visitor could ever be referred by
+   a given user, so the *second* person to sign up with any referral code hit
+   `duplicate key value violates unique constraint "users_referred_by_idx"` and
+   saw "Something went wrong. Please try again." The index is now a plain
+   `index`; "pay a referrer only once" is (and always was) enforced by
+   `users.referral_rewarded_at` in `src/lib/referrals.ts`.
+
+   **Existing databases repair themselves.** On the first request after boot the
+   app checks `pg_indexes` and, if `users_referred_by_idx` is still unique,
+   swaps it for a plain one in a single transaction — the same change
+   `npx drizzle-kit push` makes. So no manual migration is needed; just deploy.
+   You can watch for this line in the server log:
+
+   ```
+   [flexidata] replaced the UNIQUE users_referred_by_idx with a plain index — sign-ups using a referral code work again
+   ```
+
+   `npx drizzle-kit push` still works if you prefer to do it by hand, and the
+   repair is idempotent — it is a no-op once the index is correct.
+
+2. **International numbers were rejected.** `normalizePhone` ran the input
+   through `phoneDigits`, which caps at 10 digits, so a 12-digit `+233…` number
+   was truncated into something that then failed validation. `+233`, `233` and
+   `00233` are now all normalized to the local `0XXXXXXXXX` form. `groupPhone`
+   no longer truncates the digits as they are typed, so the field can hold an
+   international number at all.
+
+3. **A half-finished sign-up blocked the email forever.** The user, wallet and
+   agent-profile inserts were three separate statements; if the wallet insert
+   failed the user row stayed behind, and every retry answered "An account with
+   this email already exists". The three inserts now run in one transaction, and
+   a concurrent duplicate is reported with the same friendly message the
+   pre-checks give instead of a bare 500.
+
+```bash
+cd flexiData
+npm run verify:signup    # needs DATABASE_URL + AUTH_SECRET; cleans up after itself
+```
+
+The check talks to a real database on purpose: the simulated Postgres behind
+`verify:schema-compat` does not model unique constraints, which is exactly how
+defect 1 shipped.
 
 ## Schema compatibility fallbacks
 

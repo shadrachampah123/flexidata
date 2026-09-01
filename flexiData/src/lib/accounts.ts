@@ -2,7 +2,8 @@ import { eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { agentProfiles, users, wallets } from "@/db/schema";
 import { generateReferralCode, hashPassword, verifyPassword } from "@/lib/auth";
-import { isValidPhone, phoneDigits } from "@/lib/format";
+import { ensureSeeded } from "@/lib/seed";
+import { isValidPhone } from "@/lib/format";
 
 export type RegistrationInput = {
   name: string;
@@ -25,13 +26,21 @@ export function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }
 
-/** Normalize a Ghanaian phone number to the 10-digit 0XX form used in-app. */
+/**
+ * Normalize a Ghanaian phone number to the 10-digit 0XX form used in-app.
+ * Accepts the local 0XX / 9-digit spellings and the international ones a user
+ * is likely to type: +233, 233 and 00233.
+ *
+ * This deliberately does not go through `phoneDigits`, which caps its result at
+ * 10 digits and would silently truncate a 12-digit 233 number into something
+ * that then fails validation ("Enter a valid Ghanaian phone number").
+ */
 export function normalizePhone(value: string): string | null {
-  const digits = phoneDigits(value.replace(/\s/g, ""));
-  // 233XXXXXXXXX (international) -> 0XXXXXXXXX
-  if (digits.startsWith("233") && digits.length === 12) {
-    return `0${digits.slice(3)}`;
-  }
+  const digits = value.replace(/\D/g, "");
+  // +233XXXXXXXXX / 233XXXXXXXXX -> 0XXXXXXXXX
+  if (digits.startsWith("233") && digits.length === 12) return `0${digits.slice(3)}`;
+  // 00233XXXXXXXXX -> 0XXXXXXXXX
+  if (digits.startsWith("00233") && digits.length === 14) return `0${digits.slice(5)}`;
   if (digits.length === 10 && digits.startsWith("0")) return digits;
   if (digits.length === 9 && !digits.startsWith("0")) return `0${digits}`;
   return null;
@@ -46,11 +55,43 @@ export function passwordStrength(password: string): { ok: boolean; error: string
 }
 
 /**
+ * Turn a Postgres unique violation (SQLSTATE 23505) raised while creating an
+ * account into the same human-readable message the pre-insert checks return, so
+ * a concurrent signup never surfaces as a bare "Something went wrong".
+ */
+function uniqueViolationMessage(error: unknown): string | null {
+  // Drizzle wraps the driver error ("Failed query: ..."), so walk the `cause`
+  // chain to reach the Postgres error that carries the SQLSTATE + constraint.
+  let current = error as { code?: string; constraint?: string; cause?: unknown } | null;
+  for (let depth = 0; current && depth < 5; depth++) {
+    if (current.code === "23505") {
+      const constraint = current.constraint ?? "";
+      if (constraint.includes("email")) return "An account with this email already exists";
+      if (constraint.includes("phone") || constraint.includes("number")) {
+        return "An account with this phone number already exists";
+      }
+      if (constraint.includes("referral_code")) {
+        return "That referral code is already taken. Please try again.";
+      }
+      return "An account with these details already exists";
+    }
+    current = current.cause as typeof current;
+  }
+  return null;
+}
+
+/**
  * Create a real user account + wallet (and the matching agent-profile slot the
  * agent program expects). Every account starts at GH₵ 0.00 and funds its wallet
  * via MoMo/card — exactly like DataPlug, RemaData and MyDataBundle onboarding.
  */
 export async function registerUser(input: RegistrationInput): Promise<RegistrationResult> {
+  // Runs the startup seed and, with it, the referral-index repair. This has to
+  // happen before the insert below: on a cold process the register route would
+  // otherwise reach the unique index it is meant to have replaced. Memoized, so
+  // it costs one extra await after the first call.
+  await ensureSeeded();
+
   const name = input.name.trim().replace(/\s+/g, " ");
   const email = normalizeEmail(input.email);
   const phone = normalizePhone(input.phone);
@@ -108,39 +149,55 @@ export async function registerUser(input: RegistrationInput): Promise<Registrati
     referralCode = generateReferralCode(`${name}${attempt}`);
   }
 
-  const inserted = await db
-    .insert(users)
-    .values({
-      name,
-      email,
-      phone,
-      passwordHash: hashPassword(password),
-      referralCode,
-      referredBy,
-    })
-    .returning({ id: users.id });
+  // All three inserts share one transaction. A user row committed without its
+  // wallet leaves that email and phone permanently blocked ("already exists")
+  // with no way for the visitor to finish signing up.
+  try {
+    const created = await db.transaction(async (tx) => {
+      const inserted = await tx
+        .insert(users)
+        .values({
+          name,
+          email,
+          phone,
+          passwordHash: hashPassword(password),
+          referralCode,
+          referredBy,
+        })
+        .returning({ id: users.id });
 
-  const userId = inserted[0].id;
+      const userId = inserted[0].id;
 
-  const walletInserted = await db
-    .insert(wallets)
-    .values({
-      userId,
-      name,
-      number: phone,
-      balance: "0.00",
-      points: 0,
-      referralCode,
-    })
-    .returning({ id: wallets.id });
+      const walletInserted = await tx
+        .insert(wallets)
+        .values({
+          userId,
+          name,
+          number: phone,
+          balance: "0.00",
+          points: 0,
+          referralCode,
+        })
+        .returning({ id: wallets.id });
 
-  // Agent profile slot (kept in sync with the wallet until the user activates).
-  await db
-    .insert(agentProfiles)
-    .values({ walletId: walletInserted[0].id, tier: "Starter", referralCode })
-    .onConflictDoNothing();
+      // Agent profile slot (kept in sync with the wallet until the user activates).
+      await tx
+        .insert(agentProfiles)
+        .values({ walletId: walletInserted[0].id, tier: "Starter", referralCode })
+        .onConflictDoNothing();
 
-  return { ok: true, userId, walletId: walletInserted[0].id };
+      return { userId, walletId: walletInserted[0].id };
+    });
+
+    return { ok: true, ...created };
+  } catch (error) {
+    // Two people submitting the same email/phone at the same instant both pass
+    // the pre-checks above; the database constraint is the real gate. Report it
+    // the same way the pre-checks do instead of as a generic 500.
+    const conflict = uniqueViolationMessage(error);
+    if (conflict) return { ok: false, error: conflict };
+    throw error;
+  }
 }
 
 /** Keep the wallet name/number in sync when the user edits their profile. */
