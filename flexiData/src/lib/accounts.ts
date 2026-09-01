@@ -182,6 +182,34 @@ export async function registerUser(input: RegistrationInput): Promise<Registrati
   const strength = passwordStrength(password);
   if (!strength.ok) return { ok: false, error: strength.error ?? "Weak password" };
 
+  // Check the tables sign-up writes to before any query below touches `users`.
+  // Every pre-insert check selects from that table, so on a database that is a
+  // migration behind enough to be missing one of those columns they would throw
+  // first and turn the registration into a bare "Something went wrong" with no
+  // hint about the schema. The drift guard reports that state up front instead.
+  const { skip, missing, requiredMissing } = await signupColumnDrift();
+
+  if (requiredMissing.length > 0) {
+    console.error(
+      `[flexidata] sign-up is blocked: the database is missing ${requiredMissing.join(", ")}. ` +
+        "Run `npx drizzle-kit push` against this database.",
+    );
+    return {
+      ok: false,
+      error: "Account setup is temporarily unavailable. Please try again shortly.",
+    };
+  }
+
+  // A database that has not been migrated for these columns yet must fail
+  // loudly rather than silently, but it must not take sign-up down with it.
+  const degraded = missing.length > 0;
+  if (degraded) {
+    console.warn(
+      `[flexidata] sign-up is running against an out-of-date schema (${missing.join(", ")} missing); ` +
+        "those columns are being skipped. Run `npx drizzle-kit push` to store them.",
+    );
+  }
+
   // Referral code -> referring user (optional).
   let referredBy: number | null = null;
   if (input.referralCode && input.referralCode.trim()) {
@@ -229,29 +257,6 @@ export async function registerUser(input: RegistrationInput): Promise<Registrati
   // All three inserts share one transaction. A user row committed without its
   // wallet leaves that email and phone permanently blocked ("already exists")
   // with no way for the visitor to finish signing up.
-  const { skip, missing, requiredMissing } = await signupColumnDrift();
-
-  if (requiredMissing.length > 0) {
-    console.error(
-      `[flexidata] sign-up is blocked: the database is missing ${requiredMissing.join(", ")}. ` +
-        "Run `npx drizzle-kit push` against this database.",
-    );
-    return {
-      ok: false,
-      error: "Account setup is temporarily unavailable. Please try again shortly.",
-    };
-  }
-
-  // A database that has not been migrated for these columns yet must fail
-  // loudly rather than silently, but it must not take sign-up down with it.
-  const degraded = missing.length > 0;
-  if (degraded) {
-    console.warn(
-      `[flexidata] sign-up is running against an out-of-date schema (${missing.join(", ")} missing); ` +
-        "those columns are being skipped. Run `npx drizzle-kit push` to store them.",
-    );
-  }
-
   try {
     const created = await db.transaction(async (tx) => {
       // Fast path: a fully migrated database keeps using the typed Drizzle
