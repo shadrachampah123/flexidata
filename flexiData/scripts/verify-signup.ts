@@ -272,6 +272,52 @@ async function main() {
     }
   }
 
+  // --- A required column missing before any `users` query -------------------
+  // The drift guard has to run before the referral-code lookup and the email /
+  // phone uniqueness checks, because every one of those selects from `users`.
+  // On a database missing a *required* signup column — `referral_code` here —
+  // the old ordering let that first query throw first, surfacing as a bare
+  // "Something went wrong" 500. The guard now reports the schema problem and
+  // returns the same friendly "unavailable" error without ever touching
+  // `users`.
+  {
+    const hidden = "referral_code_for_drift_test";
+    try {
+      // Rename rather than drop: renaming preserves the column's type, NOT NULL
+      // and UNIQUE, and is exactly reversible in the `finally` below.
+      await db.execute(
+        sql`alter table users rename column referral_code to ${sql.identifier(hidden)}`,
+      );
+      resetSchemaCapabilitiesCache();
+
+      const missingRequiredEmail = email("missing-required");
+      const missingRequired = await registerUser({
+        name: "Missing Required Column",
+        email: missingRequiredEmail,
+        phone: phoneFrom(50),
+        password: "Passw0rd123",
+        referralCode: code,
+      });
+      check(
+        "missing required signup column is reported before any users query",
+        !missingRequired.ok &&
+          missingRequired.error === "Account setup is temporarily unavailable. Please try again shortly.",
+        missingRequired,
+      );
+
+      const orphan = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.email, [missingRequiredEmail]));
+      check("blocked signup writes no user row", orphan.length === 0, orphan);
+    } finally {
+      await db.execute(
+        sql`alter table users rename column ${sql.identifier(hidden)} to referral_code`,
+      );
+      resetSchemaCapabilitiesCache();
+    }
+  }
+
   return finish();
 }
 
