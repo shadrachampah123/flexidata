@@ -8,7 +8,7 @@ import {
   downgradeCapabilitiesFromError,
   getSchemaCapabilities,
   isGatewaySchemaComplete,
-  isMissingRelationError,
+  isSchemaIncompatibleError,
   withSchemaFallback,
 } from "@/lib/schema-compat";
 
@@ -27,6 +27,30 @@ export function ensureSeeded(): Promise<void> {
     });
   }
   return seedPromise;
+}
+
+/**
+ * Run a best-effort catalog seed step.
+ *
+ * The shared catalog is a warm-up, not a prerequisite for creating an account or
+ * logging in — and `ensureSeeded` runs on the sign-up / login / password-reset
+ * path. A deployment whose database is one migration behind a table this seed
+ * writes to (e.g. `price_alerts`) used to throw out of `runSeed`, reject the
+ * `ensureSeeded()` promise, and surface every account creation as a bare
+ * "Something went wrong. Please try again. (ref …)" 500. A missing relation or
+ * column here is not a reason to take auth down: log it and move on, exactly as
+ * the rest of the app degrades around a lagging schema.
+ */
+async function runSeedStep(label: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (error) {
+    if (!isSchemaIncompatibleError(error)) throw error;
+    console.warn(
+      `[flexidata] seed step "${label}" skipped — the database is missing a table or column ` +
+        `(${(error as Error)?.message ?? error}). Run \`npx drizzle-kit push\` to seed it.`,
+    );
+  }
 }
 
 /**
@@ -132,83 +156,85 @@ async function runSeed(): Promise<void> {
   }
 
   // Bundle plans are the catalog the whole shop is built on.
-  const planRows = await db.execute(sql`select count(*)::int as c from bundle_plans`);
-  const planCount = (planRows.rows[0] as { c: number }).c;
+  await runSeedStep("bundle plans", async () => {
+    const planRows = await db.execute(sql`select count(*)::int as c from bundle_plans`);
+    const planCount = (planRows.rows[0] as { c: number }).c;
 
-  if (planCount === 0) {
-    const plans: (typeof bundlePlans.$inferInsert)[] = [];
-    const add = (
-      network: string,
-      category: string,
-      label: string,
-      validity: string,
-      price: string,
-      retail: string,
-      badge: string | null = null,
-    ) =>
-      plans.push({
-        network,
-        category,
-        label,
-        providerProductCode: deriveProviderProductCode(network, category, label),
-        validity,
-        price,
-        retailPrice: retail,
-        badge,
-        sortOrder: plans.length,
-      });
+    if (planCount === 0) {
+      const plans: (typeof bundlePlans.$inferInsert)[] = [];
+      const add = (
+        network: string,
+        category: string,
+        label: string,
+        validity: string,
+        price: string,
+        retail: string,
+        badge: string | null = null,
+      ) =>
+        plans.push({
+          network,
+          category,
+          label,
+          providerProductCode: deriveProviderProductCode(network, category, label),
+          validity,
+          price,
+          retailPrice: retail,
+          badge,
+          sortOrder: plans.length,
+        });
 
-    add("MTN", "up2u", "1GB", "3 days", "4.50", "6.00");
-    add("MTN", "up2u", "2GB", "7 days", "8.50", "11.00");
-    add("MTN", "up2u", "4GB", "30 days", "15.00", "20.00", "POPULAR");
-    add("MTN", "up2u", "6GB", "30 days", "21.00", "28.00");
-    add("MTN", "up2u", "10GB", "30 days", "34.00", "42.00");
-    add("MTN", "up2u", "15GB", "30 days", "48.00", "62.00");
+      add("MTN", "up2u", "1GB", "3 days", "4.50", "6.00");
+      add("MTN", "up2u", "2GB", "7 days", "8.50", "11.00");
+      add("MTN", "up2u", "4GB", "30 days", "15.00", "20.00", "POPULAR");
+      add("MTN", "up2u", "6GB", "30 days", "21.00", "28.00");
+      add("MTN", "up2u", "10GB", "30 days", "34.00", "42.00");
+      add("MTN", "up2u", "15GB", "30 days", "48.00", "62.00");
 
-    add("MTN", "sme", "1GB", "Non-expiry", "4.00", "5.50");
-    add("MTN", "sme", "2GB", "Non-expiry", "7.50", "10.00");
-    add("MTN", "sme", "5GB", "Non-expiry", "17.50", "23.00", "POPULAR");
-    add("MTN", "sme", "10GB", "Non-expiry", "33.00", "42.00");
-    add("MTN", "sme", "20GB", "Non-expiry", "62.00", "78.00");
-    add("MTN", "sme", "50GB", "Non-expiry", "148.00", "185.00");
+      add("MTN", "sme", "1GB", "Non-expiry", "4.00", "5.50");
+      add("MTN", "sme", "2GB", "Non-expiry", "7.50", "10.00");
+      add("MTN", "sme", "5GB", "Non-expiry", "17.50", "23.00", "POPULAR");
+      add("MTN", "sme", "10GB", "Non-expiry", "33.00", "42.00");
+      add("MTN", "sme", "20GB", "Non-expiry", "62.00", "78.00");
+      add("MTN", "sme", "50GB", "Non-expiry", "148.00", "185.00");
 
-    add("MTN", "corporate", "5GB", "30 days", "22.00", "27.00");
-    add("MTN", "corporate", "10GB", "30 days", "40.00", "50.00", "B2B");
-    add("MTN", "corporate", "25GB", "30 days", "92.00", "112.00");
-    add("MTN", "corporate", "50GB", "30 days", "175.00", "210.00");
-    add("MTN", "corporate", "100GB", "30 days", "330.00", "400.00");
+      add("MTN", "corporate", "5GB", "30 days", "22.00", "27.00");
+      add("MTN", "corporate", "10GB", "30 days", "40.00", "50.00", "B2B");
+      add("MTN", "corporate", "25GB", "30 days", "92.00", "112.00");
+      add("MTN", "corporate", "50GB", "30 days", "175.00", "210.00");
+      add("MTN", "corporate", "100GB", "30 days", "330.00", "400.00");
 
-    add("MTN", "social", "WhatsApp 1GB", "7 days", "2.00", "3.00");
-    add("MTN", "social", "Social Mix 2.5GB", "14 days", "6.00", "8.00", "HOT");
-    add("MTN", "social", "TikTok + X 1GB", "7 days", "3.00", "4.50");
-    add("MTN", "social", "Streaming 3GB", "7 days", "7.50", "10.00");
+      add("MTN", "social", "WhatsApp 1GB", "7 days", "2.00", "3.00");
+      add("MTN", "social", "Social Mix 2.5GB", "14 days", "6.00", "8.00", "HOT");
+      add("MTN", "social", "TikTok + X 1GB", "7 days", "3.00", "4.50");
+      add("MTN", "social", "Streaming 3GB", "7 days", "7.50", "10.00");
 
-    add("TELECEL", "tdata", "1GB", "3 days", "3.80", "5.00");
-    add("TELECEL", "tdata", "2.5GB", "7 days", "8.00", "11.00");
-    add("TELECEL", "tdata", "5GB", "30 days", "16.00", "21.00", "POPULAR");
-    add("TELECEL", "tdata", "10GB", "30 days", "31.00", "40.00");
-    add("TELECEL", "tdata", "15GB", "30 days", "45.00", "58.00");
-    add("TELECEL", "tdata", "30GB", "30 days", "85.00", "108.00");
+      add("TELECEL", "tdata", "1GB", "3 days", "3.80", "5.00");
+      add("TELECEL", "tdata", "2.5GB", "7 days", "8.00", "11.00");
+      add("TELECEL", "tdata", "5GB", "30 days", "16.00", "21.00", "POPULAR");
+      add("TELECEL", "tdata", "10GB", "30 days", "31.00", "40.00");
+      add("TELECEL", "tdata", "15GB", "30 days", "45.00", "58.00");
+      add("TELECEL", "tdata", "30GB", "30 days", "85.00", "108.00");
 
-    add("TELECEL", "just4u", "1.5GB Daily Vibe", "1 day", "4.00", "5.50");
-    add("TELECEL", "just4u", "3GB Weekend", "3 days", "6.50", "9.00", "HOT");
-    add("TELECEL", "just4u", "7GB Red Vibes", "7 days", "14.00", "19.00");
-    add("TELECEL", "just4u", "12GB Super", "30 days", "26.00", "34.00");
+      add("TELECEL", "just4u", "1.5GB Daily Vibe", "1 day", "4.00", "5.50");
+      add("TELECEL", "just4u", "3GB Weekend", "3 days", "6.50", "9.00", "HOT");
+      add("TELECEL", "just4u", "7GB Red Vibes", "7 days", "14.00", "19.00");
+      add("TELECEL", "just4u", "12GB Super", "30 days", "26.00", "34.00");
 
-    add("TELECEL", "gifting", "5GB", "30 days", "23.00", "28.00");
-    add("TELECEL", "gifting", "10GB", "30 days", "42.00", "52.00");
-    add("TELECEL", "gifting", "20GB", "30 days", "78.00", "98.00");
+      add("TELECEL", "gifting", "5GB", "30 days", "23.00", "28.00");
+      add("TELECEL", "gifting", "10GB", "30 days", "42.00", "52.00");
+      add("TELECEL", "gifting", "20GB", "30 days", "78.00", "98.00");
 
-    // On a legacy database (pre-gateway migration) `provider_product_code`
-    // does not exist; the compat insert names only the columns that are there.
-    await withSchemaFallback(async (compat) => {
-      if (isGatewaySchemaComplete(compat, "bundle_plans")) {
-        await db.insert(bundlePlans).values(plans);
-        return;
-      }
-      await db.execute(buildCompatInsert(compat, "bundle_plans", BUNDLE_PLAN_INSERT_FIELDS, plans));
-    }, "seed bundle plans");
-  }
+      // On a legacy database (pre-gateway migration) `provider_product_code`
+      // does not exist; the compat insert names only the columns that are there.
+      await withSchemaFallback(async (compat) => {
+        if (isGatewaySchemaComplete(compat, "bundle_plans")) {
+          await db.insert(bundlePlans).values(plans);
+          return;
+        }
+        await db.execute(buildCompatInsert(compat, "bundle_plans", BUNDLE_PLAN_INSERT_FIELDS, plans));
+      }, "seed bundle plans");
+    }
+  });
 
   // Provider float (mock adapter) — needed by the data purchase flow.
   // The table ships in the current schema; only guard against a database that
@@ -243,38 +269,41 @@ async function runSeed(): Promise<void> {
         },
       ]);
     }
-    } catch (error) {
-      if (!isMissingRelationError(error)) throw error;
-      // Reflect the missing table in the cached capabilities so the rest of
-      // the request (and /api/health) doesn't optimistically assume it exists.
-      const caps = await getSchemaCapabilities();
-      downgradeCapabilitiesFromError(caps, error);
-      console.warn("[flexidata] provider_float_balances missing; skipped the float seed");
-    }
-
-  // Promotional price alerts shown on the dashboard.
-  const alertRows = await db.execute(sql`select count(*)::int as c from price_alerts`);
-  const alertCount = (alertRows.rows[0] as { c: number }).c;
-  if (alertCount === 0) {
-    await db.insert(priceAlerts).values([
-      {
-        network: "MTN",
-        title: "Flash drop — 10GB UP2U now GH₵ 29.50",
-        body: "Weekend promo ends Sunday 11:59 PM. Limited pool, first come first served.",
-        tag: "-22%",
-      },
-      {
-        network: "TELECEL",
-        title: "Just4U 7GB Red Vibes at GH₵ 11.99",
-        body: "Personalised red deals refreshed for this weekend only.",
-        tag: "-14%",
-      },
-      {
-        network: "MTN",
-        title: "Agent unlock — SME 20GB at GH₵ 58",
-        body: "Registered agents get this wholesale rate all week.",
-        tag: "AGENT",
-      },
-    ]);
+  } catch (error) {
+    if (!isSchemaIncompatibleError(error)) throw error;
+    // Reflect the missing object in the cached capabilities so the rest of
+    // the request (and /api/health) doesn't optimistically assume it exists.
+    const caps = await getSchemaCapabilities();
+    downgradeCapabilitiesFromError(caps, error);
+    console.warn("[flexidata] provider_float_balances missing; skipped the float seed");
   }
+
+  // Promotional price alerts shown on the dashboard. Not a reason to take the
+  // sign-up / login path down if a deployment has not migrated the table yet.
+  await runSeedStep("price alerts", async () => {
+    const alertRows = await db.execute(sql`select count(*)::int as c from price_alerts`);
+    const alertCount = (alertRows.rows[0] as { c: number }).c;
+    if (alertCount === 0) {
+      await db.insert(priceAlerts).values([
+        {
+          network: "MTN",
+          title: "Flash drop — 10GB UP2U now GH₵ 29.50",
+          body: "Weekend promo ends Sunday 11:59 PM. Limited pool, first come first served.",
+          tag: "-22%",
+        },
+        {
+          network: "TELECEL",
+          title: "Just4U 7GB Red Vibes at GH₵ 11.99",
+          body: "Personalised red deals refreshed for this weekend only.",
+          tag: "-14%",
+        },
+        {
+          network: "MTN",
+          title: "Agent unlock — SME 20GB at GH₵ 58",
+          body: "Registered agents get this wholesale rate all week.",
+          tag: "AGENT",
+        },
+      ]);
+    }
+  });
 }

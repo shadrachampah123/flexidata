@@ -71,6 +71,7 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run typecheck` | Type-check with TypeScript           |
 | `npm run verify:schema-compat` | Run the data-gateway schema fallback scenarios |
 | `npm run verify:schema-baseline` | Probe a pre-gateway database for the fallback behaviour |
+| `npm run verify:seed-resilience` | Check the shared catalog seed can't take sign-up down on a lagging schema |
 | `npm run verify:signup` | Sign-up regression checks against a real database (needs `DATABASE_URL`) |
 
 ## Project layout
@@ -175,7 +176,7 @@ Common causes and fixes:
 | `relation "wallets" does not exist` | Run `npx drizzle-kit push` against Neon |
 | `column "fulfillment_status" does not exist` / `relation "provider_float_balances" does not exist` | The data gateway columns have not been pushed. The app keeps running with [compatibility fallbacks](#schema-compatibility-fallbacks) (provider tracking is skipped); run `npx drizzle-kit push` to switch it on |
 | `too many connections` | Use the **pooled** Neon URL (contains `-pooler`) |
-| Sign-up says "Something went wrong. Please try again. (ref AB12CD)" | The `ref` is logged next to the real error — search your Vercel logs for `[flexidata] register failed ref=AB12CD`. The usual cause is drift on the sign-up tables; see [Sign-up fixes](#sign-up-fixes) |
+| Sign-up says "Something went wrong. Please try again. (ref AB12CD)" | The `ref` is logged next to the real error — search your Vercel logs for `[flexidata] register failed ref=AB12CD`. The usual cause is drift on the sign-up tables **or** the shared catalog seed (`price_alerts` / `bundle_plans`); see [Sign-up fixes](#sign-up-fixes) |
 | Sign-up says "Something went wrong. Please try again." and only for a referral code | The database still carries a UNIQUE constraint on `users.referred_by`. Current code repairs it on boot, whatever it is named — see [Sign-up fixes](#sign-up-fixes) |
 | Sign-up says "Account setup is temporarily unavailable" | `/api/health` reports `signupSchema.blocked: true` with the exact missing columns. Run `npx drizzle-kit push` against that database |
 | Sign-up rejects a `+233…` number with "Enter a valid Ghanaian phone number" | Pull the latest code — `normalizePhone` now accepts `+233`, `233` and `00233` |
@@ -245,9 +246,24 @@ Four defects made account creation fail:
    - Either way the drift is logged on boot, and `/api/health` reports
      `signupSchema.status` as `current`, `drifted` or `unknown`.
 
+5. **The shared catalog seed could 500 *every* sign-up alone.** `ensureSeeded()`
+   runs on the sign-up / login / password-reset path and writes a few shared
+   catalog tables (`bundle_plans`, `provider_float_balances`, `price_alerts`).
+   The compatibility work in defect 4 guarded the tables account creation
+   writes to, but not the seed's own tables, so a deployment whose database was
+   one migration behind `price_alerts` let the seed throw. That rejected the
+   `ensureSeeded()` promise and surfaced account creation as
+   "Something went wrong. Please try again. (ref …)" — and because the failure
+   happened *before* the user row was written, **every retry reproduced it**.
+
+   The seed is now best-effort: a missing table or column is logged and skipped
+   (exactly like the data-gateway fallbacks), so a lagging schema can no longer
+   take auth down.
+
 ```bash
 cd flexiData
-npm run verify:signup    # needs DATABASE_URL + AUTH_SECRET; cleans up after itself
+npm run verify:seed-resilience   # no database needed (in-memory simulator)
+npm run verify:signup            # needs DATABASE_URL + AUTH_SECRET; cleans up after itself
 ```
 
 The check talks to a real database on purpose: the simulated Postgres behind
