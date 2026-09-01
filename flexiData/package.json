@@ -11,6 +11,7 @@
     "db:migrate": "drizzle-kit migrate",
     "verify:schema-compat": "tsx scripts/schema-compat-harness.ts",
     "verify:schema-baseline": "tsx scripts/schema-baseline-probe.ts",
+    "verify:seed-resilience": "tsx scripts/verify-seed-resilience.ts",
     "verify:signup": "tsx scripts/verify-signup.ts"
   },
   "dependencies": {
