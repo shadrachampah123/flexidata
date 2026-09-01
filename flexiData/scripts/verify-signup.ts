@@ -21,6 +21,7 @@ import { inArray, sql } from "drizzle-orm";
 import { db, pool } from "@/db";
 import { agentProfiles, users, wallets } from "@/db/schema";
 import { normalizePhone, registerUser } from "@/lib/accounts";
+import { repairReferrerIndex } from "@/lib/seed";
 import { groupPhone } from "@/lib/format";
 
 const TAG = Math.random().toString(36).slice(2, 8).toUpperCase();
@@ -37,6 +38,14 @@ function phoneFrom(seed: number): string {
   return `024${tail}`;
 }
 
+/** The current definition of the referral index, or null when it is absent. */
+async function referrerIndexDef(): Promise<string | null> {
+  const rows = await db.execute<{ indexdef: string }>(
+    sql`select indexdef from pg_indexes where indexname = 'users_referred_by_idx'`,
+  );
+  return rows.rows[0]?.indexdef ?? null;
+}
+
 async function main() {
   console.log(`\nsignup harness — tag ${TAG}\n`);
 
@@ -50,6 +59,46 @@ async function main() {
   // registerUser lowercases addresses, so build them lowercase to begin with.
   const email = (n: string) => `${n}-${TAG.toLowerCase()}@flexidata-verify.test`;
   const createdEmails: string[] = [];
+
+  // --- Self-healing index repair ------------------------------------------
+  // Runs before this harness creates any referred users: re-breaking the index
+  // requires a table with no duplicate referred_by values. Deployments that
+  // cannot run `npx drizzle-kit push` depend on this repair happening on boot.
+  await db.execute(sql`drop index if exists users_referred_by_idx`);
+  let reBroken = true;
+  try {
+    await db.execute(sql`create unique index users_referred_by_idx on users (referred_by)`);
+  } catch {
+    // Duplicate referrals already exist, so Postgres refuses the unique index.
+    // That is the post-fix state — nothing left to repair.
+    reBroken = false;
+    await db.execute(
+      sql`create index if not exists users_referred_by_idx on users (referred_by)`,
+    );
+    console.log("  SKIP  cannot re-break the index (duplicate referrals already present)");
+  }
+  if (reBroken) {
+    check(
+      "precondition: index is UNIQUE again",
+      /unique/i.test((await referrerIndexDef()) ?? ""),
+      await referrerIndexDef(),
+    );
+
+    await repairReferrerIndex();
+    const healed = await referrerIndexDef();
+    check(
+      "repairReferrerIndex swaps UNIQUE for a plain index",
+      !!healed && !/unique/i.test(healed),
+      healed,
+    );
+
+    await repairReferrerIndex();
+    check(
+      "repair is idempotent (second call is a no-op)",
+      (await referrerIndexDef()) === healed,
+      await referrerIndexDef(),
+    );
+  }
 
   // --- The referrer -------------------------------------------------------
   const referrerEmail = email("referrer");

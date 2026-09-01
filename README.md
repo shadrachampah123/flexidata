@@ -146,7 +146,7 @@ Common causes and fixes:
 | `relation "wallets" does not exist` | Run `npx drizzle-kit push` against Neon |
 | `column "fulfillment_status" does not exist` / `relation "provider_float_balances" does not exist` | The data gateway columns have not been pushed. The app keeps running with [compatibility fallbacks](#schema-compatibility-fallbacks) (provider tracking is skipped); run `npx drizzle-kit push` to switch it on |
 | `too many connections` | Use the **pooled** Neon URL (contains `-pooler`) |
-| Sign-up says "Something went wrong. Please try again." for anyone using a referral code | The database still has the old **unique** `users_referred_by_idx`. Run `npx drizzle-kit push` — see [Sign-up fixes](#sign-up-fixes) |
+| Sign-up says "Something went wrong. Please try again." for anyone using a referral code | The database still had the old **unique** `users_referred_by_idx`. Current code repairs it on boot — see [Sign-up fixes](#sign-up-fixes) |
 | Sign-up rejects a `+233…` number with "Enter a valid Ghanaian phone number" | Pull the latest code — `normalizePhone` now accepts `+233`, `233` and `00233` |
 
 ## Sign-up fixes
@@ -160,12 +160,18 @@ Three defects made account creation fail:
    `index`; "pay a referrer only once" is (and always was) enforced by
    `users.referral_rewarded_at` in `src/lib/referrals.ts`.
 
-   **This one needs a schema push on every existing database:**
+   **Existing databases repair themselves.** On the first request after boot the
+   app checks `pg_indexes` and, if `users_referred_by_idx` is still unique,
+   swaps it for a plain one in a single transaction — the same change
+   `npx drizzle-kit push` makes. So no manual migration is needed; just deploy.
+   You can watch for this line in the server log:
 
-   ```bash
-   cd flexiData
-   npx drizzle-kit push   # replaces the unique index with a non-unique one
    ```
+   [flexidata] replaced the UNIQUE users_referred_by_idx with a plain index — sign-ups using a referral code work again
+   ```
+
+   `npx drizzle-kit push` still works if you prefer to do it by hand, and the
+   repair is idempotent — it is a no-op once the index is correct.
 
 2. **International numbers were rejected.** `normalizePhone` ran the input
    through `phoneDigits`, which caps at 10 digits, so a 12-digit `+233…` number

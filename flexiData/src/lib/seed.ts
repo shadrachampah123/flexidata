@@ -29,7 +29,61 @@ export function ensureSeeded(): Promise<void> {
   return seedPromise;
 }
 
+/**
+ * Self-healing repair for the sign-up blocker.
+ *
+ * `users.referred_by` used to carry a UNIQUE index, so only one visitor could
+ * ever be referred by a given user and the *second* signup using any referral
+ * code failed with `duplicate key value violates unique constraint
+ * "users_referred_by_idx"`. The schema now declares a plain index, but a
+ * database provisioned before that change still carries the unique one, and not
+ * every deployment is able to run `npx drizzle-kit push`.
+ *
+ * This does exactly what push would — atomically swap the index — on first
+ * request after boot. It is a no-op when the index is already correct, when it
+ * is absent (push has not created it yet), or when the table does not exist.
+ *
+ * Exported so `npm run verify:signup` can exercise it directly: `ensureSeeded`
+ * is memoized per process, so a second repair cannot be triggered through it.
+ */
+export async function repairReferrerIndex(): Promise<void> {
+  const rows = await db.execute<{ indexdef: string }>(sql`
+    select indexdef from pg_indexes
+    where schemaname = current_schema()
+      and tablename = 'users'
+      and indexname = 'users_referred_by_idx'
+  `);
+  const indexdef = rows.rows[0]?.indexdef;
+  // No index at all, or already non-unique: nothing to do.
+  if (!indexdef || !/\bunique\b/i.test(indexdef)) return;
+
+  // Postgres DDL is transactional, so the swap cannot leave the table without
+  // an index if the second statement fails.
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`drop index if exists users_referred_by_idx`);
+    await tx.execute(
+      sql`create index if not exists users_referred_by_idx on users (referred_by)`,
+    );
+  });
+  console.info(
+    "[flexidata] replaced the UNIQUE users_referred_by_idx with a plain index — " +
+      "sign-ups using a referral code work again",
+  );
+}
+
 async function runSeed(): Promise<void> {
+  // Repair blocking schema drift before anything writes per-user rows. A failure
+  // here must not take the app down: the rest of the seed is still useful, and
+  // a deployment without DDL rights should degrade, not crash.
+  try {
+    await repairReferrerIndex();
+  } catch (error) {
+    console.warn(
+      "[flexidata] could not repair users_referred_by_idx:",
+      (error as Error)?.message ?? error,
+    );
+  }
+
   // Bundle plans are the catalog the whole shop is built on.
   const planRows = await db.execute(sql`select count(*)::int as c from bundle_plans`);
   const planCount = (planRows.rows[0] as { c: number }).c;
