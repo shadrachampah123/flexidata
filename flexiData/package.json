@@ -7,6 +7,8 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
     "verify:schema-compat": "tsx scripts/schema-compat-harness.ts",
     "verify:schema-baseline": "tsx scripts/schema-baseline-probe.ts",
     "verify:signup": "tsx scripts/verify-signup.ts"
