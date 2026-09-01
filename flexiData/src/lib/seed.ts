@@ -43,31 +43,73 @@ export function ensureSeeded(): Promise<void> {
  * request after boot. It is a no-op when the index is already correct, when it
  * is absent (push has not created it yet), or when the table does not exist.
  *
+ * The uniqueness is found in the catalog by column, not by name, so every
+ * spelling of the old constraint is repaired — an index called
+ * `users_referred_by_idx`, a unique constraint, or an index under any other
+ * name.
+ *
  * Exported so `npm run verify:signup` can exercise it directly: `ensureSeeded`
  * is memoized per process, so a second repair cannot be triggered through it.
  */
 export async function repairReferrerIndex(): Promise<void> {
-  const rows = await db.execute<{ indexdef: string }>(sql`
-    select indexdef from pg_indexes
-    where schemaname = current_schema()
-      and tablename = 'users'
-      and indexname = 'users_referred_by_idx'
+  // Look the uniqueness up in the catalog rather than by name. A database that
+  // has been pushed, reverted and hand-patched over time may enforce it as a
+  // unique *constraint* (`users_referred_by_key`) or under a different index
+  // name entirely; matching on `indexname = 'users_referred_by_idx'` alone
+  // missed those and left sign-up broken while claiming to be self-healing.
+  //
+  // `pg_table_is_visible` rather than `table_schema = current_schema()`: it
+  // follows the search_path, so it keeps working when the deployment runs with
+  // a non-default one.
+  const rows = await db.execute<{ relation: string; constraint_name: string | null }>(sql`
+    select ic.relname::text as relation,
+           con.conname::text as constraint_name
+    from pg_index i
+    join pg_class c on c.oid = i.indrelid
+    join pg_class ic on ic.oid = i.indexrelid
+    left join pg_constraint con
+      on con.conindid = i.indexrelid
+     and con.contype = 'u'
+    where c.relname = 'users'
+      and pg_table_is_visible(c.oid)
+      and i.indisunique
+      and i.indnatts = 1
+      and (
+        select a.attname
+        from pg_attribute a
+        where a.attrelid = c.oid
+          and a.attnum = i.indkey[0]
+      ) = 'referred_by'
   `);
-  const indexdef = rows.rows[0]?.indexdef;
-  // No index at all, or already non-unique: nothing to do.
-  if (!indexdef || !/\bunique\b/i.test(indexdef)) return;
+
+  const found = rows.rows ?? [];
+  // No unique index on that column: nothing to do.
+  if (found.length === 0) return;
 
   // Postgres DDL is transactional, so the swap cannot leave the table without
   // an index if the second statement fails.
   await db.transaction(async (tx) => {
-    await tx.execute(sql`drop index if exists users_referred_by_idx`);
+    for (const row of found) {
+      // A unique constraint owns its index, so it has to be dropped through
+      // the constraint — `drop index` would fail with "cannot drop index …
+      // because constraint … requires it".
+      if (row.constraint_name) {
+        await tx.execute(
+          sql`alter table users drop constraint ${sql.identifier(row.constraint_name)}`,
+        );
+      } else {
+        await tx.execute(sql`drop index if exists ${sql.identifier(row.relation)}`);
+      }
+    }
     await tx.execute(
       sql`create index if not exists users_referred_by_idx on users (referred_by)`,
     );
   });
+
   console.info(
-    "[flexidata] replaced the UNIQUE users_referred_by_idx with a plain index — " +
-      "sign-ups using a referral code work again",
+    `[flexidata] replaced the UNIQUE constraint on users.referred_by (${found
+      .map((row) => row.constraint_name ?? row.relation)
+      .join(", ")}) with a plain index — sign-ups using a referral code work again`,
   );
 }
 
@@ -78,9 +120,14 @@ async function runSeed(): Promise<void> {
   try {
     await repairReferrerIndex();
   } catch (error) {
+    // Sign-up with a referral code will keep failing while the UNIQUE
+    // constraint is in place, so say so plainly rather than burying it.
     console.warn(
-      "[flexidata] could not repair users_referred_by_idx:",
+      "[flexidata] could not remove the UNIQUE constraint on users.referred_by — " +
+        "sign-ups that use a referral code will fail until it is gone:",
       (error as Error)?.message ?? error,
+      "\n  Fix: run `npx drizzle-kit push` against this database, or, if the role " +
+        "cannot run DDL, drop the constraint manually.",
     );
   }
 

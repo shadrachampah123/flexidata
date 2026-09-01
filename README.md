@@ -52,7 +52,7 @@ cp .env.example .env.local
 #       node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 
 # 2. Create the schema
-npx drizzle-kit push
+npx drizzle-kit push    # targets DATABASE_URL from .env.local — see "Migrations"
 
 # 3. Run the app (seeds the shared bundle catalog on first request)
 npm run dev
@@ -77,7 +77,7 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ```
 flexiData/
-├─ drizzle.config.json   # Drizzle ORM config
+├─ drizzle.config.ts     # Drizzle ORM config (reads .env.local — see Migrations)
 ├─ src/
 │  ├─ app/               # Routes, pages, layout & API routes
 │  ├─ components/        # UI components
@@ -108,6 +108,35 @@ flexiData/
 | `DATA_API_SYNC_FLOAT_ON_PURCHASE` | Whether to sync cached float balances before purchase attempts |
 | `DATA_API_SCHEMA_FALLBACKS` | Tolerate a database that has not been migrated for the data gateway yet (default `true`) |
 | `DATA_API_SCHEMA_PROBE_MS` | How often the detected gateway schema is re-read from the catalog (default `60000`) |
+| `DRIZZLE_ALLOW_LOCAL_DB` | Set to `1` to let `drizzle-kit` target a `localhost` database on CI/Vercel (it refuses by default) |
+
+## Migrations
+
+`flexiData/drizzle.config.ts` resolves the database to migrate in three steps:
+
+1. It loads `.env.local` **and** `.env` itself, with `.env.local` winning — the
+   same precedence Next.js uses. It has to: drizzle-kit only auto-loads `.env`,
+   so a `DATABASE_URL` that lives in `.env.local` (which is what this README
+   tells you to create) is invisible to it. That is how an earlier `drizzle-kit
+   push` aimed at production silently migrated a laptop's `localhost` database
+   instead.
+2. It refuses to guess. With no `DATABASE_URL` set it aborts with an
+   explanation rather than falling back to a hard-coded local URL.
+3. On CI or Vercel it refuses a `localhost` / `127.0.0.1` database outright,
+   unless you set `DRIZZLE_ALLOW_LOCAL_DB=1`.
+
+`drizzle-kit generate` still works without a database — it only diffs the
+schema, so it is the one command exempt from step 2.
+
+To migrate production, run it from your machine against the production URL:
+
+```bash
+cd flexiData
+DATABASE_URL='postgresql://…?sslmode=require' npx drizzle-kit push
+```
+
+Then check `/api/health`: `gatewaySchema` and `signupSchema` should both read
+`"current"`.
 
 ## Deploying to Vercel (with Neon)
 
@@ -146,12 +175,15 @@ Common causes and fixes:
 | `relation "wallets" does not exist` | Run `npx drizzle-kit push` against Neon |
 | `column "fulfillment_status" does not exist` / `relation "provider_float_balances" does not exist` | The data gateway columns have not been pushed. The app keeps running with [compatibility fallbacks](#schema-compatibility-fallbacks) (provider tracking is skipped); run `npx drizzle-kit push` to switch it on |
 | `too many connections` | Use the **pooled** Neon URL (contains `-pooler`) |
-| Sign-up says "Something went wrong. Please try again." for anyone using a referral code | The database still had the old **unique** `users_referred_by_idx`. Current code repairs it on boot — see [Sign-up fixes](#sign-up-fixes) |
+| Sign-up says "Something went wrong. Please try again. (ref AB12CD)" | The `ref` is logged next to the real error — search your Vercel logs for `[flexidata] register failed ref=AB12CD`. The usual cause is drift on the sign-up tables; see [Sign-up fixes](#sign-up-fixes) |
+| Sign-up says "Something went wrong. Please try again." and only for a referral code | The database still carries a UNIQUE constraint on `users.referred_by`. Current code repairs it on boot, whatever it is named — see [Sign-up fixes](#sign-up-fixes) |
+| Sign-up says "Account setup is temporarily unavailable" | `/api/health` reports `signupSchema.blocked: true` with the exact missing columns. Run `npx drizzle-kit push` against that database |
 | Sign-up rejects a `+233…` number with "Enter a valid Ghanaian phone number" | Pull the latest code — `normalizePhone` now accepts `+233`, `233` and `00233` |
+| `/api/health` reports `signupSchema.status: "drifted"` | Sign-up still works (the missing columns are skipped), but the database is behind. Run `npx drizzle-kit push` to store them |
 
 ## Sign-up fixes
 
-Three defects made account creation fail:
+Four defects made account creation fail:
 
 1. **`users.referred_by` was UNIQUE.** Only one visitor could ever be referred by
    a given user, so the *second* person to sign up with any referral code hit
@@ -161,14 +193,20 @@ Three defects made account creation fail:
    `users.referral_rewarded_at` in `src/lib/referrals.ts`.
 
    **Existing databases repair themselves.** On the first request after boot the
-   app checks `pg_indexes` and, if `users_referred_by_idx` is still unique,
-   swaps it for a plain one in a single transaction — the same change
+   app looks the uniqueness up in the catalog **by column, not by name**, and
+   swaps it for a plain index in a single transaction — the same change
    `npx drizzle-kit push` makes. So no manual migration is needed; just deploy.
    You can watch for this line in the server log:
 
    ```
-   [flexidata] replaced the UNIQUE users_referred_by_idx with a plain index — sign-ups using a referral code work again
+   [flexidata] replaced the UNIQUE constraint on users.referred_by (users_referred_by_idx) with a plain index — sign-ups using a referral code work again
    ```
+
+   Matching on the column rather than the name matters: the same uniqueness can
+   reach production as a unique **constraint** (`users_referred_by_key`) or under
+   a differently-named index, and looking only for `users_referred_by_idx` found
+   neither. A constraint is dropped with `alter table … drop constraint`, because
+   `drop index` fails while a constraint still owns the index.
 
    `npx drizzle-kit push` still works if you prefer to do it by hand, and the
    repair is idempotent — it is a no-op once the index is correct.
@@ -187,6 +225,26 @@ Three defects made account creation fail:
    a concurrent duplicate is reported with the same friendly message the
    pre-checks give instead of a bare 500.
 
+4. **A migration that never reached production 500'd *every* sign-up.** This is
+   the one that kept the error alive after defect 1 was fixed. Drizzle's
+   `insert` names **every** column of the table definition, so on a database
+   missing even one optional column the statement died with
+   `column "referral_rewarded_at" of relation "users" does not exist` — and the
+   route turned that into "Something went wrong. Please try again."
+
+   Sign-up now has the same compatibility treatment the rest of the app has. It
+   reads the live column list for `users`, `wallets` and `agent_profiles`, and
+   builds the inserts naming only columns the database actually has:
+
+   - **Optional columns** (nullable, or `NOT NULL` with a database default) are
+     skipped, and the database default fills them in. Sign-up keeps working.
+   - **Required columns** (`users.email`, `wallets.number`, …) cannot be skipped,
+     so a database missing one is *reported* rather than worked around: the API
+     answers "Account setup is temporarily unavailable" and
+     `/api/health` shows `signupSchema.blocked: true` with the exact names.
+   - Either way the drift is logged on boot, and `/api/health` reports
+     `signupSchema.status` as `current`, `drifted` or `unknown`.
+
 ```bash
 cd flexiData
 npm run verify:signup    # needs DATABASE_URL + AUTH_SECRET; cleans up after itself
@@ -194,7 +252,8 @@ npm run verify:signup    # needs DATABASE_URL + AUTH_SECRET; cleans up after its
 
 The check talks to a real database on purpose: the simulated Postgres behind
 `verify:schema-compat` does not model unique constraints, which is exactly how
-defect 1 shipped.
+defect 1 shipped. It now also drops the optional sign-up columns, signs up, and
+puts them back — the regression test for defect 4.
 
 ## Schema compatibility fallbacks
 
@@ -220,7 +279,10 @@ then adapts:
   enum predates the new label. The wallet is still credited and the subtitle
   still tells the user the truth.
 - **`/api/health`** reports `gatewaySchema: "current" | "legacy" | "unknown"`
-  plus the exact missing objects.
+  plus the exact missing objects. `signupSchema` reports the same for the tables
+  account creation writes to (`users`, `wallets`, `agent_profiles`) — those are
+  covered by [Sign-up fixes](#sign-up-fixes) rather than by the gateway
+  fallbacks, because a missing column there is what broke sign-up.
 
 Everything heals on its own: run `npx drizzle-kit push`, and the next probe
 re-enables full tracking without a redeploy. Set
