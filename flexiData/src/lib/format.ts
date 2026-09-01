@@ -15,7 +15,14 @@ export function money(amount: number, opts?: { sign?: boolean }): string {
 }
 
 export function groupPhone(digits: string): string {
-  const d = digits.replace(/\D/g, "").slice(0, 10);
+  const d = digits.replace(/\D/g, "").slice(0, 12);
+  // International spelling (233 XX XXX XXXX). Keep all 12 digits the user typed
+  // so the server can normalize them — capping at 10 here made +233 numbers
+  // impossible to enter (they were truncated into an invalid 10-digit string).
+  if (d.startsWith("233") && d.length > 10) {
+    const rest = d.slice(3);
+    return ["233", rest.slice(0, 2), rest.slice(2, 5), rest.slice(5)].filter(Boolean).join(" ");
+  }
   if (d.length <= 3) return d;
   if (d.length <= 6) return `${d.slice(0, 3)} ${d.slice(3)}`;
   if (d.length <= 9) return `${d.slice(0, 3)} ${d.slice(3, 6)} ${d.slice(6)}`;

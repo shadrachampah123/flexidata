@@ -8,6 +8,7 @@ import {
   timestamp,
   pgEnum,
   jsonb,
+  index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
@@ -64,7 +65,10 @@ export const users = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex("users_referred_by_idx").on(table.referredBy)],
+  // Deliberately NOT unique: many users share one referrer. The "pay a
+  // referrer only once" rule lives on `referralRewardedAt`, not here — a
+  // unique index would reject the 2nd+ signup using any referral code.
+  (table) => [index("users_referred_by_idx").on(table.referredBy)],
 );
 
 /**
