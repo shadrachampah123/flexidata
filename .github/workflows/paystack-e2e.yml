@@ -25,6 +25,9 @@ name: Paystack TEST-mode E2E
 #              bound to 127.0.0.1, driven through the app's real API routes.
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - arena/01a06438-flexidata
 
 jobs:
   e2e:
