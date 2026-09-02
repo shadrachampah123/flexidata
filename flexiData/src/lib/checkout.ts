@@ -19,6 +19,7 @@ import {
   paystackVerifyTransaction,
 } from "@/lib/paystack";
 import { hasBundlePlanColumn, withSchemaFallback, type SchemaCapabilities } from "@/lib/schema-compat";
+import { repairCheckoutOrdersSchema } from "@/lib/seed";
 import { POINTS_RATE } from "@/lib/constants";
 import { groupPhone, isValidPhone, makeRef } from "@/lib/format";
 
