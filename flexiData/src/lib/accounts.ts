@@ -21,9 +21,16 @@ export type RegistrationInput = {
   referralCode?: string | null;
 };
 
+/**
+ * Why a registration was refused — lets the register route react
+ * programmatically (e.g. recover an orphaned account) instead of matching on
+ * the human-readable message.
+ */
+export type RegistrationFailureReason = "email-exists" | "phone-exists";
+
 export type RegistrationResult =
   | { ok: true; userId: number; walletId: number }
-  | { ok: false; error: string };
+  | { ok: false; error: string; reason?: RegistrationFailureReason };
 
 /** Basic email shape check (full validation happens on login attempt). */
 export function isLikelyEmail(value: string): boolean {
@@ -67,21 +74,25 @@ export function passwordStrength(password: string): { ok: boolean; error: string
  * account into the same human-readable message the pre-insert checks return, so
  * a concurrent signup never surfaces as a bare "Something went wrong".
  */
-function uniqueViolationMessage(error: unknown): string | null {
+function uniqueViolationMessage(
+  error: unknown,
+): { error: string; reason?: RegistrationFailureReason } | null {
   // Drizzle wraps the driver error ("Failed query: ..."), so walk the `cause`
   // chain to reach the Postgres error that carries the SQLSTATE + constraint.
   let current = error as { code?: string; constraint?: string; cause?: unknown } | null;
   for (let depth = 0; current && depth < 5; depth++) {
     if (current.code === "23505") {
       const constraint = current.constraint ?? "";
-      if (constraint.includes("email")) return "An account with this email already exists";
+      if (constraint.includes("email")) {
+        return { error: "An account with this email already exists", reason: "email-exists" };
+      }
       if (constraint.includes("phone") || constraint.includes("number")) {
-        return "An account with this phone number already exists";
+        return { error: "An account with this phone number already exists", reason: "phone-exists" };
       }
       if (constraint.includes("referral_code")) {
-        return "That referral code is already taken. Please try again.";
+        return { error: "That referral code is already taken. Please try again." };
       }
-      return "An account with these details already exists";
+      return { error: "An account with these details already exists" };
     }
     current = current.cause as typeof current;
   }
@@ -231,7 +242,9 @@ export async function registerUser(input: RegistrationInput): Promise<Registrati
     .from(users)
     .where(eq(users.email, email))
     .limit(1);
-  if (existingEmail[0]) return { ok: false, error: "An account with this email already exists" };
+  if (existingEmail[0]) {
+    return { ok: false, error: "An account with this email already exists", reason: "email-exists" };
+  }
 
   const existingPhone = await db
     .select({ id: users.id })
@@ -239,7 +252,11 @@ export async function registerUser(input: RegistrationInput): Promise<Registrati
     .where(eq(users.phone, phone))
     .limit(1);
   if (existingPhone[0]) {
-    return { ok: false, error: "An account with this phone number already exists" };
+    return {
+      ok: false,
+      error: "An account with this phone number already exists",
+      reason: "phone-exists",
+    };
   }
 
   // Generate a unique referral code (retry on the astronomically unlikely clash).
@@ -336,7 +353,7 @@ export async function registerUser(input: RegistrationInput): Promise<Registrati
     // the pre-checks above; the database constraint is the real gate. Report it
     // the same way the pre-checks do instead of as a generic 500.
     const conflict = uniqueViolationMessage(error);
-    if (conflict) return { ok: false, error: conflict };
+    if (conflict) return { ok: false, ...conflict };
     throw error;
   }
 }

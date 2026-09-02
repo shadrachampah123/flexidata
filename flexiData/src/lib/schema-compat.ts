@@ -113,6 +113,50 @@ export const SIGNUP_REQUIRED_COLUMNS = {
 } as const satisfies Record<(typeof SIGNUP_TABLES)[number], readonly string[]>;
 
 /**
+ * Tables the session / password-reset lifecycle writes to. They arrive with
+ * the multi-user-accounts migration rather than the data-gateway one, but they
+ * drift for exactly the same reason — a deployment that never ran
+ * `npx drizzle-kit push` — and a session insert that names columns the
+ * database does not have yet throws *after* `registerUser` has committed the
+ * account. That was the "account created but the session fails" 500 that left
+ * visitors with an orphaned account (email now "already used", never signed
+ * in). Session and reset writes degrade the same way sign-up writes do.
+ */
+export const AUTH_WRITE_TABLES = ["sessions", "password_resets"] as const;
+
+export type AuthWriteTable = (typeof AUTH_WRITE_TABLES)[number];
+
+/** Writeable columns of the auth-lifecycle tables (key -> SQL column). */
+export const AUTH_WRITE_INSERT_FIELDS = {
+  sessions: {
+    userId: "user_id",
+    tokenHash: "token_hash",
+    userAgent: "user_agent",
+    ip: "ip",
+    lastSeenAt: "last_seen_at",
+    createdAt: "created_at",
+    expiresAt: "expires_at",
+  },
+  password_resets: {
+    userId: "user_id",
+    tokenHash: "token_hash",
+    usedAt: "used_at",
+    createdAt: "created_at",
+    expiresAt: "expires_at",
+  },
+} as const satisfies Record<AuthWriteTable, Record<string, string>>;
+
+/**
+ * Columns on those tables that are `NOT NULL` **without** a database default.
+ * Optional columns can simply be left out of a write on a lagging schema;
+ * these cannot — a database missing them is reported, not worked around.
+ */
+export const AUTH_WRITE_REQUIRED_COLUMNS = {
+  sessions: ["user_id", "token_hash", "expires_at"],
+  password_resets: ["user_id", "token_hash", "expires_at"],
+} as const satisfies Record<AuthWriteTable, readonly string[]>;
+
+/**
  * Every writeable column of `transactions`, mapped from the Drizzle field name
  * to the SQL column name. Drizzle's `insert` always names all columns of the
  * table definition (using `default` for the ones not supplied), so a pre-gateway
@@ -308,8 +352,15 @@ async function probeCapabilities(): Promise<SchemaCapabilities> {
 
   try {
     // One round trip for every table whose shape the app has to adapt to: the
-    // gateway tables, the float ledger, and the tables sign-up writes to.
-    const watched = ["transactions", "bundle_plans", PROVIDER_FLOAT_TABLE, ...SIGNUP_TABLES]
+    // gateway tables, the float ledger, the tables sign-up writes to, and the
+    // tables the session / password-reset lifecycle writes to.
+    const watched = [
+      "transactions",
+      "bundle_plans",
+      PROVIDER_FLOAT_TABLE,
+      ...SIGNUP_TABLES,
+      ...AUTH_WRITE_TABLES,
+    ]
       .map((table) => `('${table}')`)
       .join(", ");
 
@@ -792,6 +843,52 @@ export async function describeSignupCompatibility(): Promise<SignupSchemaReport>
     hint:
       missing.length > 0
         ? "Run `npx drizzle-kit push` against this database to bring the sign-up tables up to date."
+        : undefined,
+  };
+}
+
+export type AuthSchemaReport = {
+  /** `unknown` when the catalog could not be read. */
+  status: "current" | "drifted" | "unknown";
+  /** Columns the auth lifecycle can work around (nullable or defaulted). */
+  missing: string[];
+  /** Columns it cannot work without. Non-empty means sessions/resets are blocked. */
+  requiredMissing: string[];
+  hint?: string;
+};
+
+/**
+ * Drift report for the tables the session / password-reset lifecycle writes
+ * to, surfaced on `/api/health` next to the sign-up report. A session insert
+ * that names columns the database has not been migrated for used to throw
+ * *after* registration had committed — visible here instead of as an orphaned
+ * account.
+ */
+export async function describeAuthCompatibility(): Promise<AuthSchemaReport> {
+  const caps = await resolveCapabilities();
+  const missing: string[] = [];
+  const requiredMissing: string[] = [];
+
+  for (const table of AUTH_WRITE_TABLES) {
+    const all = Object.values(AUTH_WRITE_INSERT_FIELDS[table]);
+    missing.push(...missingTableColumns(caps, table, all).map((column) => `${table}.${column}`));
+    requiredMissing.push(
+      ...missingTableColumns(caps, table, AUTH_WRITE_REQUIRED_COLUMNS[table]).map(
+        (column) => `${table}.${column}`,
+      ),
+    );
+  }
+
+  const probed = caps.probed && caps.tableColumns.size > 0;
+  const status = !probed ? "unknown" : missing.length > 0 ? "drifted" : "current";
+
+  return {
+    status,
+    missing,
+    requiredMissing,
+    hint:
+      missing.length > 0
+        ? "Run `npx drizzle-kit push` against this database to bring the session and reset tables up to date."
         : undefined,
   };
 }

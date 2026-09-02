@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createSession } from "@/lib/auth";
 import { verifyLogin } from "@/lib/accounts";
 
@@ -23,7 +24,20 @@ export async function POST(req: Request) {
       );
     }
 
-    await createSession(user.id);
+    // The credentials are valid — a failure past this point is the
+    // deployment's, not the visitor's. Answer honestly (a bare 500 here reads
+    // as "wrong details" and sends people to the password-reset flow, which
+    // cannot fix an environment problem).
+    try {
+      await createSession(user.id);
+    } catch (sessionError) {
+      const ref = randomBytes(3).toString("hex").toUpperCase();
+      console.error(`[flexidata] login: session creation failed for user ${user.id} ref=${ref}`, sessionError);
+      return Response.json(
+        { ok: false, error: "Sign-in is temporarily unavailable. Please try again shortly." },
+        { status: 503 },
+      );
+    }
     return Response.json({ ok: true, name: user.name });
   } catch (error) {
     console.error("login error", error);

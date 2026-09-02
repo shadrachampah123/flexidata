@@ -3,12 +3,15 @@
 import { useState, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AuthInput, AuthButton, AuthError } from "@/components/auth/auth-card";
+import { AuthInput, AuthButton, AuthError, AuthNotice } from "@/components/auth/auth-card";
 
 function LoginFormInner() {
   const router = useRouter();
   const params = useSearchParams();
   const next = params.get("next") || "/";
+  // Sent here by sign-up when the account was created but the session could
+  // not be (needsLogin) — reassure, don't alarm.
+  const accountCreated = params.get("created") === "1";
 
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
@@ -44,6 +47,9 @@ function LoginFormInner() {
   return (
     <form onSubmit={submit} className="space-y-4">
       <AuthError message={error} />
+      {accountCreated && !error && (
+        <AuthNotice message="Your account was created — sign in to continue." />
+      )}
       <AuthInput
         label="Email or phone number"
         value={identifier}

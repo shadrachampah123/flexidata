@@ -50,6 +50,13 @@ function RegisterFormInner() {
         setLoading(false);
         return;
       }
+      // The account exists but the session could not be created — a redirect
+      // to sign in, never a dead end (and a re-submit is never "email already
+      // used", because the server recovers that case on its own).
+      if (data.needsLogin) {
+        router.replace(`/login?created=1&next=${encodeURIComponent(next)}`);
+        return;
+      }
       router.replace(next);
       router.refresh();
     } catch {

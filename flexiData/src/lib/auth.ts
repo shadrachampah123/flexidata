@@ -1,9 +1,17 @@
 import { cookies, headers } from "next/headers";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "crypto";
-import { eq, desc, and, gt, isNull, ne } from "drizzle-orm";
+import { eq, desc, and, gt, isNull, ne, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { users, sessions, passwordResets, wallets } from "@/db/schema";
 import { ensureSeeded } from "@/lib/seed";
+import {
+  AUTH_WRITE_INSERT_FIELDS,
+  AUTH_WRITE_REQUIRED_COLUMNS,
+  buildTableInsert,
+  getSchemaCapabilities,
+  missingTableColumns,
+  type AuthWriteTable,
+} from "@/lib/schema-compat";
 
 const SESSION_COOKIE = "fd_session";
 // Signed envelope cookie (uid + expiry, HMAC'd). The Edge middleware only
@@ -22,6 +30,27 @@ function getAuthSecret(): string {
     );
   }
   return secret;
+}
+
+/**
+ * Fail fast when the deployment cannot sign session cookies. The register
+ * route calls this *before* creating anything, so a missing secret can never
+ * commit an account the visitor then cannot be signed into (an orphaned
+ * account whose email reports "already used" on retry). `createSession`
+ * re-checks it as belt-and-braces for the login path.
+ */
+export function assertAuthSecretConfigured(): void {
+  getAuthSecret();
+}
+
+/** True when AUTH_SECRET is present and long enough (never throws — for /api/health). */
+export function hasAuthSecret(): boolean {
+  try {
+    getAuthSecret();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -108,8 +137,70 @@ async function buildAuthEnvelope(userId: number, sessionId: number): Promise<str
 // Session lifecycle
 // ---------------------------------------------------------------------------
 
+/**
+ * Columns of an auth-lifecycle table that the deployed database does not have
+ * (because its migrations lag the code), split into "can be left out of the
+ * write" and "the write is impossible without these". Uses the cached schema
+ * probe, so it costs nothing after the first request of a process.
+ */
+async function authTableDrift(table: AuthWriteTable): Promise<{
+  skip: Set<string>;
+  requiredMissing: string[];
+}> {
+  const caps = await getSchemaCapabilities();
+  return {
+    skip: new Set(
+      missingTableColumns(caps, table, Object.values(AUTH_WRITE_INSERT_FIELDS[table])),
+    ),
+    requiredMissing: missingTableColumns(caps, table, AUTH_WRITE_REQUIRED_COLUMNS[table]),
+  };
+}
+
+/** db.execute returns a QueryResult from the pg driver, a bare array under the test harness. */
+function executeRows(result: unknown): Record<string, unknown>[] {
+  if (Array.isArray(result)) return result as Record<string, unknown>[];
+  const rows = (result as { rows?: unknown } | null)?.rows;
+  return Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
+}
+
+/**
+ * Insert into an auth-lifecycle table naming only the columns the database
+ * really has, and return the new row's `id`. Drizzle's typed `insert` names
+ * every column of the table definition, so a `sessions` / `password_resets`
+ * table that is a migration behind rejects it with
+ * `column "…" does not exist` — thrown *after* registration had already
+ * committed, that is exactly the orphaned-account incident this prevents.
+ */
+async function insertAuthRow(
+  table: AuthWriteTable,
+  values: Record<string, unknown>,
+  skip: ReadonlySet<string>,
+): Promise<number> {
+  const statement = buildTableInsert(table, AUTH_WRITE_INSERT_FIELDS[table], [values], skip, "id");
+  const row = executeRows(await db.execute(statement))[0];
+  const id = row?.id;
+  if (id === undefined || id === null) {
+    throw new Error(`Inserting into ${table} did not return an id.`);
+  }
+  return Number(id);
+}
+
+/** A database that cannot hold the write at all is reported, not worked around. */
+function assertAuthTableWritable(table: AuthWriteTable, requiredMissing: string[]): void {
+  if (requiredMissing.length > 0) {
+    throw new Error(
+      `The database is missing ${table}.${requiredMissing.join(`, ${table}.`)} and cannot store ` +
+        `${table === "sessions" ? "a session" : "a password reset"}. ` +
+        "Run `npx drizzle-kit push` against this database.",
+    );
+  }
+}
+
 export async function createSession(userId: number): Promise<void> {
   await ensureSeeded();
+  // Never write a session row when the cookies it pairs with cannot be signed.
+  assertAuthSecretConfigured();
+
   const token = randomToken();
   const hdrs = await headers();
   const ua = (hdrs.get("user-agent") ?? "").slice(0, 240) || "unknown device";
@@ -117,17 +208,27 @@ export async function createSession(userId: number): Promise<void> {
     hdrs.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     hdrs.get("x-real-ip") ||
     null;
+  const values = {
+    userId,
+    tokenHash: sha256(token),
+    userAgent: ua,
+    ip,
+    expiresAt: new Date(Date.now() + SESSION_TTL_MS),
+  };
 
-  const sessionRow = await db
-    .insert(sessions)
-    .values({
-      userId,
-      tokenHash: sha256(token),
-      userAgent: ua,
-      ip,
-      expiresAt: new Date(Date.now() + SESSION_TTL_MS),
-    })
-    .returning({ id: sessions.id });
+  const { skip, requiredMissing } = await authTableDrift("sessions");
+  assertAuthTableWritable("sessions", requiredMissing);
+  const degraded = skip.size > 0;
+  if (degraded) {
+    console.warn(
+      `[flexidata] writing a session without ${[...skip].join(", ")} — the database is ` +
+        "a migration behind. Run `npx drizzle-kit push` to store them.",
+    );
+  }
+
+  const sessionId = degraded
+    ? await insertAuthRow("sessions", values, skip)
+    : (await db.insert(sessions).values(values).returning({ id: sessions.id }))[0].id;
 
   const jar = await cookies();
   // Raw session token — never exposed to JS.
@@ -139,7 +240,7 @@ export async function createSession(userId: number): Promise<void> {
     maxAge: SESSION_TTL_MS / 1000,
   });
   // Signed envelope for the Edge gate.
-  jar.set(AUTH_COOKIE, await buildAuthEnvelope(userId, sessionRow[0].id), {
+  jar.set(AUTH_COOKIE, await buildAuthEnvelope(userId, sessionId), {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
@@ -174,11 +275,15 @@ async function findUserBySessionToken(token: string): Promise<AuthUser | null> {
     return null;
   }
 
-  // Touch last-seen (best effort, never blocks the request).
-  db.update(sessions)
-    .set({ lastSeenAt: new Date() })
-    .where(eq(sessions.id, row.sessionId))
-    .catch(() => {});
+  // Touch last-seen (best effort, never blocks the request — and skipped
+  // entirely on a database that has not been migrated for the column yet).
+  const { skip } = await authTableDrift("sessions");
+  if (!skip.has("last_seen_at")) {
+    db.update(sessions)
+      .set({ lastSeenAt: new Date() })
+      .where(eq(sessions.id, row.sessionId))
+      .catch(() => {});
+  }
 
   return getAuthUserById(row.userId);
 }
@@ -265,27 +370,66 @@ export type SessionInfo = {
 export async function listSessions(userId: number): Promise<SessionInfo[]> {
   const jar = await cookies();
   const currentToken = jar.get(SESSION_COOKIE)?.value ?? "";
-  const rows = await db
-    .select({
-      id: sessions.id,
-      tokenHash: sessions.tokenHash,
-      userAgent: sessions.userAgent,
-      ip: sessions.ip,
-      lastSeenAt: sessions.lastSeenAt,
-      createdAt: sessions.createdAt,
-    })
-    .from(sessions)
-    .where(and(eq(sessions.userId, userId), gt(sessions.expiresAt, new Date())))
-    .orderBy(desc(sessions.lastSeenAt));
   const currentHash = currentToken ? sha256(currentToken) : null;
-  return rows.map((r) => ({
-    id: r.id,
-    userAgent: r.userAgent ?? "unknown device",
-    ip: r.ip,
-    lastSeenAt: r.lastSeenAt,
-    createdAt: r.createdAt,
-    current: r.tokenHash === currentHash,
-  }));
+
+  const { skip, requiredMissing } = await authTableDrift("sessions");
+  assertAuthTableWritable("sessions", requiredMissing);
+
+  if (skip.size === 0) {
+    const rows = await db
+      .select({
+        id: sessions.id,
+        tokenHash: sessions.tokenHash,
+        userAgent: sessions.userAgent,
+        ip: sessions.ip,
+        lastSeenAt: sessions.lastSeenAt,
+        createdAt: sessions.createdAt,
+      })
+      .from(sessions)
+      .where(and(eq(sessions.userId, userId), gt(sessions.expiresAt, new Date())))
+      .orderBy(desc(sessions.lastSeenAt));
+    return rows.map((r) => ({
+      id: r.id,
+      userAgent: r.userAgent ?? "unknown device",
+      ip: r.ip,
+      lastSeenAt: r.lastSeenAt,
+      createdAt: r.createdAt,
+      current: r.tokenHash === currentHash,
+    }));
+  }
+
+  // Drifted `sessions` table: name only the columns the database really has
+  // (a typed select would name missing ones and throw), and apply the expiry
+  // filter / ordering in JS so the WHERE clause stays trivially portable.
+  const wanted = ["id", "token_hash", "user_agent", "ip", "last_seen_at", "created_at", "expires_at"].filter(
+    (column) => !skip.has(column),
+  );
+  const rows = executeRows(
+    await db.execute(
+      sql`select ${sql.join(
+        wanted.map((column) => sql.identifier(column)),
+        sql`, `,
+      )} from sessions where user_id = ${userId}`,
+    ),
+  );
+
+  const now = Date.now();
+  const toDate = (value: unknown): Date | null => (value == null ? null : new Date(value as string | Date));
+  return rows
+    .filter((row) => (toDate(row.expires_at)?.getTime() ?? 0) > now)
+    .map((row) => {
+      const createdAt = toDate(row.created_at) ?? new Date(0);
+      const lastSeenAt = toDate(row.last_seen_at) ?? createdAt;
+      return {
+        id: Number(row.id),
+        userAgent: (row.user_agent as string | null) ?? "unknown device",
+        ip: (row.ip as string | null) ?? null,
+        lastSeenAt,
+        createdAt,
+        current: currentHash !== null && row.token_hash === currentHash,
+      };
+    })
+    .sort((a, b) => b.lastSeenAt.getTime() - a.lastSeenAt.getTime());
 }
 
 export async function deleteSessionById(userId: number, sessionId: number): Promise<void> {
@@ -307,11 +451,19 @@ export async function createPasswordReset(email: string): Promise<ResetRecord | 
 
   const token = randomToken(24);
   const expiresAt = new Date(Date.now() + RESET_TTL_MS);
-  await db.insert(passwordResets).values({
-    userId: user.id,
-    tokenHash: sha256(token),
-    expiresAt,
-  });
+  const values = { userId: user.id, tokenHash: sha256(token), expiresAt };
+
+  const { skip, requiredMissing } = await authTableDrift("password_resets");
+  assertAuthTableWritable("password_resets", requiredMissing);
+  if (skip.size > 0) {
+    console.warn(
+      `[flexidata] writing a password reset without ${[...skip].join(", ")} — the database is ` +
+        "a migration behind. Run `npx drizzle-kit push` to store them.",
+    );
+    await insertAuthRow("password_resets", values, skip);
+  } else {
+    await db.insert(passwordResets).values(values);
+  }
   return { token, expiresAt };
 }
 
@@ -319,6 +471,29 @@ export async function createPasswordReset(email: string): Promise<ResetRecord | 
 export async function consumePasswordReset(
   token: string,
 ): Promise<{ userId: number } | null> {
+  const digest = sha256(token);
+  const { skip, requiredMissing } = await authTableDrift("password_resets");
+  assertAuthTableWritable("password_resets", requiredMissing);
+
+  if (skip.has("used_at")) {
+    // A schema without `used_at` cannot mark tokens consumed: honour the token
+    // up to its expiry rather than failing the reset — the column ships with
+    // the very next migration, and a blocked reset is the worse failure.
+    const rows = executeRows(
+      await db.execute(
+        sql`select id, user_id, expires_at from password_resets where token_hash = ${digest} limit 1`,
+      ),
+    );
+    const row = rows[0];
+    if (!row) return null;
+    if (new Date(row.expires_at as string | Date).getTime() < Date.now()) return null;
+    console.warn(
+      "[flexidata] password_resets.used_at is missing — reset tokens cannot be marked used " +
+        "until `npx drizzle-kit push` runs.",
+    );
+    return { userId: Number(row.user_id) };
+  }
+
   const rows = await db
     .select({
       id: passwordResets.id,
@@ -327,7 +502,7 @@ export async function consumePasswordReset(
       expiresAt: passwordResets.expiresAt,
     })
     .from(passwordResets)
-    .where(eq(passwordResets.tokenHash, sha256(token)))
+    .where(eq(passwordResets.tokenHash, digest))
     .limit(1);
   const reset = rows[0];
   if (!reset) return null;
@@ -362,6 +537,19 @@ export async function setUserPassword(userId: number, newPassword: string): Prom
 }
 
 export async function findUnusedResetForUser(userId: number): Promise<boolean> {
+  const { skip, requiredMissing } = await authTableDrift("password_resets");
+  assertAuthTableWritable("password_resets", requiredMissing);
+
+  if (skip.size > 0) {
+    // Drifted schema: name only columns that exist and filter in JS.
+    const rows = executeRows(
+      await db.execute(sql`select expires_at from password_resets where user_id = ${userId}`),
+    );
+    return rows.some(
+      (row) => new Date(row.expires_at as string | Date).getTime() > Date.now(),
+    );
+  }
+
   const rows = await db
     .select({ id: passwordResets.id })
     .from(passwordResets)

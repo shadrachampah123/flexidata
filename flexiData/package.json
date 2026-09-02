@@ -12,7 +12,8 @@
     "verify:schema-compat": "tsx scripts/schema-compat-harness.ts",
     "verify:schema-baseline": "tsx scripts/schema-baseline-probe.ts",
     "verify:seed-resilience": "tsx scripts/verify-seed-resilience.ts",
-    "verify:signup": "tsx scripts/verify-signup.ts"
+    "verify:signup": "tsx scripts/verify-signup.ts",
+    "verify:auth-flow": "tsx scripts/verify-auth-flow.ts"
   },
   "dependencies": {
     "@fontsource-variable/manrope": "^5.3.0",
