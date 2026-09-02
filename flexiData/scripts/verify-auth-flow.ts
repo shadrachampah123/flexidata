@@ -106,6 +106,7 @@ function setEnv(patch: Record<string, string | undefined>): Record<string, strin
 
 let webhookServer: Server | null = null;
 const webhookBodies: { to?: string; subject?: string; text?: string }[] = [];
+const resendBodies: { from?: string; to?: string[]; subject?: string; text?: string; reply_to?: string }[] = [];
 
 async function main() {
   process.env.AUTH_SECRET ??= "verify-auth-flow-secret-0123456789abcdef";
@@ -145,6 +146,10 @@ async function main() {
     setEnv({ APP_BASE_URL: "https://flexidata.com/" });
     check("APP_BASE_URL wins (and trailing slash is trimmed)",
       resolveAppBaseUrl("https://app.flexidata.example") === "https://flexidata.com",
+      resolveAppBaseUrl("https://app.flexidata.example"));
+    setEnv({ APP_BASE_URL: "http://localhost:3000", NEXT_PUBLIC_APP_URL: undefined });
+    check("a production localhost APP_BASE_URL is ignored for email links",
+      resolveAppBaseUrl("https://app.flexidata.example") === "https://app.flexidata.example",
       resolveAppBaseUrl("https://app.flexidata.example"));
     setEnv(saved);
   }
@@ -342,6 +347,9 @@ async function main() {
       APP_BASE_URL: undefined,
       NEXT_PUBLIC_APP_URL: undefined,
       VERCEL_URL: undefined,
+      RESEND_API_KEY: undefined,
+      RESEND_FROM_EMAIL: undefined,
+      RESEND_REPLY_TO: undefined,
       NOTIFY_WEBHOOK_URL: undefined,
     });
 
@@ -356,6 +364,50 @@ async function main() {
     check("no email transport in production -> honest 502 (not a silent dead end)",
       noTransport.status === 502, noTransportBody);
     check("no reset link leaks while failing", noTransportBody.devPreviewUrl === undefined, noTransportBody);
+
+    // Resend is deliberately called directly by the app — a local fetch stub
+    // lets this regression test inspect the exact provider payload without
+    // needing an API key or a live email delivery.
+    const nativeFetch = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === "https://api.resend.com/emails") {
+        resendBodies.push(JSON.parse(String(init?.body ?? "{}")));
+        return new Response(JSON.stringify({ id: "email_verify_123" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return nativeFetch(input, init);
+    };
+
+    setEnv({
+      RESEND_API_KEY: "re_verify_123",
+      RESEND_FROM_EMAIL: "FlexiData <support@flexidata.example>",
+      RESEND_REPLY_TO: "help@flexidata.example",
+    });
+    const resent = await forgotRoute.POST(
+      jsonRequest(
+        "/api/auth/forgot-password",
+        { email: SIGNUP.email },
+        { host: "app.flexidata.example", "x-forwarded-proto": "https" },
+      ),
+    );
+    const resentBody = await resent.json();
+    check("reset email is delivered directly through Resend", resent.status === 200 && resentBody.ok === true, resentBody);
+    check(
+      "Resend receives the recipient, verified sender, reply address, and deployment reset link",
+      resendBodies.some(
+        (body) =>
+          body.to?.[0] === SIGNUP.email &&
+          body.from === "FlexiData <support@flexidata.example>" &&
+          body.reply_to === "help@flexidata.example" &&
+          (body.text ?? "").includes("https://app.flexidata.example/reset-password?token="),
+      ),
+      resendBodies,
+    );
+    globalThis.fetch = nativeFetch;
+    setEnv({ RESEND_API_KEY: undefined, RESEND_FROM_EMAIL: undefined, RESEND_REPLY_TO: undefined });
 
     setEnv({ NOTIFY_WEBHOOK_URL: `http://127.0.0.1:${port}/relay` });
     const sent = await forgotRoute.POST(

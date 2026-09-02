@@ -95,7 +95,10 @@ flexiData/
 | `APP_BASE_URL` | Public deployment URL for links in emails & payment callbacks (e.g. `https://flexidata.app`). Optional for reset links: they are built from the origin of the incoming request, then `VERCEL_URL`, never `localhost` in production |
 | `PAYMENTS_PROVIDER` | `mock` (instant simulated MoMo/card funding) or `paystack` for real Ghanaian mobile money/card checkout |
 | `PAYSTACK_SECRET_KEY` | Paystack secret key — required when `PAYMENTS_PROVIDER=paystack` |
-| `NOTIFY_WEBHOOK_URL` | Webhook that sends transactional email; when empty, reset links are logged/returned in dev, and in production the forgot-password API answers honestly (502) instead of pretending an email was sent |
+| `RESEND_API_KEY` | Recommended: Resend API key for direct password-reset email delivery. Set it together with `RESEND_FROM_EMAIL`. |
+| `RESEND_FROM_EMAIL` | A sender verified in Resend, e.g. `FlexiData <support@your-domain.com>`. Required with `RESEND_API_KEY`. |
+| `RESEND_REPLY_TO` | Optional address that receives replies to reset emails. |
+| `NOTIFY_WEBHOOK_URL` | Alternative email relay accepting `{ to, subject, text, html }` JSON. Used when Resend is not fully configured. In production with neither transport, forgot password returns an honest 502 rather than pretending an email was sent. |
 | `DATA_API_PROVIDER` | Data gateway adapter to use: `mock` for local dev, or your production provider slug |
 | `DATA_API_BASE_URL` | Base URL for your Ghanaian data-API gateway/provider |
 | `DATA_API_PURCHASE_PATH` | Relative path used to submit MTN / Telecel data orders |
@@ -157,8 +160,14 @@ Then check `/api/health`: `gatewaySchema` and `signupSchema` should both read
    - For **live payments**: `PAYMENTS_PROVIDER=paystack` + `PAYSTACK_SECRET_KEY`,
      and set the Paystack webhook URL to
      `https://<domain>/api/payments/webhook` in the Paystack dashboard.
-   - For **password reset emails**: `NOTIFY_WEBHOOK_URL` pointing to an email
-     relay that accepts `{ to, subject, text, html }` JSON.
+   - For **password reset emails** (recommended): add `RESEND_API_KEY` and
+     `RESEND_FROM_EMAIL` to Vercel. The sender must be verified in Resend, for
+     example `FlexiData <support@your-domain.com>`; the app sends directly to
+     Resend's API, so no custom email webhook is required. Optionally set
+     `RESEND_REPLY_TO`.
+   - Or use `NOTIFY_WEBHOOK_URL` for an existing email relay that accepts
+     `{ to, subject, text, html }` JSON. It is used only when Resend is not
+     fully configured.
    - For **live data delivery**: `DATA_API_PROVIDER`, `DATA_API_BASE_URL`,
      `DATA_API_PURCHASE_PATH`, the matching auth credentials for your Ghanaian
      data gateway, and `DATA_API_CALLBACK_URL` = your public
