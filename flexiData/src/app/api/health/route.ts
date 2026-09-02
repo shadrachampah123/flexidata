@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "@/db";
 import { hasAuthSecret } from "@/lib/auth";
+import { getPasswordResetEmailDeliveryStatus } from "@/lib/notifications";
 import {
   describeAuthCompatibility,
   describeSchemaCompatibility,
@@ -37,6 +38,7 @@ export async function GET() {
   const signupBlocked = signup.requiredMissing.length > 0;
   const authBlocked = auth.requiredMissing.length > 0;
   const secretConfigured = hasAuthSecret();
+  const resetEmail = getPasswordResetEmailDeliveryStatus();
 
   return Response.json({
     ok: true,
@@ -61,6 +63,9 @@ export async function GET() {
         requiredMissing: auth.requiredMissing,
         ...(auth.hint ? { hint: auth.hint } : {}),
       },
+      // Safe to expose: it names only the active transport and never leaks
+      // a key, sender address, relay URL, or reset token.
+      passwordResetEmail: resetEmail,
     },
     dataGateway: {
       schema: schema.status,
