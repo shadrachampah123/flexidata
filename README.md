@@ -20,6 +20,15 @@ Telecel bundle delivery, referral rewards and a vendor/agent program.
   transfer money to any other registered FlexiData user.
 - **Shop** — discounted MTN (UP2U, SME non-expiry, Corporate, Social) & Telecel bundles,
   airtime at 2% off, and airtime-to-cash conversion.
+- **Order tracking** — every data/airtime order gets a live delivery tracker with an
+  **estimated delivery countdown** ("Arriving in about 1m 20s"), a stage-by-stage
+  timeline (placed → paid → sent to network → processing → delivered), and a progress
+  bar. In-flight orders surface on the home screen under **Active deliveries**, on the
+  purchase receipt ("Track this order"), and on each history row. The tracker reads the
+  real fulfillment ledger (`fulfillment_status`, `charged_at`, `fulfilled_at`, provider
+  references) and polls `GET /api/track/[ref]` — scoped to the owner's wallet — until the
+  bundle lands, is refunded, or fails. See
+  [`src/lib/fulfillment.ts`](flexiData/src/lib/fulfillment.ts) for the ETA model.
 - **Rewards** — points on every purchase, redeemable for cash/airtime/data, plus a
   referral bonus when a friend you invited makes their first purchase.
 - **Agent program** — activate a vendor profile with your own referral code, tiers and

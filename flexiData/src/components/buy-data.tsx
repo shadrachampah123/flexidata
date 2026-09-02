@@ -19,7 +19,7 @@ import { Segmented, FieldLabel, NetworkBadge } from "@/components/ui";
 import { PhoneInput } from "@/components/phone-input";
 import { FlowSheet, type FlowResult } from "@/components/flow-sheet";
 import { DropdownPanel } from "@/components/dropdown-panel";
-import { cn, groupPhone, isValidPhone, money } from "@/lib/format";
+import { cn, etaSentence, groupPhone, isValidPhone, money } from "@/lib/format";
 
 export function BuyData({
   wallet,
@@ -84,6 +84,8 @@ export function BuyData({
         ref?: string;
         pointsEarned?: number;
         balance?: number;
+        etaSeconds?: number | null;
+        trackable?: boolean;
       };
       if (data.error === "insufficient_funds") {
         setResult({
@@ -96,8 +98,9 @@ export function BuyData({
       }
       if (!data.ok) throw new Error(data.error ?? "Failed");
       if (typeof data.balance === "number") setBalance(data.balance);
+      const status = (data.status as FlowResult["status"]) ?? "successful";
       setResult({
-        status: (data.status as FlowResult["status"]) ?? "successful",
+        status,
         ref: data.ref,
         headline:
           data.status === "successful"
@@ -107,6 +110,8 @@ export function BuyData({
               : "Purchase failed",
         pointsEarned: data.pointsEarned,
         balance: data.balance,
+        etaLabel: etaSentence(status, data.etaSeconds),
+        trackRef: data.trackable ? data.ref : undefined,
         lines: [
           { label: "Bundle", value: `${network} ${plan.label}` },
           { label: "Recipient", value: groupPhone(phone) },

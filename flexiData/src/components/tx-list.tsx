@@ -1,7 +1,10 @@
+import Link from "next/link";
 import {
   ArrowDownLeft,
   ArrowLeftRight,
+  ChevronRight,
   Gift,
+  Radar,
   Send,
   Smartphone,
   Wifi,
@@ -25,9 +28,14 @@ export function TxItem({ t, showDate }: { t: TxDTO; showDate?: boolean }) {
   const Icon = conf.icon;
   const failed = t.status === "failed" || t.status === "reversed";
   const signed = t.direction === "in" ? t.amount : -t.amount;
+  // A trackable order is worth opening the live tracker for as long as it is
+  // not a hard failure; a pending one especially so, since that's where the
+  // "how long until it arrives" question lives.
+  const canTrack = t.trackable && t.status !== "failed";
+  const pending = t.status === "pending";
 
-  return (
-    <li className="flex items-center gap-3 px-4 py-3.5">
+  const body = (
+    <>
       <span className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl", conf.cls)}>
         <Icon className="h-[18px] w-[18px]" strokeWidth={2.2} />
       </span>
@@ -37,6 +45,18 @@ export function TxItem({ t, showDate }: { t: TxDTO; showDate?: boolean }) {
           {showDate ? `${timeAgo(t.date)} • ` : ""}
           {t.subtitle}
         </p>
+        {canTrack && (
+          <span
+            className={cn(
+              "mt-1 inline-flex items-center gap-1 text-[10px] font-black",
+              pending ? "text-amber-600 dark:text-amber-400" : "text-brand-deep dark:text-brand",
+            )}
+          >
+            <Radar className="h-3 w-3" strokeWidth={2.6} />
+            {pending ? "Track delivery" : "View tracking"}
+            <ChevronRight className="h-3 w-3" />
+          </span>
+        )}
       </div>
       <div className="shrink-0 text-right">
         <p
@@ -58,8 +78,23 @@ export function TxItem({ t, showDate }: { t: TxDTO; showDate?: boolean }) {
           <StatusBadge status={t.status} />
         </div>
       </div>
-    </li>
+    </>
   );
+
+  if (canTrack) {
+    return (
+      <li>
+        <Link
+          href={`/track/${encodeURIComponent(t.ref)}`}
+          className="flex items-center gap-3 px-4 py-3.5 transition-colors hover:bg-black/[0.02] active:bg-black/[0.04] dark:hover:bg-white/[0.03]"
+        >
+          {body}
+        </Link>
+      </li>
+    );
+  }
+
+  return <li className="flex items-center gap-3 px-4 py-3.5">{body}</li>;
 }
 
 export function TxList({ items, showDate }: { items: TxDTO[]; showDate?: boolean }) {

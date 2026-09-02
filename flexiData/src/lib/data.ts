@@ -8,14 +8,16 @@ import {
   users,
   wallets,
 } from "@/db/schema";
-import { desc, eq, asc } from "drizzle-orm";
+import { and, desc, eq, asc } from "drizzle-orm";
 import { ensureSeeded } from "@/lib/seed";
 import {
   TRANSACTION_INSERT_FIELDS,
   buildCompatInsert,
+  hasAllTransactionColumns,
   isGatewaySchemaComplete,
   withSchemaFallback,
 } from "@/lib/schema-compat";
+import type { TrackableTx } from "@/lib/fulfillment";
 
 export type WalletDTO = {
   id: number;
@@ -53,7 +55,12 @@ export type TxDTO = {
   network: string | null;
   recipient: string | null;
   date: string;
+  /** True for data/airtime orders the customer can open the live tracker for. */
+  trackable: boolean;
 };
+
+/** Order types that are delivered to a phone and get a live tracker. */
+const TRACKABLE_TX_TYPES = new Set(["data", "airtime"]);
 
 export type AlertDTO = {
   id: number;
@@ -170,6 +177,7 @@ function toTxDTO(t: TxRecord): TxDTO {
     network: t.network,
     recipient: t.recipient,
     date: t.createdAt.toISOString(),
+    trackable: TRACKABLE_TX_TYPES.has(t.type),
   };
 }
 
@@ -184,6 +192,117 @@ export async function getRecentTransactions(walletId: number, limit = 6): Promis
   return rows.map(toTxDTO);
 }
 
+/**
+ * Full fulfillment fields for the order tracker. These are the gateway columns
+ * (`fulfillment_status`, `charged_at`, `fulfilled_at`, provider refs …) that
+ * the coarse {@link TX_SELECT} deliberately omits so history keeps rendering on
+ * a pre-gateway database. Here we DO want them, but a legacy schema may not
+ * have them yet, so the select is built through schema-compat and any missing
+ * column reads back as `null`.
+ */
+const TRACK_GATEWAY_FIELDS = [
+  "fulfillmentStatus",
+  "provider",
+  "providerReference",
+  "providerMessage",
+  "fulfillmentAttempts",
+  "chargedAt",
+  "fulfilledAt",
+  "refundedAt",
+  "lastProviderSyncAt",
+] as const;
+
+const TRACK_GATEWAY_SELECT = {
+  fulfillmentStatus: transactions.fulfillmentStatus,
+  provider: transactions.provider,
+  providerReference: transactions.providerReference,
+  providerMessage: transactions.providerMessage,
+  fulfillmentAttempts: transactions.fulfillmentAttempts,
+  chargedAt: transactions.chargedAt,
+  fulfilledAt: transactions.fulfilledAt,
+  refundedAt: transactions.refundedAt,
+  lastProviderSyncAt: transactions.lastProviderSyncAt,
+};
+
+function toIsoOrNull(value: Date | null | undefined): string | null {
+  return value ? value.toISOString() : null;
+}
+
+/**
+ * Load a single transaction (scoped to the owner's wallet) with everything the
+ * order tracker needs. Returns `null` when the ref does not belong to this
+ * wallet, so a user can only ever track their own orders.
+ */
+export async function getTrackableTx(
+  walletId: number,
+  ref: string,
+): Promise<TrackableTx | null> {
+  await ensureSeeded();
+
+  return withSchemaFallback(async (compat) => {
+    const hasGateway = hasAllTransactionColumns(compat, [...TRACK_GATEWAY_FIELDS]);
+
+    if (hasGateway) {
+      const rows = await db
+        .select({ ...TX_SELECT, ...TRACK_GATEWAY_SELECT })
+        .from(transactions)
+        .where(and(eq(transactions.walletId, walletId), eq(transactions.ref, ref)))
+        .limit(1);
+      const row = rows[0];
+      if (!row) return null;
+      return {
+        ref: row.ref,
+        type: row.type,
+        status: row.status,
+        title: row.title,
+        amount: Number(row.amount),
+        network: row.network,
+        recipient: row.recipient,
+        fulfillmentStatus: row.fulfillmentStatus,
+        provider: row.provider,
+        providerReference: row.providerReference,
+        providerMessage: row.providerMessage,
+        fulfillmentAttempts: row.fulfillmentAttempts,
+        createdAt: row.createdAt.toISOString(),
+        chargedAt: toIsoOrNull(row.chargedAt),
+        fulfilledAt: toIsoOrNull(row.fulfilledAt),
+        refundedAt: toIsoOrNull(row.refundedAt),
+        lastProviderSyncAt: toIsoOrNull(row.lastProviderSyncAt),
+      } satisfies TrackableTx;
+    }
+
+    // Legacy schema: only the base columns exist. The tracker still works from
+    // the coarse status, it just cannot show provider references or per-stage
+    // timestamps.
+    const rows = await db
+      .select(TX_SELECT)
+      .from(transactions)
+      .where(and(eq(transactions.walletId, walletId), eq(transactions.ref, ref)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      ref: row.ref,
+      type: row.type,
+      status: row.status,
+      title: row.title,
+      amount: Number(row.amount),
+      network: row.network,
+      recipient: row.recipient,
+      fulfillmentStatus: null,
+      provider: null,
+      providerReference: null,
+      providerMessage: null,
+      fulfillmentAttempts: null,
+      createdAt: row.createdAt.toISOString(),
+      chargedAt: null,
+      fulfilledAt: null,
+      refundedAt: null,
+      lastProviderSyncAt: null,
+    } satisfies TrackableTx;
+  }, "trackable transaction lookup");
+}
+
 export async function getAllTransactions(walletId: number): Promise<TxDTO[]> {
   await ensureSeeded();
   const rows = await db
@@ -193,6 +312,30 @@ export async function getAllTransactions(walletId: number): Promise<TxDTO[]> {
     .orderBy(desc(transactions.createdAt))
     .limit(100);
   return rows.map(toTxDTO);
+}
+
+/**
+ * In-flight data/airtime orders for this wallet — the ones still being
+ * delivered. Powers the "Active deliveries" tracker strip on the home screen so
+ * a customer sees at a glance what they're still waiting on.
+ */
+export async function getActiveDeliveries(walletId: number, limit = 4): Promise<TxDTO[]> {
+  await ensureSeeded();
+  const rows = await db
+    .select(TX_SELECT)
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.walletId, walletId),
+        eq(transactions.status, "pending"),
+      ),
+    )
+    .orderBy(desc(transactions.createdAt))
+    .limit(20);
+  return rows
+    .map(toTxDTO)
+    .filter((t) => t.trackable)
+    .slice(0, limit);
 }
 
 export async function getPlans(): Promise<PlanDTO[]> {

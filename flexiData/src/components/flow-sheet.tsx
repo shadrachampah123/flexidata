@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { CheckCircle2, Clock3, Copy, Check, Loader2, Sparkles, XCircle } from "lucide-react";
+import { CheckCircle2, Clock3, Copy, Check, Loader2, Radar, Sparkles, XCircle } from "lucide-react";
 import { Sheet } from "@/components/sheet";
 import { cn, money } from "@/lib/format";
 
@@ -16,6 +16,10 @@ export type FlowResult = {
   pointsEarned?: number;
   balance?: number;
   message?: string;
+  /** When set, the receipt shows a "Track order" button to the live tracker. */
+  trackRef?: string;
+  /** Short ETA sentence shown on the receipt, e.g. "Arriving in about 90s". */
+  etaLabel?: string;
 };
 
 export function FlowSheet({
@@ -161,6 +165,20 @@ function ResultView({ result, onClose }: { result: FlowResult; onClose: () => vo
               : "This transaction could not be completed. You have not been charged.")}
       </p>
 
+      {result.etaLabel && (ok || pending) && (
+        <div
+          className={cn(
+            "mt-3 flex items-center gap-2 rounded-full px-3.5 py-1.5 text-[11px] font-bold",
+            pending
+              ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+              : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
+          )}
+        >
+          <Clock3 className="h-3.5 w-3.5" />
+          {result.etaLabel}
+        </div>
+      )}
+
       {result.ref && (
         <button
           onClick={copyRef}
@@ -201,7 +219,17 @@ function ResultView({ result, onClose }: { result: FlowResult; onClose: () => vo
         </p>
       )}
 
-      <div className="mt-5 flex w-full gap-3">
+      {result.trackRef && (ok || pending) && (
+        <Link
+          href={`/track/${encodeURIComponent(result.trackRef)}`}
+          className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-brand py-3.5 text-[13px] font-bold text-ink shadow-[0_10px_24px_rgba(255,203,5,0.32)] transition-all hover:-translate-y-0.5 active:scale-[0.98]"
+        >
+          <Radar className="h-4 w-4" strokeWidth={2.5} />
+          Track this order
+        </Link>
+      )}
+
+      <div className="mt-3 flex w-full gap-3">
         <Link
           href="/history"
           className="flex-1 rounded-2xl border border-black/10 py-3 text-center text-[13px] font-bold transition-all hover:bg-black/[0.03] active:scale-95 dark:border-line dark:hover:bg-white/[0.05]"
@@ -210,7 +238,12 @@ function ResultView({ result, onClose }: { result: FlowResult; onClose: () => vo
         </Link>
         <button
           onClick={onClose}
-          className="flex-1 rounded-2xl bg-brand py-3 text-[13px] font-bold text-ink transition-all hover:-translate-y-0.5 active:scale-95"
+          className={cn(
+            "flex-1 rounded-2xl py-3 text-[13px] font-bold transition-all hover:-translate-y-0.5 active:scale-95",
+            result.trackRef && (ok || pending)
+              ? "border border-black/10 hover:bg-black/[0.03] dark:border-line dark:hover:bg-white/[0.05]"
+              : "bg-brand text-ink",
+          )}
         >
           Done
         </button>

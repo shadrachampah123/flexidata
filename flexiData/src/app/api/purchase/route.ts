@@ -15,6 +15,7 @@ import {
   submitDataBundleOrder,
   upsertProviderFloatBalance,
 } from "@/lib/data-gateway";
+import { estimateDeliverySeconds } from "@/lib/fulfillment";
 import {
   BUNDLE_PLAN_INSERT_FIELDS,
   buildCompatInsert,
@@ -250,6 +251,15 @@ export async function POST(req: Request) {
         );
       }
 
+      // How long the customer should expect to wait for the bundle. Once
+      // delivered it's already done (0), otherwise it's the network estimate.
+      const etaSeconds =
+        status === "successful"
+          ? 0
+          : status === "pending"
+            ? estimateDeliverySeconds({ type: "data", network, fulfillmentAttempts: 1 })
+            : null;
+
       return Response.json({
         ok: true,
         status,
@@ -261,6 +271,9 @@ export async function POST(req: Request) {
         points: wallet.points + pointsEarned,
         provider: gateway.providerCode,
         providerMessage: gateway.providerMessage,
+        fulfillmentStatus: gateway.fulfillmentStatus,
+        trackable: true,
+        etaSeconds,
       });
     }
 
@@ -318,6 +331,13 @@ export async function POST(req: Request) {
         );
       }
 
+      const airtimeEta =
+        status === "successful"
+          ? 0
+          : status === "pending"
+            ? estimateDeliverySeconds({ type: "airtime", network, fulfillmentAttempts: 1 })
+            : null;
+
       return Response.json({
         ok: true,
         status,
@@ -327,6 +347,8 @@ export async function POST(req: Request) {
         pointsEarned,
         balance: newBalance,
         points: wallet.points + pointsEarned,
+        trackable: true,
+        etaSeconds: airtimeEta,
       });
     }
 
