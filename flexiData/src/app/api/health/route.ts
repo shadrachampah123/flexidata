@@ -57,6 +57,11 @@ export async function GET() {
     ok: true,
     database: "connected",
     gatewaySchema: schema.status,
+    checkoutSchema: {
+      status: checkout.status,
+      missing: checkout.missing,
+      ...(checkout.hint ? { hint: checkout.hint } : {}),
+    },
     signupSchema: {
       status: signup.status,
       blocked: signupBlocked,
