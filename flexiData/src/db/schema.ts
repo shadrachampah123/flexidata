@@ -42,6 +42,24 @@ export const depositStatusEnum = pgEnum("deposit_status", [
   "abandoned",
 ]);
 
+export const checkoutPaymentStatusEnum = pgEnum("checkout_payment_status", [
+  "pending",
+  "successful",
+  "failed",
+  "abandoned",
+]);
+
+export const checkoutOrderStatusEnum = pgEnum("checkout_order_status", [
+  "awaiting_payment",
+  "payment_failed",
+  "abandoned",
+  "paid",
+  "fulfilling",
+  "fulfilled",
+  "fulfillment_failed",
+]);
+
+
 /**
  * Registered FlexiData accounts. One user owns exactly one wallet
  * (`wallets.userId`). Authentication is email + scrypt-hashed password;
@@ -200,7 +218,69 @@ export const depositRequests = pgTable("deposit_requests", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Pay-as-you-go data bundle orders paid through Paystack checkout (no wallet
+ * balance involved). One row is the single source of truth for an order:
+ *
+ *   awaiting_payment ─▶ paid ─▶ fulfilling ─▶ fulfilled
+ *          │                        └───────▶ fulfillment_failed
+ *          ├──▶ payment_failed
+ *          └──▶ abandoned (customer left checkout; may still become paid)
+ *
+ * `ref` doubles as the Paystack transaction reference and, once fulfilled, as
+ * the ledger `transactions.ref` so history/tracking work unchanged. All
+ * status transitions are performed with conditional UPDATEs so duplicate
+ * webhooks / verify calls can never settle a payment twice or submit the
+ * bundle to the data provider (YenkoData) twice.
+ */
+export const checkoutOrders = pgTable(
+  "checkout_orders",
+  {
+    id: serial("id").primaryKey(),
+    /** Our unique order reference; also the Paystack transaction reference. */
+    ref: varchar("ref", { length: 40 }).notNull().unique(),
+    userId: integer("user_id").notNull(),
+    walletId: integer("wallet_id").notNull(),
+    customerEmail: varchar("customer_email", { length: 160 }).notNull(),
+    customerPhone: varchar("customer_phone", { length: 20 }).notNull(),
+    // Selected bundle, resolved server-side from bundle_plans (never client input).
+    network: varchar("network", { length: 10 }).notNull(),
+    category: varchar("category", { length: 40 }).notNull(),
+    planLabel: varchar("plan_label", { length: 80 }).notNull(),
+    providerProductCode: varchar("provider_product_code", { length: 80 }).notNull(),
+    recipient: varchar("recipient", { length: 20 }).notNull(),
+    // Money. `amount_subunits` (pesewas) is the integer Paystack must confirm.
+    amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+    amountSubunits: integer("amount_subunits").notNull(),
+    currency: varchar("currency", { length: 8 }).notNull().default("GHS"),
+    paymentStatus: checkoutPaymentStatusEnum("payment_status").notNull().default("pending"),
+    orderStatus: checkoutOrderStatusEnum("order_status").notNull().default("awaiting_payment"),
+    fulfillmentStatus: fulfillmentStatusEnum("fulfillment_status").notNull().default("queued"),
+    // Paystack audit trail (never contains key material).
+    paystackTransactionId: varchar("paystack_transaction_id", { length: 40 }),
+    paystackChannel: varchar("paystack_channel", { length: 40 }),
+    paystackGatewayResponse: varchar("paystack_gateway_response", { length: 240 }),
+    // Data-provider (YenkoData) audit trail.
+    providerReference: varchar("provider_reference", { length: 120 }),
+    providerStatus: varchar("provider_status", { length: 80 }),
+    providerMessage: varchar("provider_message", { length: 240 }),
+    // Timestamps.
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    fulfilledAt: timestamp("fulfilled_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    abandonedAt: timestamp("abandoned_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("checkout_orders_user_idx").on(table.userId),
+    index("checkout_orders_status_idx").on(table.orderStatus),
+  ],
+);
+
 export const scheduledTopups = pgTable("scheduled_topups", {
+
   id: serial("id").primaryKey(),
   walletId: integer("wallet_id").notNull(),
   network: varchar("network", { length: 10 }).notNull(),

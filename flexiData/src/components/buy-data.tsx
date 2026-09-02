@@ -39,6 +39,7 @@ export function BuyData({
   const catTriggerRef = useRef<HTMLButtonElement>(null);
   const closeDrop = useCallback(() => setDropOpen(false), []);
   const [balance, setBalance] = useState(wallet.balance);
+  const [payMethod, setPayMethod] = useState<"wallet" | "paystack">("wallet");
 
   const [phase, setPhase] = useState<"idle" | "confirm" | "processing" | "result">("idle");
   const [result, setResult] = useState<FlowResult | null>(null);
@@ -59,12 +60,43 @@ export function BuyData({
   };
 
   const savePct = plan ? Math.max(0, Math.round((1 - plan.price / plan.retail) * 100)) : 0;
-  const insufficient = plan ? balance < plan.price : false;
+  const insufficient = plan ? payMethod === "wallet" && balance < plan.price : false;
   const ready = !!plan && isValidPhone(phone) && !insufficient;
 
   const submit = async () => {
     if (!plan) return;
     setPhase("processing");
+
+    // Paystack checkout: the server prices the bundle, creates the order and
+    // returns a redirect URL. Payment + fulfillment are confirmed server-side
+    // after the customer returns from Paystack.
+    if (payMethod === "paystack") {
+      try {
+        const res = await fetch("/api/checkout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            network,
+            category: activeCat?.id,
+            planLabel: plan.label,
+            recipient: phone,
+          }),
+        });
+        const data = (await res.json()) as { ok: boolean; error?: string; authorizationUrl?: string };
+        if (!data.ok || !data.authorizationUrl) throw new Error(data.error ?? "Could not start the payment");
+        window.location.assign(data.authorizationUrl);
+        return; // Stay in "processing" while the browser navigates away.
+      } catch (e) {
+        setResult({
+          status: "failed",
+          headline: "Couldn't start payment",
+          message: e instanceof Error ? e.message : "Something went wrong. Try again.",
+        });
+        setPhase("result");
+        return;
+      }
+    }
+
     try {
       const res = await fetch("/api/purchase", {
         method: "POST",
@@ -283,6 +315,24 @@ export function BuyData({
         <PhoneInput value={phone} onChange={setPhone} />
       </div>
 
+      {/* Payment method */}
+      <div className="animate-fade-up" style={{ animationDelay: "210ms" }}>
+        <FieldLabel>Pay with</FieldLabel>
+        <Segmented
+          options={[
+            { id: "wallet", label: `Wallet • ${money(balance)}` },
+            { id: "paystack", label: "MoMo / Card" },
+          ]}
+          value={payMethod}
+          onChange={(id) => setPayMethod(id as "wallet" | "paystack")}
+        />
+        {payMethod === "paystack" && (
+          <p className="mt-1.5 text-[10px] font-semibold text-zinc-400">
+            You&apos;ll be redirected to Paystack&apos;s secure checkout to pay with mobile money or card.
+          </p>
+        )}
+      </div>
+
       {/* Sticky CTA */}
       <div className="animate-fade-up sticky bottom-[78px] z-30 md:bottom-4" style={{ animationDelay: "240ms" }}>
         <div className="flex items-center gap-3 rounded-[1.4rem] border border-black/[0.06] bg-[#14161c] p-3 pl-4 text-white shadow-[0_16px_40px_rgba(0,0,0,0.35)] dark:border-line">
@@ -340,6 +390,10 @@ export function BuyData({
                 { label: "Category", value: activeCat?.label ?? "" },
                 { label: "Recipient", value: groupPhone(phone) },
                 { label: "Validity", value: plan.validity },
+                {
+                  label: "Pay with",
+                  value: payMethod === "paystack" ? "MoMo / Card (Paystack)" : "Wallet balance",
+                },
                 { label: "You save", value: `${savePct}% off retail (${money(plan.retail)})` },
               ]
             : []
@@ -347,11 +401,11 @@ export function BuyData({
         total={plan ? { label: "You pay", value: money(plan.price) } : undefined}
         ctaLabel={`Pay ${plan ? money(plan.price) : ""}`}
         onConfirm={submit}
-        processingSteps={[
-          `Contacting ${network}…`,
-          "Reserving your bundle…",
-          "Delivering to recipient…",
-        ]}
+        processingSteps={
+          payMethod === "paystack"
+            ? ["Creating your order…", "Contacting Paystack…", "Redirecting to secure checkout…"]
+            : [`Contacting ${network}…`, "Reserving your bundle…", "Delivering to recipient…"]
+        }
         result={result}
       />
     </div>

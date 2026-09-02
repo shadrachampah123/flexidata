@@ -1,0 +1,101 @@
+# NOTE: GitHub blocks bot pushes to .github/workflows/. To enable this CI job,
+# move this file to .github/workflows/paystack-e2e.yml in a commit of your own:
+#   git mv flexiData/scripts/github-workflow-paystack-e2e.yml .github/workflows/paystack-e2e.yml
+#
+name: Paystack TEST-mode E2E
+
+# Manually triggered end-to-end test of the payment flow against the REAL
+# Paystack TEST API. Requires ONE repository secret:
+#
+#   PAYSTACK_TEST_SECRET_KEY  ->  your sk_test_… key
+#   (GitHub → repo → Settings → Secrets and variables → Actions → New secret)
+#
+# The key never appears in code or logs: GitHub masks secret values, the app
+# never prints it, and a final step fails the build if it ever shows up in
+# captured output. Live keys (sk_live_…) are refused outright.
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flexiData
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app_db
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PAYSTACK_SECRET_KEY: ${{ secrets.PAYSTACK_TEST_SECRET_KEY }}
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/app_db
+      APP_BASE_URL: http://localhost:3000
+      AUTH_SECRET: ci-only-secret-${{ github.run_id }}-0123456789abcdefghijklmn
+      PAYMENTS_PROVIDER: paystack
+      DATA_API_PROVIDER: mock # YenkoData stand-in until production creds exist
+      DRIZZLE_ALLOW_LOCAL_DB: "1" # CI database container is intentionally local
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard — TEST key only, never live
+        run: |
+          if [ -z "$PAYSTACK_SECRET_KEY" ]; then
+            echo "::error::Repository secret PAYSTACK_TEST_SECRET_KEY is not set. Add your sk_test_… key in Settings → Secrets → Actions."
+            exit 1
+          fi
+          case "$PAYSTACK_SECRET_KEY" in
+            sk_test_*) echo "Test key detected — OK." ;;
+            *) echo "::error::PAYSTACK_TEST_SECRET_KEY is not a TEST key (sk_test_…). Refusing to run."; exit 1 ;;
+          esac
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: flexiData/package-lock.json
+
+      - name: Install dependencies (+ headless browser for checkout automation)
+        run: |
+          npm ci --no-audit --no-fund
+          npm i --no-save puppeteer
+
+      - name: Apply database schema
+        run: npx drizzle-kit push --force
+
+      - name: Build and start the app
+        run: |
+          npm run build
+          nohup npm start > /tmp/app.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://localhost:3000/api/health > /dev/null && break; sleep 2; done
+          curl -sf http://localhost:3000/api/health
+
+      - name: Run E2E against real Paystack TEST API
+        env:
+          E2E_MANUAL_WAIT_MS: "0"
+        run: node scripts/paystack-e2e.mjs
+
+      - name: Assert the secret never leaked into app logs or test output
+        if: always()
+        run: |
+          if grep -qF "$PAYSTACK_SECRET_KEY" /tmp/app.log; then
+            echo "::error::SECRET LEAK — the Paystack secret key appeared in app logs."
+            exit 1
+          fi
+          echo "App logs clean: secret key does not appear."
+
+      - name: Upload checkout screenshots (debug aid on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: flexiData/e2e-checkout-*.png
+          if-no-files-found: ignore
