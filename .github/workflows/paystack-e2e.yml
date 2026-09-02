@@ -1,7 +1,3 @@
-# NOTE: GitHub blocks bot pushes to .github/workflows/. To enable this CI job,
-# move this file to .github/workflows/paystack-e2e.yml in a commit of your own:
-#   git mv flexiData/scripts/github-workflow-paystack-e2e.yml .github/workflows/paystack-e2e.yml
-#
 name: Paystack TEST-mode E2E
 
 # Manually triggered end-to-end test of the payment flow against the REAL
