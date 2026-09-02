@@ -91,11 +91,11 @@ flexiData/
 | Variable | Description |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string (required) |
-| `AUTH_SECRET` | Long random string used to sign session cookies / reset tokens (required) |
-| `APP_BASE_URL` | Public deployment URL for password-reset links & payment callbacks (e.g. `https://flexidata.app`) |
+| `AUTH_SECRET` | Long random string used to sign session cookies / reset tokens (required — sign-up fails before writing anything when it is missing, so no account can be orphaned) |
+| `APP_BASE_URL` | Public deployment URL for links in emails & payment callbacks (e.g. `https://flexidata.app`). Optional for reset links: they are built from the origin of the incoming request, then `VERCEL_URL`, never `localhost` in production |
 | `PAYMENTS_PROVIDER` | `mock` (instant simulated MoMo/card funding) or `paystack` for real Ghanaian mobile money/card checkout |
 | `PAYSTACK_SECRET_KEY` | Paystack secret key — required when `PAYMENTS_PROVIDER=paystack` |
-| `NOTIFY_WEBHOOK_URL` | Webhook that sends transactional email; when empty, reset links are logged/returned in dev |
+| `NOTIFY_WEBHOOK_URL` | Webhook that sends transactional email; when empty, reset links are logged/returned in dev, and in production the forgot-password API answers honestly (502) instead of pretending an email was sent |
 | `DATA_API_PROVIDER` | Data gateway adapter to use: `mock` for local dev, or your production provider slug |
 | `DATA_API_BASE_URL` | Base URL for your Ghanaian data-API gateway/provider |
 | `DATA_API_PURCHASE_PATH` | Relative path used to submit MTN / Telecel data orders |
@@ -150,8 +150,10 @@ Then check `/api/health`: `gatewaySchema` and `signupSchema` should both read
      `?sslmode=require` (or `?sslmode=verify-full`).
    - `AUTH_SECRET` = a long random string
      (`node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"`).
-   - `APP_BASE_URL` = your public `https://<domain>` (used for reset links and
-     Paystack callbacks).
+   - `APP_BASE_URL` = your public `https://<domain>` (used for links in emails
+     and Paystack callbacks; reset links fall back to the request origin, so
+     the flow keeps working when you forget this — a localhost value shipped to
+     production was the historical cause of unreachable reset links).
    - For **live payments**: `PAYMENTS_PROVIDER=paystack` + `PAYSTACK_SECRET_KEY`,
      and set the Paystack webhook URL to
      `https://<domain>/api/payments/webhook` in the Paystack dashboard.
@@ -263,6 +265,7 @@ Four defects made account creation fail:
 ```bash
 cd flexiData
 npm run verify:seed-resilience   # no database needed (in-memory simulator)
+npm run verify:auth-flow         # no database needed; drives the real auth routes
 npm run verify:signup            # needs DATABASE_URL + AUTH_SECRET; cleans up after itself
 ```
 

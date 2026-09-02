@@ -3,7 +3,7 @@ import { users } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { createPasswordReset } from "@/lib/auth";
 import { isLikelyEmail, normalizeEmail } from "@/lib/accounts";
-import { sendPasswordResetEmail } from "@/lib/notifications";
+import { requestOrigin, sendPasswordResetEmail } from "@/lib/notifications";
 
 export const dynamic = "force-dynamic";
 
@@ -24,12 +24,21 @@ export async function POST(req: Request) {
       .where(eq(users.email, normalizeEmail(email)))
       .limit(1);
 
+    // The reset link is built from the origin this request arrived on, so it
+    // reaches the deployment even when APP_BASE_URL was never configured (a
+    // localhost link in an email is exactly the "broken reset link" reports).
+    const origin = requestOrigin(req);
+
     let devPreviewUrl: string | undefined;
     if (rows[0]) {
       const reset = await createPasswordReset(rows[0].email);
       if (reset) {
-        const result = await sendPasswordResetEmail(rows[0].email, reset.token);
-        if (result.previewUrl) devPreviewUrl = result.previewUrl;
+        const result = await sendPasswordResetEmail(rows[0].email, reset.token, origin);
+        // In production a live reset link must never appear in an API
+        // response — anyone who knows an email address could take the account.
+        if (result.previewUrl && process.env.NODE_ENV !== "production") {
+          devPreviewUrl = result.previewUrl;
+        }
         if (!result.delivered) {
           return Response.json(
             { ok: false, error: "Could not send the reset email right now. Try again shortly." },
