@@ -443,8 +443,20 @@ export async function submitDataBundleOrder(order: DataBundleOrder): Promise<Gat
   const payload = buildPurchasePayload(order, config);
 
   if (config.provider === "mock") {
+    // Deterministic override for automated tests: CI pins DATA_MOCK_RESULT to
+    // "successful" (or "failed" / "pending") so the E2E flow is repeatable.
+    // When unset, the demo behaviour (mostly successful, rarely queued or
+    // rejected) is preserved for local development.
+    const forced = (process.env.DATA_MOCK_RESULT ?? "").trim().toLowerCase();
     const r = Math.random();
-    const status: GatewayTxStatus = r < 0.9 ? "successful" : r < 0.98 ? "pending" : "failed";
+    const status: GatewayTxStatus =
+      forced === "successful" || forced === "pending" || forced === "failed"
+        ? forced
+        : r < 0.9
+          ? "successful"
+          : r < 0.98
+            ? "pending"
+            : "failed";
     return {
       status,
       fulfillmentStatus:
