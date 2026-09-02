@@ -10,7 +10,7 @@ import { NETWORKS, AIRTIME_DISCOUNT } from "@/lib/constants";
 import { Segmented, FieldLabel } from "@/components/ui";
 import { PhoneInput } from "@/components/phone-input";
 import { FlowSheet, type FlowResult } from "@/components/flow-sheet";
-import { cn, groupPhone, isValidPhone, money } from "@/lib/format";
+import { cn, etaSentence, groupPhone, isValidPhone, money } from "@/lib/format";
 
 const QUICK = [2, 5, 10, 20, 50, 100];
 
@@ -50,6 +50,8 @@ export function BuyAirtime({ wallet }: { wallet: WalletDTO }) {
         ref?: string;
         pointsEarned?: number;
         balance?: number;
+        etaSeconds?: number | null;
+        trackable?: boolean;
       };
       if (data.error === "insufficient_funds") {
         setResult({ status: "failed", headline: "Insufficient balance", message: "Top up your wallet and try again." });
@@ -58,8 +60,9 @@ export function BuyAirtime({ wallet }: { wallet: WalletDTO }) {
       }
       if (!data.ok) throw new Error(data.error ?? "Failed");
       if (typeof data.balance === "number") setBalance(data.balance);
+      const status = (data.status as FlowResult["status"]) ?? "successful";
       setResult({
-        status: (data.status as FlowResult["status"]) ?? "successful",
+        status,
         ref: data.ref,
         headline:
           data.status === "successful"
@@ -69,6 +72,8 @@ export function BuyAirtime({ wallet }: { wallet: WalletDTO }) {
               : "Purchase failed",
         pointsEarned: data.pointsEarned,
         balance: data.balance,
+        etaLabel: etaSentence(status, data.etaSeconds),
+        trackRef: data.trackable ? data.ref : undefined,
         lines: [
           { label: "Airtime", value: `${network} GH₵ ${face.toFixed(0)}` },
           { label: "Recipient", value: groupPhone(phone) },

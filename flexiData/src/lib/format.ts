@@ -90,6 +90,27 @@ export function ordinal(n: number): string {
   return n + (s[(v - 20) % 10] || s[v] || s[0]);
 }
 
+/** Compact human duration, e.g. 45 -> "45s", 90 -> "1m 30s". */
+export function humanDuration(seconds: number): string {
+  if (seconds <= 0) return "moments";
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.floor(seconds / 60);
+  const rem = seconds % 60;
+  if (mins < 60) return rem ? `${mins}m ${rem}s` : `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  return `${hrs}h ${mins % 60}m`;
+}
+
+/** Receipt-friendly ETA sentence from a seconds-remaining estimate. */
+export function etaSentence(status: string, etaSeconds: number | null | undefined): string {
+  if (status === "successful") return "Delivered instantly";
+  if (status === "pending") {
+    if (etaSeconds == null || etaSeconds <= 0) return "Arriving any moment now";
+    return `Arriving in about ${humanDuration(etaSeconds)}`;
+  }
+  return "";
+}
+
 export function makeRef(prefix = "FD"): string {
   const t = Date.now().toString(36).toUpperCase();
   const r = Math.random().toString(36).slice(2, 6).toUpperCase();

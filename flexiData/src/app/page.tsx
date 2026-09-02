@@ -1,10 +1,16 @@
 import Link from "next/link";
 import { CalendarClock, ChevronRight, Zap } from "lucide-react";
-import { getActiveAlerts, getRecentTransactions, getSchedules } from "@/lib/data";
+import {
+  getActiveAlerts,
+  getActiveDeliveries,
+  getRecentTransactions,
+  getSchedules,
+} from "@/lib/data";
 import { requireSession } from "@/lib/session";
 import { WalletCard } from "@/components/wallet-card";
 import { ServiceGrid } from "@/components/service-grid";
 import { TxList } from "@/components/tx-list";
+import { ActiveDeliveries } from "@/components/active-deliveries";
 import { AlertsBell } from "@/components/alerts-bell";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Card, Logo, SectionTitle } from "@/components/ui";
@@ -15,10 +21,11 @@ export const dynamic = "force-dynamic";
 
 export default async function Home() {
   const { user, wallet } = await requireSession();
-  const [txs, alerts, schedules] = await Promise.all([
+  const [txs, alerts, schedules, activeDeliveries] = await Promise.all([
     getRecentTransactions(wallet.id, 7),
     getActiveAlerts(),
     getSchedules(wallet.id),
+    getActiveDeliveries(wallet.id),
   ]);
 
   const first = wallet.name.split(" ")[0];
@@ -89,6 +96,9 @@ export default async function Home() {
         <SectionTitle title="Quick services" />
         <ServiceGrid />
       </div>
+
+      {/* Active deliveries — live ETA for orders still in flight */}
+      <ActiveDeliveries orders={activeDeliveries} />
 
       {/* Upcoming auto top-up */}
       {nextSchedule && (
