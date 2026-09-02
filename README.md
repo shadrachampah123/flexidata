@@ -83,6 +83,44 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run verify:seed-resilience` | Check the shared catalog seed can't take sign-up down on a lagging schema |
 | `npm run verify:signup` | Sign-up regression checks against a real database (needs `DATABASE_URL`) |
 
+## Paystack E2E (automated)
+
+`scripts/paystack-e2e.mjs` is a fully automated end-to-end test of the
+Paystack integration — no human steps, no browser required in CI. It is
+triggered from GitHub Actions (`.github/workflows/paystack-e2e.yml`,
+manual "Run workflow") and can also be run locally.
+
+**Why it is shaped this way:** `checkout.paystack.com` sits behind a WAF that
+blocks datacenter networks, so GitHub Actions runners get HTTP 403 on the
+hosted checkout page and can never complete a test-card payment there. That is
+an *environment* restriction, not an application failure — the real Paystack
+TEST API works fine from CI. The suite therefore has three phases:
+
+| Phase | Backend | What it proves |
+| --- | --- | --- |
+| **A** | Real Paystack TEST API (`api.paystack.co`) | Registration, order creation, **real** transaction init + verification of an unpaid charge (must stay unsettled), order privacy, and the full webhook security matrix (bad / missing / tampered / valid / unknown-ref signatures) with the real `sk_test_` key. The hosted checkout page is only *probed* — a 403 there is logged as an environment note, never a failure. |
+| **B** | Local Paystack stub (`scripts/paystack-stub.mjs`, bound to 127.0.0.1) with the mock data provider set to succeed | The complete money flow through the app's real API routes: success (settle + fulfil exactly once, points, ledger), webhook-first settlement, duplicate-webhook idempotency, amount mismatch, currency mismatch, declined card, abandoned checkout, pending charge, and retry-within-the-same-checkout (declined → paid). |
+| **C** | Same stub, mock data provider forced to fail | Paid-but-provider-failed: the order parks as `fulfillment_failed` and repeated verify/webhook hits never re-submit it (no double-sent bundles). |
+
+Run it locally (needs a built app + Postgres + a TEST key):
+
+```bash
+cd flexiData
+npm run build
+node scripts/paystack-e2e.mjs            # full suite (real API + stub)
+E2E_STUB_ONLY=1 node scripts/paystack-e2e.mjs   # offline: stub phase only
+```
+
+Optional, local machines only: `E2E_TRY_HOSTED_CHECKOUT=1` attempts a real
+test-card payment on the *hosted* page with Puppeteer (`npm i --no-save
+puppeteer`). It is best-effort and informational — the suite never fails on
+the hosted page, which CI cannot reach anyway.
+
+Safety: live (`sk_live_…`) keys are refused, the key is never printed (CI
+fails the build if it ever appears in app or stub logs), the stub binds to
+127.0.0.1 only, and the stub records only the *shape* of the app's bearer
+header — never the key itself.
+
 ## Project layout
 
 ```
@@ -121,6 +159,7 @@ flexiData/
 | `DATA_API_SYNC_FLOAT_ON_PURCHASE` | Whether to sync cached float balances before purchase attempts |
 | `DATA_API_SCHEMA_FALLBACKS` | Tolerate a database that has not been migrated for the data gateway yet (default `true`) |
 | `DATA_API_SCHEMA_PROBE_MS` | How often the detected gateway schema is re-read from the catalog (default `60000`) |
+| `DATA_MOCK_RESULT` | Test-only override for the `mock` data gateway result: `successful` / `pending` / `failed`. Unset keeps the demo behaviour (mostly successful) |
 | `DRIZZLE_ALLOW_LOCAL_DB` | Set to `1` to let `drizzle-kit` target a `localhost` database on CI/Vercel (it refuses by default) |
 
 ## Migrations
