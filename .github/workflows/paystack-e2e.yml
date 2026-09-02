@@ -1,20 +1,35 @@
 name: Paystack TEST-mode E2E
 
 # Manually triggered end-to-end test of the payment flow against the REAL
-# Paystack TEST API. Requires ONE repository secret:
+# Paystack TEST API + a local Paystack stub. Requires ONE repository secret:
 #
 #   PAYSTACK_TEST_SECRET_KEY  ->  your sk_test_… key
 #   (GitHub → repo → Settings → Secrets and variables → Actions → New secret)
 #
 # The key never appears in code or logs: GitHub masks secret values, the app
-# never prints it, and a final step fails the build if it ever shows up in
-# captured output. Live keys (sk_live_…) are refused outright.
+# never prints it, the local stub never records it, and a final step fails the
+# build if it ever shows up in captured output. Live keys (sk_live_…) are
+# refused outright.
+#
+# DESIGN NOTE — why no browser automation here:
+#   checkout.paystack.com is behind a WAF that blocks datacenter networks, so
+#   GitHub Actions runners get HTTP 403 on the hosted checkout page and can
+#   never complete a test-card payment there. That is an environment
+#   restriction, not an application failure. The suite therefore:
+#     PHASE A  exercises the REAL Paystack TEST API directly (registration,
+#              order creation, real transaction init + verification, webhook
+#              security with the real key) and only PRObes the hosted page;
+#     PHASE B/C runs the complete money flow (success, webhook-first, replays,
+#              amount/currency mismatch, declined, abandoned, pending, retry,
+#              fulfillment-failure parking) against a local Paystack stub
+#              bound to 127.0.0.1, driven through the app's real API routes.
 on:
   workflow_dispatch:
 
 jobs:
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: flexiData
@@ -59,39 +74,42 @@ jobs:
           cache: npm
           cache-dependency-path: flexiData/package-lock.json
 
-      - name: Install dependencies (+ headless browser for checkout automation)
-        run: |
-          npm ci --no-audit --no-fund
-          npm i --no-save puppeteer
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
 
       - name: Apply database schema
         run: npx drizzle-kit push --force
 
-      - name: Build and start the app
-        run: |
-          npm run build
-          nohup npm start > /tmp/app.log 2>&1 &
-          for i in $(seq 1 60); do curl -sf http://localhost:3000/api/health > /dev/null && break; sleep 2; done
-          curl -sf http://localhost:3000/api/health
+      - name: Build the app
+        run: npm run build
 
-      - name: Run E2E against real Paystack TEST API
-        env:
-          E2E_MANUAL_WAIT_MS: "0"
+      - name: Run E2E (real Paystack TEST API + local Paystack stub)
+        # The script starts its own app instances:
+        #   port 3000 → real Paystack API (Phase A)
+        #   port 3100 → local stub, mock provider succeeds (Phase B)
+        #   port 3200 → local stub, mock provider fails (Phase C)
         run: node scripts/paystack-e2e.mjs
 
-      - name: Assert the secret never leaked into app logs or test output
+      - name: Assert the secret never leaked into app or stub logs
         if: always()
         run: |
-          if grep -qF "$PAYSTACK_SECRET_KEY" /tmp/app.log; then
-            echo "::error::SECRET LEAK — the Paystack secret key appeared in app logs."
-            exit 1
-          fi
-          echo "App logs clean: secret key does not appear."
+          leaked=0
+          for f in /tmp/flexidata-e2e-*.log; do
+            [ -f "$f" ] || continue
+            if grep -qF "$PAYSTACK_SECRET_KEY" "$f"; then
+              echo "::error::SECRET LEAK — the Paystack secret key appeared in $f."
+              leaked=1
+            fi
+          done
+          [ "$leaked" -eq 0 ] || exit 1
+          echo "App + stub logs clean: secret key does not appear."
 
-      - name: Upload checkout screenshots (debug aid on failure)
+      - name: Upload E2E logs (debug aid on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-screenshots
-          path: flexiData/e2e-checkout-*.png
+          name: e2e-logs
+          path: |
+            /tmp/flexidata-e2e-app-*.log
+            /tmp/flexidata-e2e-stub-*.log
           if-no-files-found: ignore
