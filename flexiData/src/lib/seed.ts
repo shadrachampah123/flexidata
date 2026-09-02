@@ -75,6 +75,124 @@ async function runSeedStep(label: string, fn: () => Promise<void>): Promise<void
  * Exported so `npm run verify:signup` can exercise it directly: `ensureSeeded`
  * is memoized per process, so a second repair cannot be triggered through it.
  */
+/**
+ * Self-healing: create the Paystack checkout table if a production database
+ * still predates that migration.
+ *
+ * The app schema declares `checkout_orders` plus two enums. Deployments that
+ * shipped the checkout routes without `npx drizzle-kit push` answer
+ * `checkout_orders table missing` on POST /api/checkout. This does the same
+ * additive work push would: create missing enums/table/indexes, add any
+ * missing columns. It never drops tables, never truncates, never rewrites
+ * existing rows.
+ *
+ * Idempotent and safe to run on every boot.
+ */
+export async function repairCheckoutOrdersSchema(): Promise<void> {
+  await db.execute(sql`
+    do $repair$
+    begin
+      if not exists (select 1 from pg_type where typname = 'checkout_payment_status') then
+        create type checkout_payment_status as enum ('pending', 'successful', 'failed', 'abandoned');
+      end if;
+      if not exists (select 1 from pg_type where typname = 'checkout_order_status') then
+        create type checkout_order_status as enum (
+          'awaiting_payment',
+          'payment_failed',
+          'abandoned',
+          'paid',
+          'fulfilling',
+          'fulfilled',
+          'fulfillment_failed'
+        );
+      end if;
+      if not exists (select 1 from pg_type where typname = 'fulfillment_status') then
+        create type fulfillment_status as enum (
+          'queued',
+          'submitted',
+          'processing',
+          'delivered',
+          'failed',
+          'refunded'
+        );
+      end if;
+    end
+    $repair$;
+  `);
+
+  await db.execute(sql`
+    create table if not exists checkout_orders (
+      id serial primary key,
+      ref varchar(40) not null unique,
+      user_id integer not null,
+      wallet_id integer not null,
+      customer_email varchar(160) not null,
+      customer_phone varchar(20) not null,
+      network varchar(10) not null,
+      category varchar(40) not null,
+      plan_label varchar(80) not null,
+      provider_product_code varchar(80) not null,
+      recipient varchar(20) not null,
+      amount numeric(12, 2) not null,
+      amount_subunits integer not null,
+      currency varchar(8) not null default 'GHS',
+      payment_status checkout_payment_status not null default 'pending',
+      order_status checkout_order_status not null default 'awaiting_payment',
+      fulfillment_status fulfillment_status not null default 'queued',
+      paystack_transaction_id varchar(40),
+      paystack_channel varchar(40),
+      paystack_gateway_response varchar(240),
+      provider_reference varchar(120),
+      provider_status varchar(80),
+      provider_message varchar(240),
+      paid_at timestamptz,
+      verified_at timestamptz,
+      fulfilled_at timestamptz,
+      failed_at timestamptz,
+      abandoned_at timestamptz,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    )
+  `);
+
+  // Additive column repair for a table that exists but is missing a later field.
+  await db.execute(sql`
+    alter table checkout_orders
+      add column if not exists ref varchar(40),
+      add column if not exists user_id integer,
+      add column if not exists wallet_id integer,
+      add column if not exists customer_email varchar(160),
+      add column if not exists customer_phone varchar(20),
+      add column if not exists network varchar(10),
+      add column if not exists category varchar(40),
+      add column if not exists plan_label varchar(80),
+      add column if not exists provider_product_code varchar(80),
+      add column if not exists recipient varchar(20),
+      add column if not exists amount numeric(12, 2),
+      add column if not exists amount_subunits integer,
+      add column if not exists currency varchar(8) default 'GHS',
+      add column if not exists payment_status checkout_payment_status default 'pending',
+      add column if not exists order_status checkout_order_status default 'awaiting_payment',
+      add column if not exists fulfillment_status fulfillment_status default 'queued',
+      add column if not exists paystack_transaction_id varchar(40),
+      add column if not exists paystack_channel varchar(40),
+      add column if not exists paystack_gateway_response varchar(240),
+      add column if not exists provider_reference varchar(120),
+      add column if not exists provider_status varchar(80),
+      add column if not exists provider_message varchar(240),
+      add column if not exists paid_at timestamptz,
+      add column if not exists verified_at timestamptz,
+      add column if not exists fulfilled_at timestamptz,
+      add column if not exists failed_at timestamptz,
+      add column if not exists abandoned_at timestamptz,
+      add column if not exists created_at timestamptz default now(),
+      add column if not exists updated_at timestamptz default now()
+  `);
+
+  await db.execute(sql`create index if not exists checkout_orders_user_idx on checkout_orders (user_id)`);
+  await db.execute(sql`create index if not exists checkout_orders_status_idx on checkout_orders (order_status)`);
+}
+
 export async function repairReferrerIndex(): Promise<void> {
   // Look the uniqueness up in the catalog rather than by name. A database that
   // has been pushed, reverted and hand-patched over time may enforce it as a
@@ -141,6 +259,16 @@ async function runSeed(): Promise<void> {
   // Repair blocking schema drift before anything writes per-user rows. A failure
   // here must not take the app down: the rest of the seed is still useful, and
   // a deployment without DDL rights should degrade, not crash.
+  try {
+    await repairCheckoutOrdersSchema();
+  } catch (error) {
+    console.warn(
+      "[flexidata] could not ensure checkout_orders exists — Paystack checkout will stay unavailable until the table is created:",
+      (error as Error)?.message ?? error,
+      "\n  Fix: run `npx drizzle-kit push` against this database.",
+    );
+  }
+
   try {
     await repairReferrerIndex();
   } catch (error) {

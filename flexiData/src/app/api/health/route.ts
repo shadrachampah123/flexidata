@@ -2,10 +2,13 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db";
 import { hasAuthSecret } from "@/lib/auth";
 import { getPasswordResetEmailDeliveryStatus } from "@/lib/notifications";
+import { repairCheckoutOrdersSchema } from "@/lib/seed";
 import {
   describeAuthCompatibility,
+  describeCheckoutCompatibility,
   describeSchemaCompatibility,
   describeSignupCompatibility,
+  resetSchemaCapabilitiesCache,
 } from "@/lib/schema-compat";
 
 export const dynamic = "force-dynamic";
@@ -25,9 +28,19 @@ export async function GET() {
     );
   }
 
+  // Additive self-heal: create checkout_orders if a production database never
+  // received the Paystack checkout migration. Never drops or rewrites data.
+  try {
+    await repairCheckoutOrdersSchema();
+    resetSchemaCapabilitiesCache();
+  } catch (error) {
+    console.warn("[flexidata] checkout schema repair failed", error);
+  }
+
   // A pre-gateway schema is survivable (the app degrades), but it must be
   // visible here so a stuck deployment is diagnosable at a glance.
   const schema = await describeSchemaCompatibility();
+  const checkout = await describeCheckoutCompatibility();
   const signup = await describeSignupCompatibility();
   const auth = await describeAuthCompatibility();
   const degraded = schema.status === "legacy";

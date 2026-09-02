@@ -358,6 +358,8 @@ async function probeCapabilities(): Promise<SchemaCapabilities> {
       "transactions",
       "bundle_plans",
       PROVIDER_FLOAT_TABLE,
+      "checkout_orders",
+      "deposit_requests",
       ...SIGNUP_TABLES,
       ...AUTH_WRITE_TABLES,
     ]
@@ -894,6 +896,71 @@ export async function describeAuthCompatibility(): Promise<AuthSchemaReport> {
 }
 
 /** Human-readable drift summary, surfaced on `/api/health`. */
+export const CHECKOUT_ORDERS_COLUMNS = [
+  "id",
+  "ref",
+  "user_id",
+  "wallet_id",
+  "customer_email",
+  "customer_phone",
+  "network",
+  "category",
+  "plan_label",
+  "provider_product_code",
+  "recipient",
+  "amount",
+  "amount_subunits",
+  "currency",
+  "payment_status",
+  "order_status",
+  "fulfillment_status",
+  "paystack_transaction_id",
+  "paystack_channel",
+  "paystack_gateway_response",
+  "provider_reference",
+  "provider_status",
+  "provider_message",
+  "paid_at",
+  "verified_at",
+  "fulfilled_at",
+  "failed_at",
+  "abandoned_at",
+  "created_at",
+  "updated_at",
+] as const;
+
+export type CheckoutSchemaReport = {
+  status: "current" | "missing" | "drifted" | "unknown";
+  missing: string[];
+  hint?: string;
+};
+
+/** Drift report for Paystack checkout tables, surfaced on `/api/health`. */
+export async function describeCheckoutCompatibility(): Promise<CheckoutSchemaReport> {
+  const caps = await resolveCapabilities();
+  const present = caps.tableColumns.get("checkout_orders");
+  const probed = caps.probed && caps.tableColumns.size > 0;
+  if (!probed) return { status: "unknown", missing: [] };
+  if (!present || present.size === 0) {
+    return {
+      status: "missing",
+      missing: ["checkout_orders"],
+      hint: "Run `npx drizzle-kit push` against this database to create checkout_orders.",
+    };
+  }
+  const missing = missingTableColumns(caps, "checkout_orders", CHECKOUT_ORDERS_COLUMNS).map(
+    (column) => `checkout_orders.${column}`,
+  );
+  return {
+    status: missing.length > 0 ? "drifted" : "current",
+    missing,
+    hint:
+      missing.length > 0
+        ? "Run `npx drizzle-kit push` against this database to bring checkout_orders up to date."
+        : undefined,
+  };
+}
+
 export async function describeSchemaCompatibility(): Promise<SchemaCompatibilityReport> {
   // Always probe for real: operators need the drift report even when the
   // runtime fallbacks are switched off.
