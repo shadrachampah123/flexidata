@@ -1,11 +1,8 @@
-import { settleDeposit } from "@/app/api/wallet/fund/route";
-import { paymentsProvider, verifyPaystackPayment } from "@/lib/payments";
+import { paymentsProvider } from "@/lib/payments";
 import { isPaystackConfigured, isValidPaystackWebhookSignature } from "@/lib/paystack";
 import { getCheckoutOrder, reconcileCheckoutOrder } from "@/lib/checkout";
+import { getDeposit, reconcileDeposit } from "@/lib/deposits";
 import { isMissingRelationError } from "@/lib/schema-compat";
-import { db } from "@/db";
-import { depositRequests } from "@/db/schema";
-import { eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
@@ -69,25 +66,22 @@ export async function POST(req: Request) {
       // Mock deposits settle at init; a signed Paystack event cannot apply.
       return Response.json({ ok: true, ignored: "deposits_not_paystack" });
     }
-    const rows = await db
-      .select({ ref: depositRequests.ref, amount: depositRequests.amount, status: depositRequests.status })
-      .from(depositRequests)
-      .where(eq(depositRequests.ref, ref))
-      .limit(1);
-    const deposit = rows[0];
+
+    let deposit = null;
+    try {
+      deposit = await getDeposit(ref);
+    } catch (error) {
+      if (!isMissingRelationError(error)) throw error;
+      // deposit_requests not migrated yet — nothing to reconcile.
+      return Response.json({ ok: true, ignored: "deposits_unavailable" });
+    }
     if (!deposit) return Response.json({ ok: true, ignored: "unknown_ref" });
 
-    if (event.event === "charge.success" && deposit.status !== "successful") {
-      // Never credit from the payload: confirm with Paystack and check the
-      // amount actually charged against the amount we recorded at init.
-      const { paid, amountGhs } = await verifyPaystackPayment(ref);
-      const expected = Number(deposit.amount);
-      if (paid && (amountGhs == null || Math.abs(amountGhs - expected) < 0.005)) {
-        await settleDeposit(ref);
-      } else if (paid) {
-        console.error(`[webhook] deposit ${ref} amount mismatch: got ${amountGhs}, expected ${expected}`);
-      }
-    }
+    // reconcileDeposit re-verifies with Paystack (never trusts this payload),
+    // enforces reference + exact pesewa amount + currency, and settles
+    // idempotently in one transaction. charge.failed / charge.abandoned are
+    // also reconciled so the deposit row reaches the correct terminal state.
+    await reconcileDeposit(ref);
 
     return Response.json({ ok: true });
   } catch (error) {

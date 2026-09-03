@@ -38,7 +38,9 @@ export function WalletTools({
   pendingFundingRef?: string | null;
 }) {
   const router = useRouter();
-  const [tab, setTab] = useState<"fund" | "transfer">(initialTab);
+  // When we land here straight back from a Paystack redirect the sheet opens
+  // straight into its processing/polling state.
+  const [tab, setTab] = useState<"fund" | "transfer">(pendingFundingRef ? "fund" : initialTab);
   const [method, setMethod] = useState("momo_mtn");
   const [balance, setBalance] = useState(wallet.balance);
 
@@ -50,7 +52,9 @@ export function WalletTools({
   const [trCustom, setTrCustom] = useState("");
   const [dest, setDest] = useState("");
 
-  const [phase, setPhase] = useState<"idle" | "confirm" | "processing" | "result">("idle");
+  const [phase, setPhase] = useState<"idle" | "confirm" | "processing" | "result">(
+    pendingFundingRef ? "processing" : "idle",
+  );
   const [result, setResult] = useState<FlowResult | null>(null);
 
   const fundAmount = fundChip ?? (Number(fundCustom.replace(/\D/g, "")) || 0);
@@ -62,28 +66,127 @@ export function WalletTools({
   const insufficient = trAmount > balance;
   const transferReady = trAmount >= 1 && isValidPhone(dest) && !insufficient;
 
-  // Returning from a Paystack redirect: confirm the deposit, then refresh.
+  // Returning from a Paystack redirect: open the processing sheet, nudge
+  // settlement once (POST /api/payments/verify re-verifies with Paystack — the
+  // redirect itself proves nothing), then poll the read-only, owner-checked
+  // GET /api/wallet/deposit status endpoint. Settlement keeps being retried
+  // periodically so the deposit clears even if the Paystack webhook is late.
+  // If this tab is closed, the webhook still settles it server-side.
   useEffect(() => {
     if (!pendingFundingRef) return;
     let cancelled = false;
-    (async () => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const MAX_ATTEMPTS = 12;
+
+    const finish = (result: FlowResult, refresh: boolean) => {
+      if (cancelled) return;
+      setResult(result);
+      setPhase("result");
+      if (refresh) router.refresh();
+    };
+
+    // POST verify drives reconciliation (idempotent; safe to call repeatedly).
+    const driveSettlement = async () => {
       try {
-        const res = await fetch("/api/payments/verify", {
+        await fetch("/api/payments/verify", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ref: pendingFundingRef }),
         });
-        const data = (await res.json()) as { ok: boolean; status?: string };
-        if (!cancelled && data.ok) {
-          router.refresh();
-        }
       } catch {
-        // The webhook will settle it server-side even if this tab is gone.
+        // Network hiccup — the webhook + later retries still settle it.
       }
-    })();
+    };
+
+    const leaveProcessing = (headline: string, message: string) => {
+      finish(
+        { status: "pending", ref: pendingFundingRef, headline, message, etaLabel: "Credits automatically" },
+        true,
+      );
+    };
+
+    const poll = async (attempt: number) => {
+      if (cancelled) return;
+      // Settle immediately, then again every 3rd poll as a webhook fallback.
+      if (attempt === 0 || attempt % 3 === 0) await driveSettlement();
+      if (cancelled) return;
+
+      try {
+        const res = await fetch(`/api/wallet/deposit?ref=${encodeURIComponent(pendingFundingRef)}`, {
+          headers: { "Content-Type": "application/json" },
+        });
+        const data = (await res.json()) as {
+          ok: boolean;
+          deposit?: { status?: string; amount?: number; balance?: number };
+        };
+        if (cancelled) return;
+
+        const status = data.ok ? data.deposit?.status : undefined;
+
+        if (status === "successful") {
+          const credited = typeof data.deposit?.amount === "number" ? data.deposit.amount : fundAmount;
+          finish(
+            {
+              status: "successful",
+              ref: pendingFundingRef,
+              headline: `+${money(credited)} added!`,
+              message: "Payment confirmed by Paystack. Your wallet has been credited and is ready to spend.",
+              balance: data.deposit?.balance,
+              lines: [
+                { label: "Status", value: "Confirmed" },
+                { label: "Fee", value: money(0) },
+                { label: "Credited", value: money(credited) },
+              ],
+            },
+            true,
+          );
+          return;
+        }
+
+        if (status === "failed" || status === "abandoned") {
+          finish(
+            {
+              status: "failed",
+              ref: pendingFundingRef,
+              headline: "Deposit not completed",
+              message:
+                "We could not confirm a successful payment, so your wallet was not credited. You have not been charged for a failed payment — try again.",
+            },
+            false,
+          );
+          return;
+        }
+
+        if (attempt >= MAX_ATTEMPTS) {
+          leaveProcessing(
+            "Payment processing",
+            "We're still confirming your payment with Paystack. Your wallet is credited automatically once it clears — usually within a minute. You can close this safely.",
+          );
+          return;
+        }
+
+        timer = setTimeout(() => poll(attempt + 1), 2500);
+      } catch {
+        if (cancelled) return;
+        if (attempt >= MAX_ATTEMPTS) {
+          leaveProcessing(
+            "Payment processing",
+            "We lost the connection while confirming your payment. It will be credited automatically once Paystack confirms it — check your balance shortly.",
+          );
+          return;
+        }
+        timer = setTimeout(() => poll(attempt + 1), 2500);
+      }
+    };
+
+    poll(0);
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
+    // fundAmount is intentionally not a dependency: the ref identifies the
+    // deposit and the status endpoint returns the credited amount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingFundingRef, router]);
 
   const submit = async () => {

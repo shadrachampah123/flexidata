@@ -28,6 +28,7 @@ on:
   push:
     branches:
       - arena/01a06438-flexidata
+      - arena/01a06842-flexidata
 
 jobs:
   e2e:
@@ -91,6 +92,7 @@ jobs:
         #   port 3000 → real Paystack API (Phase A)
         #   port 3100 → local stub, mock provider succeeds (Phase B)
         #   port 3200 → local stub, mock provider fails (Phase C)
+        #   port 3300 → local stub, Paystack wallet DEPOSITS (Phase D)
         run: node scripts/paystack-e2e.mjs
 
       - name: Assert the secret never leaked into app or stub logs

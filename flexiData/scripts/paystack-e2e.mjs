@@ -68,9 +68,11 @@ const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const PORT_A = Number(process.env.APP_PORT_A ?? 3000);
 const PORT_B = Number(process.env.APP_PORT_B ?? 3100);
 const PORT_C = Number(process.env.APP_PORT_C ?? 3200);
+const PORT_D = Number(process.env.APP_PORT_D ?? 3300);
 const APP_URL_A = `http://127.0.0.1:${PORT_A}`;
 const APP_URL_B = `http://127.0.0.1:${PORT_B}`;
 const APP_URL_C = `http://127.0.0.1:${PORT_C}`;
+const APP_URL_D = `http://127.0.0.1:${PORT_D}`;
 const STUB_PORT = Number(process.env.PAYSTACK_STUB_PORT ?? 4599);
 const STUB_URL = `http://127.0.0.1:${STUB_PORT}`;
 const STUB_SCRIPT = path.join(APP_ROOT, "scripts", "paystack-stub.mjs");
@@ -278,6 +280,35 @@ async function registerAccount(client, tag) {
     password: "Password123!e2e",
   });
   return { status, json };
+}
+
+async function startDeposit(client, amount = 50, method = "momo_mtn") {
+  const { status, json } = await client.api("/api/wallet/fund", { method, amount });
+  if (status !== 200 || !json?.ok) {
+    throw new Error(`wallet fund init failed: HTTP ${status} ${JSON.stringify(json)}`);
+  }
+  return json; // { ok, status: "pending", ref, authorizationUrl, provider }
+}
+async function verifyDeposit(client, ref) {
+  const { json } = await client.api("/api/payments/verify", { ref });
+  return json; // { ok, status, ref, amount?, balance? }
+}
+async function dbDeposit(ref) {
+  const rows = await q(
+    "select status, amount, amount_subunits, currency, provider, " +
+      "paystack_transaction_id, paystack_channel, paid_at, verified_at, completed_at, wallet_id " +
+      "from deposit_requests where ref=$1",
+    [ref],
+  );
+  return rows[0] ?? null;
+}
+async function walletBalance(walletId) {
+  const rows = await q("select balance from wallets where id=$1", [walletId]);
+  return Number(rows[0]?.balance ?? 0);
+}
+async function depositLedgerCount(ref) {
+  const rows = await q("select count(*)::int as n from transactions where ref=$1 and type='deposit'", [ref]);
+  return rows[0]?.n ?? 0;
 }
 
 async function dbOrder(ref) {
@@ -666,6 +697,154 @@ async function phaseCFulfillmentFailure() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase D — real Paystack wallet DEPOSITS against the local stub
+//
+// Mirrors Phase B but exercises /api/wallet/fund + /api/payments/verify + the
+// deposit branch of the webhook, asserting the wallet is credited exactly
+// once and that amount mismatches / failures never credit.
+// ---------------------------------------------------------------------------
+async function phaseDDeposits() {
+  console.log(`\n=== PHASE D: Paystack wallet deposits via local stub (${APP_URL_D}) ===`);
+  await fetch(`${STUB_URL}/_stub/reset`, { method: "POST" }).catch(() => {});
+  // Ensure the stub is running (Phase B started it; restart if it is gone).
+  try {
+    if (!(await fetch(`${STUB_URL}/_stub/health`)).ok) throw new Error("stub down");
+  } catch {
+    spawnStub();
+    await waitFor(`${STUB_URL}/_stub/health`, "paystack stub (deposit phase)");
+  }
+
+  spawnApp("app-stub-deposits", PORT_D, {
+    PAYSTACK_BASE_URL: STUB_URL,
+    PAYMENTS_PROVIDER: "paystack",
+  });
+  await waitFor(`${APP_URL_D}/api/health`, "deposit-phase app");
+  const app = makeClient(APP_URL_D);
+
+  try {
+    const reg = await registerAccount(app, "d");
+    if (!assert("D0. register test account (deposit phase)", reg.status === 200 && reg.json?.ok, `HTTP ${reg.status}`)) return;
+
+    // D1. SUCCESSFUL DEPOSIT: fund → pay (stub success) → verify → credited.
+    const dep = await startDeposit(app, 50, "momo_mtn");
+    assert("D1a. deposit initialised against the local stub", dep.status === "pending" && Boolean(dep.authorizationUrl), dep.status);
+    const depRow0 = await dbDeposit(dep.ref);
+    const walletId = depRow0?.wallet_id;
+    assert("D1b. deposit recorded pending with exact pesewa amount", depRow0?.status === "pending" && Number(depRow0.amount_subunits) === 5000 && depRow0.currency === "GHS", `${depRow0?.status}/${depRow0?.amount_subunits}`);
+    const balBefore = await walletBalance(walletId);
+    const ledgerBefore = await depositLedgerCount(dep.ref);
+
+    await stubSetScenario(dep.ref, "success");
+    const v = await verifyDeposit(app, dep.ref);
+    assert("D1c. verified deposit settles successfully", v?.ok && v?.status === "successful", v?.status);
+    const depRow = await dbDeposit(dep.ref);
+    assert("D1d. deposit marked successful with Paystack audit fields", depRow?.status === "successful" && Boolean(depRow.paystack_transaction_id && depRow.paid_at && depRow.verified_at), depRow?.status);
+    const balAfter = await walletBalance(walletId);
+    assert("D1e. wallet credited exactly the deposit amount", Math.abs(balAfter - balBefore - 50) < 0.005, `+${balAfter - balBefore}`);
+    assert("D1f. exactly one deposit ledger row", (await depositLedgerCount(dep.ref)) === 1 + ledgerBefore, `rows: ${await depositLedgerCount(dep.ref)}`);
+
+    // D1g/h. GET deposit-status endpoint: owner sees the settled deposit.
+    const statusRes = await app.api(`/api/wallet/deposit?ref=${encodeURIComponent(dep.ref)}`);
+    assert(
+      "D1g. owner can GET their deposit status (successful)",
+      statusRes.status === 200 && statusRes.json?.ok && statusRes.json?.deposit?.status === "successful" &&
+        Number(statusRes.json.deposit.amount) === 50,
+      `HTTP ${statusRes.status} ${statusRes.json?.deposit?.status}`,
+    );
+    const missingRef = await app.api(`/api/wallet/deposit?ref=${encodeURIComponent("DP-NOPE-NONEXISTENT")}`);
+    assert("D1h. unknown deposit ref → 404", missingRef.status === 404, `HTTP ${missingRef.status}`);
+
+    // D1i. OWNERSHIP: another signed-in account must NOT see this deposit
+    // (same 404 as "not found" — no cross-tenant information leak).
+    const other = makeClient(APP_URL_D);
+    await registerAccount(other, "d-other");
+    const cross = await other.api(`/api/wallet/deposit?ref=${encodeURIComponent(dep.ref)}`);
+    assert("D1i. another user cannot read this deposit (404)", cross.status === 404 && !cross.json?.deposit, `HTTP ${cross.status}`);
+    // Unauthenticated call is rejected.
+    const anon = await makeClient(APP_URL_D).api(`/api/wallet/deposit?ref=${encodeURIComponent(dep.ref)}`);
+    assert("D1j. unauthenticated status request is rejected", anon.status === 401, `HTTP ${anon.status}`);
+
+    // D2. DUPLICATE WEBHOOK: replayed charge.success must not double-credit.
+    const balBefore2 = await walletBalance(walletId);
+    for (let i = 0; i < 4; i++) {
+      const code = await webhook(APP_URL_D, chargeEvent("charge.success", dep.ref), sign(chargeEvent("charge.success", dep.ref)));
+      if (i === 0) assert("D2a. duplicate webhook accepted (200)", code === 200, `HTTP ${code}`);
+    }
+    const balAfter2 = await walletBalance(walletId);
+    assert("D2b. replayed webhooks do NOT re-credit the wallet", Math.abs(balAfter2 - balBefore2) < 0.005, `balance delta ${balAfter2 - balBefore2}`);
+    assert("D2c. still exactly one deposit ledger row", (await depositLedgerCount(dep.ref)) === 1, `rows: ${await depositLedgerCount(dep.ref)}`);
+
+    // D3. CONCURRENT VERIFICATION: N parallel verify calls credit exactly once.
+    const dep2 = await startDeposit(app, 20, "card");
+    await stubSetScenario(dep2.ref, "success");
+    const dep2Wallet = (await dbDeposit(dep2.ref))?.wallet_id;
+    const balBefore3 = await walletBalance(dep2Wallet);
+    const concurrent = await Promise.all(
+      Array.from({ length: 8 }, () => verifyDeposit(app, dep2.ref)),
+    );
+    const allOk = concurrent.every((r) => r?.ok);
+    const balAfter3 = await walletBalance(dep2Wallet);
+    assert("D3a. all concurrent verify calls return ok", allOk, `${concurrent.filter((r) => r?.ok).length}/8 ok`);
+    assert("D3b. concurrent verification credits exactly once", Math.abs(balAfter3 - balBefore3 - 20) < 0.005, `balance delta ${balAfter3 - balBefore3}`);
+    assert("D3c. concurrent verification writes one ledger row", (await depositLedgerCount(dep2.ref)) === 1, `rows: ${await depositLedgerCount(dep2.ref)}`);
+
+    // D4. AMOUNT MISMATCH: a "success" for a different amount never credits.
+    const dep3 = await startDeposit(app, 30, "card");
+    const dep3Wallet = (await dbDeposit(dep3.ref))?.wallet_id;
+    const balBefore4 = await walletBalance(dep3Wallet);
+    await stubSetScenario(dep3.ref, "success-wrong-amount");
+    const v3 = await verifyDeposit(app, dep3.ref);
+    const dep3Row = await dbDeposit(dep3.ref);
+    assert("D4a. amount mismatch parks the deposit as failed", v3?.status === "failed" && dep3Row?.status === "failed", `${v3?.status}/${dep3Row?.status}`);
+    assert("D4b. amount mismatch does NOT credit the wallet", Math.abs((await walletBalance(dep3Wallet)) - balBefore4) < 0.005, `delta ${(await walletBalance(dep3Wallet)) - balBefore4}`);
+    assert("D4c. amount mismatch writes no ledger row", (await depositLedgerCount(dep3.ref)) === 0, `rows: ${await depositLedgerCount(dep3.ref)}`);
+    // A signed webhook cannot force a mismatched charge through either.
+    await webhook(APP_URL_D, chargeEvent("charge.success", dep3.ref), sign(chargeEvent("charge.success", dep3.ref)));
+    assert("D4d. signed webhook cannot force a mismatched deposit to settle", (await dbDeposit(dep3.ref))?.status === "failed" && (await depositLedgerCount(dep3.ref)) === 0);
+
+    // D5. FAILED PAYMENT (declined): never credited.
+    const dep4 = await startDeposit(app, 15, "momo_mtn");
+    const dep4Wallet = (await dbDeposit(dep4.ref))?.wallet_id;
+    const balBefore5 = await walletBalance(dep4Wallet);
+    await stubSetScenario(dep4.ref, "failed");
+    const v4 = await verifyDeposit(app, dep4.ref);
+    assert("D5a. declined payment → deposit failed", v4?.status === "failed" && (await dbDeposit(dep4.ref))?.status === "failed", v4?.status);
+    assert("D5b. failed payment does NOT credit the wallet", Math.abs((await walletBalance(dep4Wallet)) - balBefore5) < 0.005, `delta ${(await walletBalance(dep4Wallet)) - balBefore5}`);
+    assert("D5c. failed payment writes no ledger row", (await depositLedgerCount(dep4.ref)) === 0, `rows: ${await depositLedgerCount(dep4.ref)}`);
+
+    // D6. PENDING charge stays un-credited until it actually succeeds.
+    const dep5 = await startDeposit(app, 10, "card");
+    const dep5Wallet = (await dbDeposit(dep5.ref))?.wallet_id;
+    const balBefore6 = await walletBalance(dep5Wallet);
+    await stubSetScenario(dep5.ref, "pending");
+    const v5 = await verifyDeposit(app, dep5.ref);
+    assert("D6a. pending charge stays pending", v5?.status === "pending" && (await dbDeposit(dep5.ref))?.status === "pending", v5?.status);
+    assert("D6b. pending charge does NOT credit the wallet", Math.abs((await walletBalance(dep5Wallet)) - balBefore6) < 0.005);
+    // Webhook while pending must also stay unsettled.
+    await webhook(APP_URL_D, chargeEvent("charge.success", dep5.ref), sign(chargeEvent("charge.success", dep5.ref)));
+    assert("D6c. webhook hint while pending does not settle", (await dbDeposit(dep5.ref))?.status === "pending" && (await depositLedgerCount(dep5.ref)) === 0);
+
+    // D7. EXACTLY-ONCE across the whole wallet: total credit equals the sum of
+    // only the successful deposits (50 + 20); failed/mismatched/pending add 0.
+    const credited = await q(
+      "select coalesce(sum(amount),0)::float8 as total from transactions where wallet_id=$1 and type='deposit' and status='successful'",
+      [walletId],
+    );
+    const totalCredited = Number(credited[0]?.total ?? 0);
+    assert("D7a. ledger deposit total equals settled deposits only", Math.abs(totalCredited - 70) < 0.005, `ledger total ${totalCredited}`);
+    const allDeposits = await q("select count(*)::int as n from deposit_requests where wallet_id=$1", [walletId]);
+    const successDeposits = await q("select count(*)::int as n from deposit_requests where wallet_id=$1 and status='successful'", [walletId]);
+    assert("D7b. successful-deposit count matches ledger credit count", Number(successDeposits[0]?.n ?? 0) === 2 && Number(allDeposits[0]?.n ?? 0) >= 4, `${successDeposits[0]?.n}/${allDeposits[0]?.n}`);
+
+    // D8. No secret material in any deposit response.
+    const spot = JSON.stringify([dep, dep2, dep3, dep4, dep5, v, v3, v4, v5]);
+    assert("D8. no secret material in deposit API responses", !spot.includes(ACTIVE_SECRET));
+  } finally {
+    stopApp();
+  }
+}
+
+// ---------------------------------------------------------------------------
 async function main() {
   console.log(`E2E starting. Mode: ${REAL ? "real Paystack TEST API + local stub" : "local stub only (offline)"}`);
   console.log(`Key: ${ACTIVE_SECRET.startsWith("sk_test_") ? "sk_test_… (test mode confirmed, value hidden)" : "INVALID PREFIX"}`);
@@ -673,6 +852,7 @@ async function main() {
   if (REAL) await phaseAReal();
   await phaseBStub();
   await phaseCFulfillmentFailure();
+  await phaseDDeposits();
 
   const tests = results.filter((r) => r.kind === "test");
   const failed = tests.filter((r) => !r.ok);

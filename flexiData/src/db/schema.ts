@@ -201,22 +201,49 @@ export const providerFloatBalances = pgTable(
 /**
  * Wallet funding attempts. In mock mode a deposit is credited instantly; with
  * Paystack the row starts `pending` and is settled by the verify call /
- * webhook (idempotent on `ref`), exactly like DataPlug/GetDataGH checkout.
+ * webhook (idempotent on `ref`), exactly like the data-bundle checkout flow.
+ *
+ * Money-safety (mirrors `checkout_orders`):
+ *  - `amount_subunits` (pesewas) is the integer Paystack must confirm before a
+ *    wallet is ever credited; `amount` is the display value.
+ *  - Settlement is a single conditional UPDATE (`pending/abandoned/failed` →
+ *    `successful`) inside one database transaction that also increments the
+ *    wallet balance and writes the ledger row, so concurrent webhook / verify
+ *    calls can never double-credit.
+ *  - The Paystack audit columns never hold key material — just the public
+ *    transaction id, channel and gateway message.
  */
-export const depositRequests = pgTable("deposit_requests", {
-  id: serial("id").primaryKey(),
-  ref: varchar("ref", { length: 40 }).notNull().unique(),
-  walletId: integer("wallet_id").notNull(),
-  provider: varchar("provider", { length: 40 }).notNull().default("mock"),
-  method: varchar("method", { length: 40 }).notNull(),
-  amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
-  status: depositStatusEnum("status").notNull().default("pending"),
-  providerReference: varchar("provider_reference", { length: 120 }),
-  initiatedAt: timestamp("initiated_at", { withTimezone: true }).notNull().defaultNow(),
-  completedAt: timestamp("completed_at", { withTimezone: true }),
-  providerPayload: jsonb("provider_payload"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const depositRequests = pgTable(
+  "deposit_requests",
+  {
+    id: serial("id").primaryKey(),
+    ref: varchar("ref", { length: 40 }).notNull().unique(),
+    walletId: integer("wallet_id").notNull(),
+    provider: varchar("provider", { length: 40 }).notNull().default("mock"),
+    method: varchar("method", { length: 40 }).notNull(),
+    amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+    // Integer pesewas — the exact amount Paystack verification must return.
+    amountSubunits: integer("amount_subunits").notNull().default(0),
+    currency: varchar("currency", { length: 8 }).notNull().default("GHS"),
+    status: depositStatusEnum("status").notNull().default("pending"),
+    providerReference: varchar("provider_reference", { length: 120 }),
+    // Paystack audit trail (public data only — never key material).
+    paystackTransactionId: varchar("paystack_transaction_id", { length: 40 }),
+    paystackChannel: varchar("paystack_channel", { length: 40 }),
+    paystackGatewayResponse: varchar("paystack_gateway_response", { length: 240 }),
+    initiatedAt: timestamp("initiated_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    providerPayload: jsonb("provider_payload"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("deposit_requests_wallet_idx").on(table.walletId),
+    index("deposit_requests_status_idx").on(table.status),
+  ],
+);
 
 /**
  * Pay-as-you-go data bundle orders paid through Paystack checkout (no wallet
