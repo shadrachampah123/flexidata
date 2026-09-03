@@ -193,6 +193,84 @@ export async function repairCheckoutOrdersSchema(): Promise<void> {
   await db.execute(sql`create index if not exists checkout_orders_status_idx on checkout_orders (order_status)`);
 }
 
+/**
+ * Self-healing: create the wallet-deposit table (+ enum and audit columns) if
+ * a production database still predates that migration.
+ *
+ * The app schema declares `deposit_requests` with Paystack audit fields
+ * (`amount_subunits`, `currency`, `paystack_*`, `paid_at`, `verified_at`, …).
+ * Deployments that shipped the deposit routes without `npx drizzle-kit push`
+ * fail on POST /api/wallet/fund. This does the same additive work push would:
+ * create the missing enum/table/indexes and add any missing columns. It never
+ * drops tables, never truncates, never rewrites existing rows — a legacy
+ * `deposit_requests` table (older column set) is simply brought up to date.
+ *
+ * Idempotent and safe to run on every boot.
+ */
+export async function repairDepositRequestsSchema(): Promise<void> {
+  await db.execute(sql`
+    do $repair$
+    begin
+      if not exists (select 1 from pg_type where typname = 'deposit_status') then
+        create type deposit_status as enum ('pending', 'successful', 'failed', 'abandoned');
+      end if;
+    end
+    $repair$;
+  `);
+
+  await db.execute(sql`
+    create table if not exists deposit_requests (
+      id serial primary key,
+      ref varchar(40) not null unique,
+      wallet_id integer not null,
+      provider varchar(40) not null default 'mock',
+      method varchar(40) not null,
+      amount numeric(12, 2) not null,
+      amount_subunits integer not null default 0,
+      currency varchar(8) not null default 'GHS',
+      status deposit_status not null default 'pending',
+      provider_reference varchar(120),
+      paystack_transaction_id varchar(40),
+      paystack_channel varchar(40),
+      paystack_gateway_response varchar(240),
+      initiated_at timestamptz not null default now(),
+      completed_at timestamptz,
+      paid_at timestamptz,
+      verified_at timestamptz,
+      provider_payload jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    )
+  `);
+
+  // Additive column repair for a table that exists but is missing a later field.
+  await db.execute(sql`
+    alter table deposit_requests
+      add column if not exists ref varchar(40),
+      add column if not exists wallet_id integer,
+      add column if not exists provider varchar(40) default 'mock',
+      add column if not exists method varchar(40),
+      add column if not exists amount numeric(12, 2),
+      add column if not exists amount_subunits integer not null default 0,
+      add column if not exists currency varchar(8) default 'GHS',
+      add column if not exists status deposit_status default 'pending',
+      add column if not exists provider_reference varchar(120),
+      add column if not exists paystack_transaction_id varchar(40),
+      add column if not exists paystack_channel varchar(40),
+      add column if not exists paystack_gateway_response varchar(240),
+      add column if not exists initiated_at timestamptz default now(),
+      add column if not exists completed_at timestamptz,
+      add column if not exists paid_at timestamptz,
+      add column if not exists verified_at timestamptz,
+      add column if not exists provider_payload jsonb,
+      add column if not exists created_at timestamptz default now(),
+      add column if not exists updated_at timestamptz default now()
+  `);
+
+  await db.execute(sql`create index if not exists deposit_requests_wallet_idx on deposit_requests (wallet_id)`);
+  await db.execute(sql`create index if not exists deposit_requests_status_idx on deposit_requests (status)`);
+}
+
 export async function repairReferrerIndex(): Promise<void> {
   // Look the uniqueness up in the catalog rather than by name. A database that
   // has been pushed, reverted and hand-patched over time may enforce it as a
@@ -264,6 +342,16 @@ async function runSeed(): Promise<void> {
   } catch (error) {
     console.warn(
       "[flexidata] could not ensure checkout_orders exists — Paystack checkout will stay unavailable until the table is created:",
+      (error as Error)?.message ?? error,
+      "\n  Fix: run `npx drizzle-kit push` against this database.",
+    );
+  }
+
+  try {
+    await repairDepositRequestsSchema();
+  } catch (error) {
+    console.warn(
+      "[flexidata] could not ensure deposit_requests exists — wallet funding will stay unavailable until the table is created:",
       (error as Error)?.message ?? error,
       "\n  Fix: run `npx drizzle-kit push` against this database.",
     );
