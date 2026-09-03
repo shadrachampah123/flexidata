@@ -329,6 +329,14 @@ async function main() {
   }
 
   // 4b. Every other ledger writer must survive the same drift.
+  //
+  // KNOWN GAP (pre-existing): `wallet/fund` reports 503 `schema_out_of_date`
+  // here because the SIMULATED Postgres models the pre-Paystack
+  // `deposit_requests` table (no `amount_subunits` / `currency` / `paystack_*`
+  // columns), so Drizzle's insert names columns the simulator does not have.
+  // The real deposit ledger path — including a database that predates the
+  // migration, which self-heals via `repairDepositRequestsSchema()` — is covered
+  // against an actual Postgres by scripts/paystack-e2e.mjs (Phases D and E).
   for (const [name, mod, body] of [
     ["wallet/fund", "@/app/api/wallet/fund/route", { method: "momo_mtn", amount: 50 }],
     ["wallet/transfer", "@/app/api/wallet/transfer/route", { account: "0532118329", amount: 10 }],

@@ -32,6 +32,7 @@ export function FlowSheet({
   ctaLabel,
   onConfirm,
   processingSteps,
+  footnote,
   result,
 }: {
   open: boolean;
@@ -43,6 +44,8 @@ export function FlowSheet({
   ctaLabel: string;
   onConfirm?: () => void;
   processingSteps?: string[];
+  /** Small reassurance line under the confirm CTA. */
+  footnote?: string;
   result: FlowResult | null;
 }) {
   const steps = processingSteps ?? ["Contacting network…", "Verifying details…", "Finalising…"];
@@ -85,7 +88,7 @@ export function FlowSheet({
             {ctaLabel}
           </button>
           <p className="mt-3 text-center text-[11px] text-zinc-400 dark:text-zinc-500">
-            Secured by FlexiData Pay • Instant delivery
+            {footnote ?? "Secured by FlexiData Pay • Instant delivery"}
           </p>
         </div>
       )}

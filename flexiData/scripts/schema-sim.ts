@@ -535,5 +535,31 @@ export function installSim(options: { migrated: boolean; breakCatalog?: boolean 
   const pgModule = require("pg");
   pgModule.Pool = FakePoolCtor;
 
+  // `server-only` is a BUNDLER-time guard: it throws when required outside a
+  // React Server Components build. These harnesses deliberately execute real
+  // server route modules (/api/health, /api/wallet/fund, /api/purchase …) under
+  // plain tsx, so seed an empty stub in the require cache — the same trick as
+  // the pg.Pool swap above. It changes nothing about the modules' behaviour; the
+  // guard only exists to stop a *client bundle* from importing them.
+  try {
+    const resolved = require.resolve("server-only");
+    require.cache[resolved] = {
+      id: resolved,
+      filename: resolved,
+      loaded: true,
+      exports: {},
+    } as unknown as NodeJS.Module;
+  } catch {
+    // Not resolvable — nothing to stub.
+  }
+
+  // Wallet funding is pinned to the simulated provider for these harnesses:
+  // they have no network and no Paystack account, and the reason they exercise
+  // POST /api/wallet/fund at all is the LEDGER WRITE against a drifted schema —
+  // which only happens on the settle-immediately path. Without this, a machine
+  // that happens to have PAYSTACK_SECRET_KEY set would make the harness attempt
+  // a real charge. (The Paystack path is covered by scripts/paystack-e2e.mjs.)
+  process.env.PAYMENTS_PROVIDER = "mock";
+
   return { pool, schema, FakePg };
 }

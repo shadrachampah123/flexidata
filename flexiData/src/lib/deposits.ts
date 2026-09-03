@@ -5,6 +5,13 @@ import { depositRequests, transactions, wallets } from "@/db/schema";
 import { PAYMENT_METHODS, initPayment, paymentsProvider, type PaymentMethod } from "@/lib/payments";
 import { paystackVerifyTransaction, PAYSTACK_CURRENCY } from "@/lib/paystack";
 import { makeRef } from "@/lib/format";
+import { DEPOSIT_MAX_GHS, DEPOSIT_MIN_GHS } from "@/lib/constants";
+import {
+  buildCompatInsert,
+  getSchemaCapabilities,
+  isGatewaySchemaComplete,
+  TRANSACTION_INSERT_FIELDS,
+} from "@/lib/schema-compat";
 
 /**
  * Wallet deposit service — the money-safe core behind /api/wallet/fund,
@@ -51,8 +58,8 @@ export type DepositSummary = {
   completedAt: string | null;
 };
 
-const MIN_DEPOSIT_GHS = 5;
-const MAX_DEPOSIT_GHS = 5000;
+const MIN_DEPOSIT_GHS = DEPOSIT_MIN_GHS;
+const MAX_DEPOSIT_GHS = DEPOSIT_MAX_GHS;
 
 function clampText(value: string | null | undefined, max = 240): string | null {
   if (!value) return null;
@@ -93,6 +100,10 @@ export async function createDepositRequest(params: {
   email: string;
   method: string;
   amountGhs: number;
+  /** Mobile-money number typed by the customer (Paystack metadata hint only). */
+  momoNumber?: string | null;
+  /** Origin of the API request — used for the Paystack callback URL fallback. */
+  requestOrigin?: string | null;
 }): Promise<
   | { status: "pending"; ref: string; authorizationUrl: string; provider: string }
   | { status: "successful"; ref: string; balance: number; methodLabel: string; provider: string }
@@ -146,6 +157,8 @@ export async function createDepositRequest(params: {
       email: params.email,
       method,
       phone: params.walletNumber,
+      momoNumber: params.momoNumber,
+      requestOrigin: params.requestOrigin,
     });
 
     if (payment.status === "completed") {
@@ -325,6 +338,29 @@ async function settleAtomic(
   const methodLabel = methodConf?.label ?? "Card";
   const amount = Number(deposit.amount);
   const now = new Date();
+  // The ledger row is what the customer sees in /history, so it names the
+  // gateway that actually took the money. For Paystack deposits it also carries
+  // the Paystack reference (we hand Paystack our own ref, so `providerReference`
+  // is the reference shown in the Paystack dashboard). Mock deposits keep the
+  // existing "method • wallet number" wording.
+  const viaPaystack = deposit.provider === "paystack";
+  const paystackReference = deposit.providerReference ?? deposit.ref;
+
+  // Which `transactions` columns this database actually has, read BEFORE the
+  // transaction opens: the probe queries information_schema on its own
+  // connection, and running it while holding the transaction's connection could
+  // stall a small pool.
+  //
+  // This is money-critical. Drizzle's `insert` names EVERY column of the table
+  // definition, so on a database whose `transactions` table predates the
+  // data-gateway migration a plain insert dies with
+  // `column "fulfillment_status" does not exist` — *after* Paystack has already
+  // taken the customer's money. Every other ledger writer avoids that through
+  // `insertTransactionRow` (src/lib/data.ts); this one must stay inside the
+  // transaction that guards the balance, so it uses the same compatibility
+  // helpers with the transaction's own executor.
+  const compat = await getSchemaCapabilities().catch(() => null);
+  const ledgerNeedsCompat = compat ? !isGatewaySchemaComplete(compat, "transactions") : false;
 
   await db.transaction(async (tx) => {
     // Claim the deposit atomically. Only one concurrent caller can win.
@@ -366,15 +402,19 @@ async function settleAtomic(
 
     const walletNumber = updatedWallet[0]?.number ?? "";
 
-    // Ledger row in the same transaction as the balance increment.
-    await tx.insert(transactions).values({
+    // Ledger row in the SAME transaction as the balance increment: either both
+    // commit or neither does, so a wallet can never be credited without a
+    // history row (or the other way round).
+    const ledgerRow: typeof transactions.$inferInsert = {
       ref: winner.ref,
       walletId: winner.walletId,
       type: "deposit",
       status: "successful",
       direction: "in",
       title: "Wallet Top-up",
-      subtitle: `${methodLabel} • ${walletNumber}`,
+      subtitle: viaPaystack
+        ? `Paystack • ${methodLabel} • ${paystackReference}`
+        : `${methodLabel} • ${walletNumber}`,
       amount: amount.toFixed(2),
       points: 0,
       network: methodConf?.network ?? null,
@@ -382,7 +422,18 @@ async function settleAtomic(
       provider: deposit.provider,
       providerReference: audit.paystackTransactionId,
       chargedAt: audit.paidAt,
-    });
+    };
+
+    if (compat && ledgerNeedsCompat) {
+      // Pre-gateway database: name only the columns that exist. The deposit is
+      // still credited (the columns we skip are gateway-fulfillment fields that
+      // a wallet top-up does not use anyway).
+      await tx.execute(
+        buildCompatInsert(compat, "transactions", TRANSACTION_INSERT_FIELDS, [ledgerRow]),
+      );
+    } else {
+      await tx.insert(transactions).values(ledgerRow);
+    }
 
     return { credited: true as const };
   });

@@ -2,6 +2,8 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db";
 import { hasAuthSecret } from "@/lib/auth";
 import { getPasswordResetEmailDeliveryStatus } from "@/lib/notifications";
+import { paymentsProvider } from "@/lib/payments";
+import { paystackMode } from "@/lib/paystack";
 import { repairCheckoutOrdersSchema } from "@/lib/seed";
 import {
   describeAuthCompatibility,
@@ -52,6 +54,10 @@ export async function GET() {
   const authBlocked = auth.requiredMissing.length > 0;
   const secretConfigured = hasAuthSecret();
   const resetEmail = getPasswordResetEmailDeliveryStatus();
+  // Wallet funding configuration. Safe to expose: it names the gateway and its
+  // test/live mode only — `paystackMode()` never returns key material.
+  const fundingProvider = paymentsProvider();
+  const fundingMode = paystackMode();
 
   return Response.json({
     ok: true,
@@ -84,6 +90,22 @@ export async function GET() {
       // Safe to expose: it names only the active transport and never leaks
       // a key, sender address, relay URL, or reset token.
       passwordResetEmail: resetEmail,
+    },
+    payments: {
+      provider: fundingProvider,
+      paystack: fundingMode,
+      ...(fundingProvider === "paystack"
+        ? {
+            hint:
+              fundingMode === "test"
+                ? "Wallet deposits go through Paystack TEST mode — no real money moves."
+                : "Wallet deposits go through Paystack LIVE mode.",
+          }
+        : {
+            warning:
+              "Wallet deposits are SIMULATED (mock provider): the wallet is credited without a real payment. " +
+              "Set PAYSTACK_SECRET_KEY (sk_test_…) and remove PAYMENTS_PROVIDER=mock to charge through Paystack.",
+          }),
     },
     dataGateway: {
       schema: schema.status,
