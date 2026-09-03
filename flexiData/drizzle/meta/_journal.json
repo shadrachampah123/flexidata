@@ -8,6 +8,13 @@
       "when": 1788456638909,
       "tag": "0000_deposit_requests_paystack_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788476018833,
+      "tag": "0001_paystack_transaction_id_unique",
+      "breakpoints": true
     }
   ]
 }

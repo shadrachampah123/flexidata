@@ -55,8 +55,17 @@ export async function GET() {
   const secretConfigured = hasAuthSecret();
   const resetEmail = getPasswordResetEmailDeliveryStatus();
   // Wallet funding configuration. Safe to expose: it names the gateway and its
-  // test/live mode only — `paystackMode()` never returns key material.
-  const fundingProvider = paymentsProvider();
+  // test/live mode only — `paystackMode()` never returns key material. The
+  // production fail-closed lock can refuse mock/unconfigured funding, so handle
+  // that as an explicit operational state rather than crashing the health API.
+  let fundingProvider: string;
+  let fundingLocked = false;
+  try {
+    fundingProvider = paymentsProvider();
+  } catch {
+    fundingProvider = "unavailable";
+    fundingLocked = true;
+  }
   const fundingMode = paystackMode();
 
   return Response.json({
@@ -101,11 +110,17 @@ export async function GET() {
                 ? "Wallet deposits go through Paystack TEST mode — no real money moves."
                 : "Wallet deposits go through Paystack LIVE mode.",
           }
-        : {
-            warning:
-              "Wallet deposits are SIMULATED (mock provider): the wallet is credited without a real payment. " +
-              "Set PAYSTACK_SECRET_KEY (sk_test_…) and remove PAYMENTS_PROVIDER=mock to charge through Paystack.",
-          }),
+        : fundingLocked
+          ? {
+              warning:
+                "Wallet funding is LOCKED OUT in this production runtime: mock deposits are never allowed and no Paystack key is configured. " +
+                "Set PAYSTACK_SECRET_KEY (sk_test_…) and remove PAYMENTS_PROVIDER=mock.",
+            }
+          : {
+              warning:
+                "Wallet deposits are SIMULATED (mock provider): the wallet is credited without a real payment. " +
+                "Set PAYSTACK_SECRET_KEY (sk_test_…) and remove PAYMENTS_PROVIDER=mock to charge through Paystack.",
+            }),
     },
     dataGateway: {
       schema: schema.status,

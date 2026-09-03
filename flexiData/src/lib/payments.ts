@@ -9,8 +9,8 @@
  * - `mock` (opt-in via `PAYMENTS_PROVIDER=mock`, and the fallback when no
  *   Paystack key exists): mobile money is simulated server-side and the wallet
  *   is credited immediately. No real payment is taken — it is a development /
- *   demo aid only, which is why it can never be the default on a deployment
- *   that has configured Paystack.
+ *   demo aid only (and in production it is hard-blocked, even when explicitly
+ *   configured).
  *
  * The secret key is read only inside `src/lib/paystack.ts` (`server-only`); this
  * module and everything that calls it never sees it and never sends anything
@@ -23,6 +23,7 @@ import {
   paystackInitializeTransaction,
   paystackMode,
   paystackVerifyTransaction,
+  PaystackConfigError,
 } from "@/lib/paystack";
 import { resolveAppBaseUrl } from "@/lib/notifications";
 
@@ -65,8 +66,37 @@ export type InitPaymentResult =
  */
 let mockOverrideWarned = false;
 
-export function paymentsProvider(): "mock" | "paystack" {
+/**
+ * Production wallet-funding gate. In a production runtime the wallet can only
+ * be funded through a real, verified Paystack payment. If the deployment is
+ * explicitly configured for `mock`, or if no Paystack key exists (which used to
+ * result in an automatic mock fallback), the operation is refused instead of
+ * silently crediting a wallet with no real charge. This is fail-closed: the
+ * caller receives a config error (never mock settlement, never a key).
+ */
+function productionLockoutReason(): string | null {
+  if (process.env.NODE_ENV !== "production") return null;
   const configured = (process.env.PAYMENTS_PROVIDER ?? "").trim().toLowerCase();
+  if (configured === "mock") {
+    return "PAYMENTS_PROVIDER is set to mock in a production environment.";
+  }
+  if (!isPaystackConfigured()) {
+    return "Paystack is not configured in a production environment.";
+  }
+  return null;
+}
+
+export type FundingProvider = "mock" | "paystack";
+
+export function paymentsProvider(): FundingProvider {
+  const configured = (process.env.PAYMENTS_PROVIDER ?? "").trim().toLowerCase();
+  const lockout = productionLockoutReason();
+  if (lockout) {
+    throw new PaystackConfigError(
+      "Wallet funding is unavailable: it is locked to real Paystack payments in production " +
+        "(mock deposits are blocked). Check the deployment configuration.",
+    );
+  }
 
   if (configured === "paystack") return "paystack";
 

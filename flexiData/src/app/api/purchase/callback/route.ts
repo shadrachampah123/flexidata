@@ -1,3 +1,4 @@
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { eq, or } from "drizzle-orm";
 import { db } from "@/db";
 import { transactions, wallets } from "@/db/schema";
@@ -93,21 +94,55 @@ function buildSubtitle(
   return base;
 }
 
-function isAuthorized(req: Request): boolean {
+/**
+ * Constant-time string comparison. Hashing first keeps the comparison
+ * constant-time regardless of the shared-secret length.
+ */
+function safeEqual(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const left = createHash("sha256").update(a).digest();
+  const right = createHash("sha256").update(b).digest();
+  return timingSafeEqual(left, right);
+}
+
+/**
+ * Authorize a data-provider callback.
+ *
+ * - `DATA_API_WEBHOOK_SECRET` is mandatory in production: a missing or blank
+ *   secret rejects every callback instead of allowing unauthenticated writes.
+ * - When a secret is configured, a valid HMAC-SHA256 signature over the raw
+ *   request body is the preferred authentication (`x-data-api-signature`,
+ *   `x-webhook-signature`, `x-flexidata-signature`). The legacy
+ *   plain-secret header and `Authorization: Bearer <secret>` forms are still
+ *   accepted so an already-configured provider is not broken, but they are
+ *   compared in constant time.
+ */
+function isAuthorized(req: Request, rawBody: string): boolean {
   const secret = getWebhookSecret();
-  if (!secret) return true;
+  if (!secret) {
+    return process.env.NODE_ENV !== "production";
+  }
+
+  const signature =
+    req.headers.get("x-data-api-signature") ??
+    req.headers.get("x-data-api-signature-sha256") ??
+    req.headers.get("x-webhook-signature") ??
+    req.headers.get("x-flexidata-signature");
+
+  if (signature) {
+    const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+    return safeEqual(expected, signature);
+  }
 
   const headerSecret =
     req.headers.get("x-data-api-webhook-secret") ??
     req.headers.get("x-webhook-secret") ??
     req.headers.get("x-flexidata-webhook-secret");
 
-  if (headerSecret && headerSecret === secret) return true;
+  if (safeEqual(headerSecret, secret)) return true;
 
-  const auth = req.headers.get("authorization");
-  if (auth === `Bearer ${secret}`) return true;
-
-  return false;
+  const auth = req.headers.get("authorization") ?? "";
+  return auth.startsWith("Bearer ") && safeEqual(auth.slice(7), secret);
 }
 
 /**
@@ -158,11 +193,14 @@ async function findCallbackTransaction(
 
 export async function POST(req: Request) {
   try {
-    if (!isAuthorized(req)) {
+    // Read the raw body first so an HMAC signature can be verified over the
+    // exact bytes the provider sent before any parsing/processing happens.
+    const rawBody = await req.text();
+    if (!isAuthorized(req, rawBody)) {
       return Response.json({ ok: false, error: "Unauthorized callback" }, { status: 401 });
     }
 
-    const payload = (await req.json()) as Record<string, unknown>;
+    const payload = JSON.parse(rawBody) as Record<string, unknown>;
     const reference = extractCallbackReference(payload);
     const normalized = normalizeCallbackStatus(payload);
 

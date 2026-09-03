@@ -158,17 +158,21 @@ function logFile(label) {
   return `/tmp/flexidata-e2e-${label}-${process.pid}.log`;
 }
 
-function spawnApp(label, port, extraEnv = {}) {
+function spawnApp(label, port, extraEnv = {}, mode = "start") {
   const logPath = logFile(`app-${port}`);
   const out = fs.openSync(logPath, "w");
+  const command = mode === "dev" ? "dev" : "start";
   const child = spawn(
     process.execPath,
-    ["node_modules/next/dist/bin/next", "start", "-p", String(port), "-H", "127.0.0.1"],
+    ["node_modules/next/dist/bin/next", command, "-p", String(port), "-H", "127.0.0.1"],
     {
       cwd: APP_ROOT,
       // The app always runs with exactly the key this script signs webhooks
       // with (the real sk_test_ key in CI; the synthetic one in stub-only runs).
-      env: { ...process.env, PORT: String(port), PAYSTACK_SECRET_KEY: ACTIVE_SECRET, ...extraEnv },
+      // The mock-provider phase is intentionally run with `next dev`
+      // (NODE_ENV=development) because the new production wallet-funding lock
+      // rejects PAYMENTS_PROVIDER=mock in a production runtime.
+      env: { ...process.env, PORT: String(port), PAYSTACK_SECRET_KEY: ACTIVE_SECRET, ...extraEnv, ...(mode === "dev" ? { NODE_ENV: "development" } : {}) },
       stdio: ["ignore", out, out],
     },
   );
@@ -992,7 +996,7 @@ async function phaseEProviderSwitch() {
   spawnApp("app-mock-deposits", PORT_E, {
     PAYSTACK_BASE_URL: STUB_URL,
     PAYMENTS_PROVIDER: "mock",
-  });
+  }, "dev");
   await waitFor(`${APP_URL_E}/api/health`, "mock-phase app");
   const mockApp = makeClient(APP_URL_E);
   try {

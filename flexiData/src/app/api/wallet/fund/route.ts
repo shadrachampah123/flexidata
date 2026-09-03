@@ -27,6 +27,27 @@ type Body = { method?: string; amount?: number; source?: string };
  */
 export async function POST(req: Request) {
   try {
+    // Fail-closed production lock: the wallet must never be funded through the
+    // mock provider, and a missing Paystack key must never fall back to mock.
+    // Checked before authentication so the endpoint cannot be used to create
+    // wallet funds in an improperly configured production runtime at all.
+    if (process.env.NODE_ENV === "production") {
+      try {
+        paymentsProvider();
+      } catch (error) {
+        if (error instanceof PaystackConfigError) {
+          console.error(
+            `fund production lockout: ${error.message}`,
+          );
+          return Response.json(
+            { ok: false, error: "Wallet funding is not available right now.", code: "paystack_unconfigured" },
+            { status: 503 },
+          );
+        }
+        throw error;
+      }
+    }
+
     const auth = await requireAccount();
     if (!auth.ok) return auth.response;
     const { wallet } = auth;
@@ -113,7 +134,7 @@ export async function POST(req: Request) {
     }
     console.error("fund error", error);
     return Response.json(
-      { ok: false, error: error instanceof Error ? error.message : "Something went wrong" },
+      { ok: false, error: "Wallet funding failed unexpectedly. Please try again.", code: "fund_failed" },
       { status: 500 },
     );
   }

@@ -242,6 +242,11 @@ export const depositRequests = pgTable(
   (table) => [
     index("deposit_requests_wallet_idx").on(table.walletId),
     index("deposit_requests_status_idx").on(table.status),
+    // Defense-in-depth: a single Paystack transaction must not be attached to
+    // more than one deposit request. PostgreSQL allows multiple NULLs, so this
+    // protects every real transaction id without breaking rows that have not
+    // been settled yet.
+    uniqueIndex("deposit_requests_paystack_transaction_id_idx").on(table.paystackTransactionId),
   ],
 );
 
@@ -303,6 +308,9 @@ export const checkoutOrders = pgTable(
   (table) => [
     index("checkout_orders_user_idx").on(table.userId),
     index("checkout_orders_status_idx").on(table.orderStatus),
+    // Defense-in-depth: a single Paystack transaction must not mark more than
+    // one checkout order as paid. NULLs are allowed for unpaid/unknown orders.
+    uniqueIndex("checkout_orders_paystack_transaction_id_idx").on(table.paystackTransactionId),
   ],
 );
 

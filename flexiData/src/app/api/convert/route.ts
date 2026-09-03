@@ -13,6 +13,18 @@ type Body = { network?: string; phone?: string; amount?: number };
 
 export async function POST(req: Request) {
   try {
+    // Fail-closed: airtime→cash has no real, server-side-verified provider yet.
+    // The mock/random success path must never be able to create wallet funds in
+    // a production deployment, so this feature is unavailable there until a
+    // genuine conversion provider is implemented. Blocked before auth so the
+    // endpoint cannot generate funds in an improperly configured runtime.
+    if (process.env.NODE_ENV === "production") {
+      return Response.json(
+        { ok: false, error: "Airtime-to-cash conversion is currently unavailable.", code: "conversion_unavailable" },
+        { status: 503 },
+      );
+    }
+
     const auth = await requireAccount();
     if (!auth.ok) return auth.response;
     const { wallet } = auth;
