@@ -151,7 +151,13 @@ export async function paystackInitializeTransaction(params: {
   reference: string;
   amountSubunits: number;
   email: string;
-  callbackUrl: string;
+  /**
+   * Where Paystack sends the browser after the customer pays. Optional: when
+   * the deployment has no determinable public URL we omit it rather than send a
+   * link nobody can open (Paystack then shows its own receipt and the webhook
+   * still settles the charge).
+   */
+  callbackUrl?: string | null;
   channels?: string[];
   metadata?: Record<string, unknown>;
 }): Promise<PaystackInitResult> {
@@ -168,7 +174,7 @@ export async function paystackInitializeTransaction(params: {
         amount: params.amountSubunits,
         currency: PAYSTACK_CURRENCY,
         email: params.email,
-        callback_url: params.callbackUrl,
+        ...(params.callbackUrl ? { callback_url: params.callbackUrl } : {}),
         ...(params.channels?.length ? { channels: params.channels } : {}),
         metadata: params.metadata ?? {},
       }),

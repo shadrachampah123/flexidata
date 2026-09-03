@@ -18,7 +18,9 @@
  * and a tiny control API for the test script:
  *   POST /_stub/scenario   { ref, scenario, failBefore? }
  *   POST /_stub/reset
- *   GET  /_stub/audit      (what the app called, with auth-header SHAPE only)
+ *   GET  /_stub/audit      (what the app called, with auth-header SHAPE only,
+ *                           plus the callback_url / channels / metadata the app
+ *                           sent to initialize — never any key material)
  *   GET  /_stub/health
  *
  * Scenarios per transaction reference (what `verify` reports):
@@ -236,6 +238,9 @@ const server = http.createServer(async (req, res) => {
               scenario: t.scenario,
               verifyCalls: t.verifyCalls,
               authLooksLikeTestKey: t.authLooksLikeTestKey,
+              callbackUrl: t.callbackUrl ?? null,
+              channels: t.channels ?? null,
+              metadata: t.metadata ?? null,
             },
           ]),
         ),
@@ -265,6 +270,11 @@ const server = http.createServer(async (req, res) => {
         verifyCalls: 0,
         transactionId: nextTransactionId++,
         authLooksLikeTestKey: authLooksLikeTestKey(req),
+        // Recorded so the E2E can prove where Paystack would send the customer
+        // after paying, and which channels the app offered. No key material.
+        callbackUrl: typeof body.callback_url === "string" ? body.callback_url : null,
+        channels: Array.isArray(body.channels) ? body.channels : null,
+        metadata: body.metadata && typeof body.metadata === "object" ? body.metadata : null,
       };
       refs.set(reference, t);
       return json(res, 200, {

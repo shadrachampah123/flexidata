@@ -15,9 +15,12 @@ Telecel bundle delivery, referral rewards and a vendor/agent program.
   without an email provider).
 - **Settings** — edit profile, change password, notification preferences, manage active
   devices/sessions, copy your referral code, and **log out**.
-- **Wallet** — fund via MTN MoMo / Telecel Cash / card (simulated instantly in dev;
-  [Paystack](https://paystack.com) in production, settled by verify + webhook) and
-  transfer money to any other registered FlexiData user.
+- **Wallet** — fund with [Paystack](https://paystack.com): pick MTN MoMo, Telecel Cash or
+  card, pay on Paystack's hosted checkout, and the wallet is credited only after the
+  server verifies the charge (see [Wallet deposits](#wallet-deposits-paystack)). Money
+  can also be transferred to any other registered FlexiData user. A simulated instant
+  MoMo deposit still exists for offline demos (`PAYMENTS_PROVIDER=mock`) but is never the
+  default once a Paystack key is configured.
 - **Shop** — discounted MTN (UP2U, SME non-expiry, Corporate, Social) & Telecel bundles,
   airtime at 2% off, and airtime-to-cash conversion.
 - **Order tracking** — every data/airtime order gets a live delivery tracker with an
@@ -83,6 +86,104 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run verify:seed-resilience` | Check the shared catalog seed can't take sign-up down on a lagging schema |
 | `npm run verify:signup` | Sign-up regression checks against a real database (needs `DATABASE_URL`) |
 
+## Wallet deposits (Paystack)
+
+The **Deposit / Add money** button on `/wallet` runs a real Paystack charge. The
+simulated MTN MoMo top-up is no longer on that path: it only runs if you
+explicitly set `PAYMENTS_PROVIDER=mock` (a demo aid — it credits the wallet with
+**no real payment**) or if no Paystack key is configured at all.
+
+```
+GH₵ 20 → POST /api/wallet/fund                    (session required)
+           ├─ validates GH₵ 5 – GH₵ 5,000; wallet resolved from the SESSION
+           ├─ INSERT deposit_requests (status=pending, amount_subunits=2000 pesewas)
+           ├─ Paystack POST /transaction/initialize   (secret key, server-side)
+           └─ 200 { status:"pending", ref:"DP-…", authorizationUrl }
+       → browser navigates to the Paystack TEST checkout, customer pays
+       → Paystack redirects back to /wallet?funding=success&ref=DP-…
+           and/or POSTs /api/payments/webhook (charge.success, HMAC-SHA512)
+       → POST /api/payments/verify { ref }         (session + owner of the ref)
+           ├─ Paystack GET /transaction/verify/DP-…  ← the only source of truth
+           ├─ requires status=success AND the same ref AND 2000 pesewas AND GHS
+           └─ ONE db transaction: claim the deposit → balance = balance + 20.00
+              → insert the ledger row (all three commit or none do)
+       → UI: "+GH₵ 20.00 added!" / "Funded via Paystack. Your money is safe and ready."
+```
+
+| Endpoint | What it does |
+| --- | --- |
+| `POST /api/wallet/fund` | Validates the amount, writes the pending deposit, initializes Paystack, returns only the checkout URL + reference |
+| `POST /api/payments/verify` | Verifies with Paystack and settles idempotently (auth + owner) |
+| `GET /api/wallet/deposit?ref=` | Read-only status + fresh balance for the UI to poll (auth + owner) |
+| `POST /api/payments/webhook` | Paystack `charge.*` events, signature-verified, re-verifies before settling |
+
+Safety rules, all enforced server-side in
+[`src/lib/deposits.ts`](flexiData/src/lib/deposits.ts):
+
+- **The browser can never prove a payment.** Only Paystack's verify API (called
+  with the secret key, server-side) can. The callback URL, the webhook payload
+  and anything the client posts are *hints* that carry a reference, nothing more.
+- **The amount can never be changed by the client.** The integer pesewa amount is
+  validated and stored on the `deposit_requests` row *before* Paystack is called;
+  verification must return exactly that integer (and `GHS`) or the deposit is
+  parked as `failed` and not credited.
+- **No double credit.** Settlement is one conditional
+  `UPDATE … WHERE status IN ('pending','abandoned','failed') … RETURNING` inside a
+  single transaction with the balance increment (`balance = balance + amount`, SQL
+  arithmetic) and the ledger insert. The Paystack reference *is* the deposit's
+  unique `ref`, so a replayed webhook / verify / poll loses the race and does
+  nothing.
+- **Failed, abandoned, mismatched or unverifiable → no credit.** The UI then says
+  "Payment was not completed. Your wallet has not been credited."
+- **Nobody can fund or read someone else's wallet.** The credited wallet is always
+  the session user's own, and the status/verify endpoints return the same `404`
+  for "does not exist" and "not yours".
+
+`/api/health` reports the live configuration under `payments`
+(`{"provider":"paystack","paystack":"test"}`) — the quickest way to confirm what a
+deployment is actually doing, and it warns loudly when deposits are still mocked.
+
+### Environment variables for TEST mode (Vercel)
+
+| Variable | Value |
+| --- | --- |
+| `PAYSTACK_SECRET_KEY` | your `sk_test_…` key (Paystack dashboard → Settings → API Keys & Webhooks, in **Test** mode) |
+| `PAYMENTS_PROVIDER` | `paystack`, or leave it **unset** — unset now means "Paystack when a key is configured". **Remove it if it is currently `mock`**, that is what keeps deposits simulated |
+| `APP_BASE_URL` | your public `https://<domain>` for the Paystack callback. If omitted, the request origin and then `VERCEL_URL` are used, so the redirect still works |
+| `PAYSTACK_LIVE_MODE` | leave unset / `false` (a `sk_live_…` key is refused without it) |
+
+None of these may be `NEXT_PUBLIC_…`. The secret key is read in exactly one
+place — [`src/lib/paystack.ts`](flexiData/src/lib/paystack.ts), marked
+`server-only` so a client-side import is a build error — and the deposit flow
+uses Paystack's redirect (authorization URL) checkout, which needs no public key
+in the browser at all.
+
+Finally, set the webhook URL in the Paystack dashboard (Test mode) to
+`https://<your-domain>/api/payments/webhook`. The redirect path already verifies
+and settles on its own, so the webhook is a backstop for customers who close the
+tab after paying — not the only way a deposit clears.
+
+### Testing a GH₵ 20 deposit
+
+1. Sign in → **Wallet** → **Fund wallet** → tap the `GH₵ 20` chip (or type `20`)
+   → **Deposit GH₵ 20.00** → **Continue to Paystack**.
+2. Paystack's TEST checkout opens. Pay with the test card `4084 0840 8408 4081`,
+   any future expiry, CVV `408`, OTP `123456`. Mobile money is offered too, but it
+   is not enabled on every Paystack *test* account — which is exactly why TEST mode
+   widens the MoMo checkout to include the card channel.
+3. Paystack sends you back to `/wallet?funding=success&ref=DP-…`. The sheet shows
+   "Verifying payment…", then **"+GH₵ 20.00 added!"**, "Funded via Paystack. Your
+   money is safe and ready.", the new balance re-read from the database, and the
+   Paystack reference.
+4. `/history` → **Deposits** shows *Wallet Top-up · +GH₵ 20.00 · Successful* with
+   the subtitle `Paystack • MTN MoMo • DP-…`.
+5. Close the checkout instead of paying and you get "Payment was not completed.
+   Your wallet has not been credited." — the balance does not move, and the
+   deposit row stays `pending`/`abandoned`.
+
+Every one of those branches is covered automatically by
+[Phase D of the E2E suite](#paystack-e2e-automated).
+
 ## Paystack E2E (automated)
 
 `scripts/paystack-e2e.mjs` is a fully automated end-to-end test of the
@@ -140,8 +241,10 @@ flexiData/
 | `DATABASE_URL` | PostgreSQL connection string (required) |
 | `AUTH_SECRET` | Long random string used to sign session cookies / reset tokens (required — sign-up fails before writing anything when it is missing, so no account can be orphaned) |
 | `APP_BASE_URL` | Public deployment URL for links in emails & payment callbacks (e.g. `https://flexidata.app`). Optional for reset links: they are built from the origin of the incoming request, then `VERCEL_URL`, never `localhost` in production |
-| `PAYMENTS_PROVIDER` | `mock` (instant simulated MoMo/card funding) or `paystack` for real Ghanaian mobile money/card checkout |
-| `PAYSTACK_SECRET_KEY` | Paystack secret key — required when `PAYMENTS_PROVIDER=paystack` |
+| `PAYMENTS_PROVIDER` | Which gateway funds the wallet: `paystack`, or `mock` for the instant **simulated** MoMo deposit (demo aid — it credits the wallet with no real payment). **Unset (recommended): Paystack whenever `PAYSTACK_SECRET_KEY` is set, `mock` otherwise** — a Paystack-configured deployment can never silently fall back to simulated deposits. See [Wallet deposits](#wallet-deposits-paystack) |
+| `PAYSTACK_SECRET_KEY` | Paystack secret key (`sk_test_…` for TEST mode). Server-only — never sent to the browser, never logged. Required for wallet deposits and the data-bundle checkout |
+| `PAYSTACK_PUBLIC_KEY` | Optional and currently unused: the redirect/authorization-URL flow needs no client-side key. Safe to set (`pk_test_…`); nothing key-related reaches the browser either way |
+| `PAYSTACK_LIVE_MODE` | Safety lock. A `sk_live_…` key is refused unless this is `true`, so going live is a deliberate two-step change. Leave unset/false while testing |
 | `RESEND_API_KEY` | Recommended: Resend API key for direct password-reset email delivery. Set it together with `RESEND_FROM_EMAIL`. |
 | `RESEND_FROM_EMAIL` | A sender verified in Resend, e.g. `FlexiData <support@your-domain.com>`. Required with `RESEND_API_KEY`. |
 | `RESEND_REPLY_TO` | Optional address that receives replies to reset emails. |
@@ -205,9 +308,14 @@ Then check `/api/health`: `gatewaySchema` and `signupSchema` should both read
      and Paystack callbacks; reset links fall back to the request origin, so
      the flow keeps working when you forget this — a localhost value shipped to
      production was the historical cause of unreachable reset links).
-   - For **live payments**: `PAYMENTS_PROVIDER=paystack` + `PAYSTACK_SECRET_KEY`,
-     and set the Paystack webhook URL to
-     `https://<domain>/api/payments/webhook` in the Paystack dashboard.
+   - For **payments** (wallet deposits + data-bundle checkout):
+     `PAYSTACK_SECRET_KEY` = your `sk_test_…` key for testing, or `sk_live_…`
+     **plus** `PAYSTACK_LIVE_MODE=true` for real money. Wallet funding uses
+     Paystack automatically once the key is set — make sure `PAYMENTS_PROVIDER`
+     is **not** `mock` (delete the variable, or set it to `paystack`), otherwise
+     deposits stay simulated and credit wallets without a payment. Set the
+     Paystack webhook URL to `https://<domain>/api/payments/webhook` in the
+     dashboard. See [Wallet deposits](#wallet-deposits-paystack).
    - For **password reset emails** (recommended): add `RESEND_API_KEY` and
      `RESEND_FROM_EMAIL` to Vercel. The sender must be verified in Resend, for
      example `FlexiData <support@your-domain.com>`; the app sends directly to

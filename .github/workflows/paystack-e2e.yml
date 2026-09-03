@@ -29,6 +29,7 @@ on:
     branches:
       - arena/01a06438-flexidata
       - arena/01a06842-flexidata
+      - arena/01a0688c-flexidata
 
 jobs:
   e2e:
@@ -54,7 +55,9 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/app_db
       APP_BASE_URL: http://localhost:3000
       AUTH_SECRET: ci-only-secret-${{ github.run_id }}-0123456789abcdefghijklmn
-      PAYMENTS_PROVIDER: paystack
+      # PAYMENTS_PROVIDER is intentionally NOT set: with a PAYSTACK_SECRET_KEY
+      # present, wallet funding must default to Paystack. Phase D asserts that,
+      # and Phase E covers the explicit `mock` opt-in on its own app instance.
       DATA_API_PROVIDER: mock # YenkoData stand-in until production creds exist
       DRIZZLE_ALLOW_LOCAL_DB: "1" # CI database container is intentionally local
 
@@ -92,7 +95,9 @@ jobs:
         #   port 3000 → real Paystack API (Phase A)
         #   port 3100 → local stub, mock provider succeeds (Phase B)
         #   port 3200 → local stub, mock provider fails (Phase C)
-        #   port 3300 → local stub, Paystack wallet DEPOSITS (Phase D)
+        #   port 3300 → local stub, Paystack wallet DEPOSITS, provider defaulted (Phase D)
+      #   port 3400 → local stub, PAYMENTS_PROVIDER=mock opt-in (Phase E)
+      #   port 3500 → local stub, no APP_BASE_URL → origin callback (Phase E)
         run: node scripts/paystack-e2e.mjs
 
       - name: Assert the secret never leaked into app or stub logs

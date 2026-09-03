@@ -19,6 +19,14 @@
  *     network (e.g. GitHub Actions) gets 403, we log an environment notice
  *     and move on — the payment flow itself is covered by Phase B.
  *
+ *   PHASE D — wallet DEPOSITS (/api/wallet/fund → verify → webhook) against the
+ *     local stub, with PAYMENTS_PROVIDER deliberately unset so the "a
+ *     configured key means Paystack" default is what is under test.
+ *
+ *   PHASE E — the provider switch itself: PAYMENTS_PROVIDER=mock still gives the
+ *     opt-in simulated deposit, and with no APP_BASE_URL the Paystack callback
+ *     URL is built from the request origin instead of a hard-coded localhost.
+ *
  *   PHASE B — the complete money flow against a LOCAL Paystack stub
  *     (scripts/paystack-stub.mjs, bound to 127.0.0.1 only). The app runs
  *     with PAYSTACK_BASE_URL pointed at the stub and exercises every
@@ -69,10 +77,14 @@ const PORT_A = Number(process.env.APP_PORT_A ?? 3000);
 const PORT_B = Number(process.env.APP_PORT_B ?? 3100);
 const PORT_C = Number(process.env.APP_PORT_C ?? 3200);
 const PORT_D = Number(process.env.APP_PORT_D ?? 3300);
+const PORT_E = Number(process.env.APP_PORT_E ?? 3400);
+const PORT_F = Number(process.env.APP_PORT_F ?? 3500);
 const APP_URL_A = `http://127.0.0.1:${PORT_A}`;
 const APP_URL_B = `http://127.0.0.1:${PORT_B}`;
 const APP_URL_C = `http://127.0.0.1:${PORT_C}`;
 const APP_URL_D = `http://127.0.0.1:${PORT_D}`;
+const APP_URL_E = `http://127.0.0.1:${PORT_E}`;
+const APP_URL_F = `http://127.0.0.1:${PORT_F}`;
 const STUB_PORT = Number(process.env.PAYSTACK_STUB_PORT ?? 4599);
 const STUB_URL = `http://127.0.0.1:${STUB_PORT}`;
 const STUB_SCRIPT = path.join(APP_ROOT, "scripts", "paystack-stub.mjs");
@@ -648,6 +660,22 @@ async function phaseBStub() {
   }
 }
 
+/**
+ * What the stub recorded when the app initialized `ref`: the callback URL it
+ * would send the customer back to, the channels offered, and the metadata.
+ * Used to prove the callback is built from APP_BASE_URL / the request origin
+ * (never a hard-coded localhost) and that TEST mode keeps a card fallback.
+ */
+async function stubInitInfo(ref) {
+  try {
+    const res = await fetch(`${STUB_URL}/_stub/audit`);
+    const body = await res.json();
+    return body?.refs?.[ref] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function stubSetScenario(ref, scenario, failBefore) {
   const res = await fetch(`${STUB_URL}/_stub/scenario`, {
     method: "POST",
@@ -714,20 +742,54 @@ async function phaseDDeposits() {
     await waitFor(`${STUB_URL}/_stub/health`, "paystack stub (deposit phase)");
   }
 
+  // NOTE: PAYMENTS_PROVIDER is deliberately NOT set here. A configured
+  // PAYSTACK_SECRET_KEY must be enough to put wallet funding on Paystack —
+  // that default is the whole point of Phase D (an unset/mocked provider is
+  // what used to leave the deposit button on the simulated MoMo path).
   spawnApp("app-stub-deposits", PORT_D, {
     PAYSTACK_BASE_URL: STUB_URL,
-    PAYMENTS_PROVIDER: "paystack",
+    PAYMENTS_PROVIDER: "",
+    // A real PUBLIC base URL, the way a deployment would set it. A loopback
+    // value is deliberately not used: in production the app refuses to hand
+    // Paystack a localhost callback (Phase E2 covers that half).
+    APP_BASE_URL: "https://e2e.flexidata.test",
   });
   await waitFor(`${APP_URL_D}/api/health`, "deposit-phase app");
   const app = makeClient(APP_URL_D);
 
   try {
+    const health = await app.api("/api/health");
+    assert(
+      "D0a. PAYMENTS_PROVIDER unset + key configured → wallet funding is paystack (test mode)",
+      health.json?.payments?.provider === "paystack" && health.json?.payments?.paystack === "test",
+      JSON.stringify(health.json?.payments),
+    );
+
     const reg = await registerAccount(app, "d");
     if (!assert("D0. register test account (deposit phase)", reg.status === 200 && reg.json?.ok, `HTTP ${reg.status}`)) return;
 
     // D1. SUCCESSFUL DEPOSIT: fund → pay (stub success) → verify → credited.
     const dep = await startDeposit(app, 50, "momo_mtn");
     assert("D1a. deposit initialised against the local stub", dep.status === "pending" && Boolean(dep.authorizationUrl), dep.status);
+    assert("D1a2. response tells the client the provider is paystack", dep.provider === "paystack", String(dep.provider));
+
+    // D1a3/4. What we asked Paystack for: a callback that returns the customer
+    // to THIS wallet page (built from APP_BASE_URL / the request origin — never
+    // a hard-coded localhost), and TEST-mode channels that keep a card fallback
+    // next to mobile money so a test deposit is always completable.
+    const initInfo = await stubInitInfo(dep.ref);
+    assert(
+      "D1a3. Paystack callback_url is APP_BASE_URL + the wallet page + the deposit ref",
+      initInfo?.callbackUrl === `https://e2e.flexidata.test/wallet?funding=success&ref=${encodeURIComponent(dep.ref)}`,
+      String(initInfo?.callbackUrl),
+    );
+    assert(
+      "D1a4. TEST mode offers mobile_money + card for a MoMo deposit",
+      Array.isArray(initInfo?.channels) &&
+        initInfo.channels.includes("mobile_money") &&
+        initInfo.channels.includes("card"),
+      JSON.stringify(initInfo?.channels),
+    );
     const depRow0 = await dbDeposit(dep.ref);
     const walletId = depRow0?.wallet_id;
     assert("D1b. deposit recorded pending with exact pesewa amount", depRow0?.status === "pending" && Number(depRow0.amount_subunits) === 5000 && depRow0.currency === "GHS", `${depRow0?.status}/${depRow0?.amount_subunits}`);
@@ -742,6 +804,49 @@ async function phaseDDeposits() {
     const balAfter = await walletBalance(walletId);
     assert("D1e. wallet credited exactly the deposit amount", Math.abs(balAfter - balBefore - 50) < 0.005, `+${balAfter - balBefore}`);
     assert("D1f. exactly one deposit ledger row", (await depositLedgerCount(dep.ref)) === 1 + ledgerBefore, `rows: ${await depositLedgerCount(dep.ref)}`);
+    // The history row must say which gateway took the money and carry the
+    // Paystack reference, so /history is auditable without the dashboard.
+    const ledgerRow = (
+      await q(
+        "select type, status, direction, amount, provider, subtitle from transactions where ref=$1",
+        [dep.ref],
+      )
+    )[0];
+    assert(
+      "D1f2. ledger row is a successful deposit credited via Paystack",
+      ledgerRow?.type === "deposit" &&
+        ledgerRow?.status === "successful" &&
+        ledgerRow?.direction === "in" &&
+        Math.abs(Number(ledgerRow.amount) - 50) < 0.005 &&
+        ledgerRow.provider === "paystack" &&
+        String(ledgerRow.subtitle).startsWith("Paystack •") &&
+        String(ledgerRow.subtitle).includes(dep.ref),
+      JSON.stringify(ledgerRow),
+    );
+
+    // D1x. Server-side validation: nothing the client posts can start a deposit
+    // outside the limits, and rejected attempts write NOTHING (the amount is
+    // validated before the deposit_requests row is inserted).
+    const anonDep = await makeClient(APP_URL_D).api("/api/wallet/fund", { method: "momo_mtn", amount: 20 });
+    assert(
+      "D1x1. unauthenticated POST /api/wallet/fund is rejected (401)",
+      anonDep.status === 401 && anonDep.json?.code === "unauthenticated",
+      `HTTP ${anonDep.status} ${anonDep.json?.code}`,
+    );
+    const tooSmall = await app.api("/api/wallet/fund", { method: "card", amount: 2 });
+    assert("D1x2. below-minimum amount rejected (400)", tooSmall.status === 400 && !tooSmall.json?.ok, `HTTP ${tooSmall.status}: ${tooSmall.json?.error}`);
+    const tooBig = await app.api("/api/wallet/fund", { method: "card", amount: 50000 });
+    assert("D1x3. above-maximum amount rejected (400)", tooBig.status === 400 && !tooBig.json?.ok, `HTTP ${tooBig.status}: ${tooBig.json?.error}`);
+    const junkAmount = await app.api("/api/wallet/fund", { method: "card", amount: "twenty" });
+    assert("D1x4. non-numeric amount rejected (400)", junkAmount.status === 400 && !junkAmount.json?.ok, `HTTP ${junkAmount.status}`);
+    const noMethod = await app.api("/api/wallet/fund", { amount: 20 });
+    assert("D1x5. unknown payment method rejected (400)", noMethod.status === 400 && !noMethod.json?.ok, `HTTP ${noMethod.status}`);
+    const rowsForWallet = await q("select count(*)::int as n from deposit_requests where wallet_id=$1", [walletId]);
+    assert(
+      "D1x6. rejected deposits created no deposit_requests rows",
+      Number(rowsForWallet[0]?.n) === 1,
+      `rows: ${rowsForWallet[0]?.n}`,
+    );
 
     // D1g/h. GET deposit-status endpoint: owner sees the settled deposit.
     const statusRes = await app.api(`/api/wallet/deposit?ref=${encodeURIComponent(dep.ref)}`);
@@ -773,6 +878,23 @@ async function phaseDDeposits() {
     const balAfter2 = await walletBalance(walletId);
     assert("D2b. replayed webhooks do NOT re-credit the wallet", Math.abs(balAfter2 - balBefore2) < 0.005, `balance delta ${balAfter2 - balBefore2}`);
     assert("D2c. still exactly one deposit ledger row", (await depositLedgerCount(dep.ref)) === 1, `rows: ${await depositLedgerCount(dep.ref)}`);
+
+    // D2d/e. TEST 4 — the client cannot influence the credited amount: an
+    // `amount`/`balance` smuggled into the verify body is ignored, because the
+    // amount always comes from the deposit row matched against Paystack's
+    // verified pesewa amount.
+    const balBeforeTamper = await walletBalance(walletId);
+    const tampered = await app.api("/api/payments/verify", { ref: dep.ref, amount: 5000, balance: 999999 });
+    const balAfterTamper = await walletBalance(walletId);
+    assert(
+      "D2d. verify ignores a client-supplied amount and keeps the server-side one",
+      tampered.json?.ok === true &&
+        tampered.json?.status === "successful" &&
+        Number(tampered.json?.amount) === 50 &&
+        Math.abs(balAfterTamper - balBeforeTamper) < 0.005,
+      `amount=${tampered.json?.amount} balance=${tampered.json?.balance} delta=${balAfterTamper - balBeforeTamper}`,
+    );
+    assert("D2e. tampered verify still wrote exactly one ledger row", (await depositLedgerCount(dep.ref)) === 1, `rows: ${await depositLedgerCount(dep.ref)}`);
 
     // D3. CONCURRENT VERIFICATION: N parallel verify calls credit exactly once.
     const dep2 = await startDeposit(app, 20, "card");
@@ -845,6 +967,108 @@ async function phaseDDeposits() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase E — the provider switch itself
+//
+// E1: `PAYMENTS_PROVIDER=mock` is an explicit opt-in to the SIMULATED deposit
+//     (no external charge, instant credit). It must still work — and it must be
+//     the ONLY way to get one, which is what Phase D proves by leaving the
+//     variable unset.
+// E2: with no public base URL determinable (no APP_BASE_URL, no VERCEL_URL and
+//     a loopback request host) the Paystack callback must be OMITTED — never a
+//     hard-coded localhost URL, which would send a customer who has just paid
+//     to their own machine instead of back to their wallet.
+// ---------------------------------------------------------------------------
+async function phaseEProviderSwitch() {
+  console.log(`\n=== PHASE E: provider switch + callback URL (${APP_URL_E}, ${APP_URL_F}) ===`);
+  try {
+    if (!(await fetch(`${STUB_URL}/_stub/health`)).ok) throw new Error("stub down");
+  } catch {
+    spawnStub();
+    await waitFor(`${STUB_URL}/_stub/health`, "paystack stub (provider phase)");
+  }
+  await fetch(`${STUB_URL}/_stub/reset`, { method: "POST" }).catch(() => {});
+
+  // --- E1: the simulator is opt-in, and says so ---------------------------
+  spawnApp("app-mock-deposits", PORT_E, {
+    PAYSTACK_BASE_URL: STUB_URL,
+    PAYMENTS_PROVIDER: "mock",
+  });
+  await waitFor(`${APP_URL_E}/api/health`, "mock-phase app");
+  const mockApp = makeClient(APP_URL_E);
+  try {
+    const health = await mockApp.api("/api/health");
+    assert(
+      "E1a. PAYMENTS_PROVIDER=mock is reported by /api/health with a warning",
+      health.json?.payments?.provider === "mock" && Boolean(health.json?.payments?.warning),
+      JSON.stringify(health.json?.payments),
+    );
+    const reg = await registerAccount(mockApp, "e-mock");
+    if (!assert("E1b. register test account (mock phase)", reg.status === 200 && reg.json?.ok, `HTTP ${reg.status}`)) return;
+
+    const dep = await startDeposit(mockApp, 20, "momo_mtn");
+    assert(
+      "E1c. mock provider still settles instantly and returns no checkout URL",
+      dep.status === "successful" && typeof dep.balance === "number" && !dep.authorizationUrl,
+      JSON.stringify({ status: dep.status, balance: dep.balance, url: Boolean(dep.authorizationUrl) }),
+    );
+    const row = await dbDeposit(dep.ref);
+    assert(
+      "E1d. mock deposit is recorded as provider=mock / successful",
+      row?.provider === "mock" && row?.status === "successful",
+      `${row?.provider}/${row?.status}`,
+    );
+    assert(
+      "E1e. mock deposit credited exactly the requested amount",
+      Math.abs(Number(row?.amount) - 20) < 0.005,
+      String(row?.amount),
+    );
+  } finally {
+    stopApp();
+  }
+
+  // --- E2: callback URL falls back to the request origin ------------------
+  spawnApp("app-no-base-url", PORT_F, {
+    PAYSTACK_BASE_URL: STUB_URL,
+    PAYMENTS_PROVIDER: "",
+    APP_BASE_URL: "",
+    VERCEL_URL: "",
+  });
+  await waitFor(`${APP_URL_F}/api/health`, "origin-fallback app");
+  const app = makeClient(APP_URL_F);
+  try {
+    const reg = await registerAccount(app, "e-origin");
+    if (!assert("E2a. register test account (origin phase)", reg.status === 200 && reg.json?.ok, `HTTP ${reg.status}`)) return;
+
+    const dep = await startDeposit(app, 20, "card");
+    assert("E2b. deposit still initializes on Paystack", dep.status === "pending" && Boolean(dep.authorizationUrl), dep.status);
+
+    const info = await stubInitInfo(dep.ref);
+    assert(
+      "E2c. no public base URL → Paystack gets NO callback_url (never a localhost link)",
+      info != null && info.callbackUrl === null,
+      `callbackUrl=${JSON.stringify(info?.callbackUrl)}`,
+    );
+    assert(
+      "E2c2. the deposit is still initialized and payable without a callback_url",
+      typeof dep.authorizationUrl === "string" && dep.authorizationUrl.includes(`/checkout/${encodeURIComponent(dep.ref)}`),
+      String(dep.authorizationUrl),
+    );
+    assert(
+      "E2d. a card deposit is offered the card channel",
+      Array.isArray(info?.channels) && info.channels.includes("card"),
+      JSON.stringify(info?.channels),
+    );
+    assert(
+      "E2e. the deposit amount reached Paystack in integer pesewas",
+      info?.amount === 2000 && info?.currency === "GHS",
+      `${info?.amount} ${info?.currency}`,
+    );
+  } finally {
+    stopApp();
+  }
+}
+
+// ---------------------------------------------------------------------------
 async function main() {
   console.log(`E2E starting. Mode: ${REAL ? "real Paystack TEST API + local stub" : "local stub only (offline)"}`);
   console.log(`Key: ${ACTIVE_SECRET.startsWith("sk_test_") ? "sk_test_… (test mode confirmed, value hidden)" : "INVALID PREFIX"}`);
@@ -853,6 +1077,7 @@ async function main() {
   await phaseBStub();
   await phaseCFulfillmentFailure();
   await phaseDDeposits();
+  await phaseEProviderSwitch();
 
   const tests = results.filter((r) => r.kind === "test");
   const failed = tests.filter((r) => !r.ok);

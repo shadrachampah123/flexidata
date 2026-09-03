@@ -53,6 +53,17 @@ export const CONTACTS: Contact[] = [
 export const POINTS_RATE = 2; // points earned per GH₵ spent
 export const AIRTIME_DISCOUNT = 0.02; // 2% off airtime purchases
 
+/**
+ * Wallet deposit limits, in GH₵.
+ *
+ * Shared (no `server-only` import) so the funding UI and the server validate
+ * against the SAME numbers: the button can never enable an amount the deposit
+ * service would reject. The authoritative check is server-side in
+ * `src/lib/deposits.ts` — the client copy is a convenience, never a control.
+ */
+export const DEPOSIT_MIN_GHS = 5;
+export const DEPOSIT_MAX_GHS = 5000;
+
 export function conversionFeeRate(amount: number): number {
   return amount >= 200 ? 0.1 : 0.12;
 }

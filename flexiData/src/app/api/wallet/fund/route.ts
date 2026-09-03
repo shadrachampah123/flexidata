@@ -3,13 +3,14 @@ import { db } from "@/db";
 import { users } from "@/db/schema";
 import { requireAccount } from "@/lib/api-auth";
 import { createDepositRequest, DepositInputError } from "@/lib/deposits";
+import { requestOrigin } from "@/lib/notifications";
 import { isPaystackConfigured, PaystackConfigError, PaystackRequestError } from "@/lib/paystack";
 import { paymentsProvider } from "@/lib/payments";
 import { isMissingRelationError } from "@/lib/schema-compat";
 
 export const dynamic = "force-dynamic";
 
-type Body = { method?: string; amount?: number };
+type Body = { method?: string; amount?: number; source?: string };
 
 /**
  * Start a wallet deposit.
@@ -19,6 +20,10 @@ type Body = { method?: string; amount?: number };
  * wallet is only ever credited by the idempotent, transactional settle path
  * shared by this route, /api/payments/verify and the Paystack webhook. The
  * Paystack secret key never appears here.
+ *
+ * The wallet that gets credited is always the signed-in user's own
+ * (`auth.wallet`), resolved from the session — never from the request body, so
+ * a caller cannot aim a deposit at somebody else's wallet.
  */
 export async function POST(req: Request) {
   try {
@@ -43,6 +48,11 @@ export async function POST(req: Request) {
       .where(eq(users.id, auth.userId))
       .limit(1);
     const email = accountRows[0]?.email ?? `${wallet.number}@flexidata.app`;
+    // The public origin this request arrived on (forwarding headers first, the
+    // way the password-reset links resolve it) — used for Paystack's callback
+    // URL when APP_BASE_URL is not set, so the customer lands back on THIS
+    // deployment's wallet page after paying.
+    const origin = requestOrigin(req);
 
     const result = await createDepositRequest({
       walletId: wallet.id,
@@ -50,6 +60,10 @@ export async function POST(req: Request) {
       email,
       method: body.method ?? "",
       amountGhs: amount,
+      // Metadata hint only — Paystack's hosted checkout collects (and debits)
+      // the mobile-money wallet itself; nothing here can move money.
+      momoNumber: typeof body.source === "string" ? body.source : null,
+      requestOrigin: origin,
     });
 
     if (result.status === "pending") {
