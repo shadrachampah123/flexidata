@@ -743,6 +743,27 @@ async function phaseDDeposits() {
     assert("D1e. wallet credited exactly the deposit amount", Math.abs(balAfter - balBefore - 50) < 0.005, `+${balAfter - balBefore}`);
     assert("D1f. exactly one deposit ledger row", (await depositLedgerCount(dep.ref)) === 1 + ledgerBefore, `rows: ${await depositLedgerCount(dep.ref)}`);
 
+    // D1g/h. GET deposit-status endpoint: owner sees the settled deposit.
+    const statusRes = await app.api(`/api/wallet/deposit?ref=${encodeURIComponent(dep.ref)}`);
+    assert(
+      "D1g. owner can GET their deposit status (successful)",
+      statusRes.status === 200 && statusRes.json?.ok && statusRes.json?.deposit?.status === "successful" &&
+        Number(statusRes.json.deposit.amount) === 50,
+      `HTTP ${statusRes.status} ${statusRes.json?.deposit?.status}`,
+    );
+    const missingRef = await app.api(`/api/wallet/deposit?ref=${encodeURIComponent("DP-NOPE-NONEXISTENT")}`);
+    assert("D1h. unknown deposit ref → 404", missingRef.status === 404, `HTTP ${missingRef.status}`);
+
+    // D1i. OWNERSHIP: another signed-in account must NOT see this deposit
+    // (same 404 as "not found" — no cross-tenant information leak).
+    const other = makeClient(APP_URL_D);
+    await registerAccount(other, "d-other");
+    const cross = await other.api(`/api/wallet/deposit?ref=${encodeURIComponent(dep.ref)}`);
+    assert("D1i. another user cannot read this deposit (404)", cross.status === 404 && !cross.json?.deposit, `HTTP ${cross.status}`);
+    // Unauthenticated call is rejected.
+    const anon = await makeClient(APP_URL_D).api(`/api/wallet/deposit?ref=${encodeURIComponent(dep.ref)}`);
+    assert("D1j. unauthenticated status request is rejected", anon.status === 401, `HTTP ${anon.status}`);
+
     // D2. DUPLICATE WEBHOOK: replayed charge.success must not double-credit.
     const balBefore2 = await walletBalance(walletId);
     for (let i = 0; i < 4; i++) {

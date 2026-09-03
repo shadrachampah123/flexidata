@@ -66,14 +66,17 @@ export function WalletTools({
   const insufficient = trAmount > balance;
   const transferReady = trAmount >= 1 && isValidPhone(dest) && !insufficient;
 
-  // Returning from a Paystack redirect: open the processing sheet and poll
-  // /api/payments/verify until the deposit settles (the server re-verifies
-  // with Paystack, so the redirect itself proves nothing). Even if this tab
-  // is closed, the Paystack webhook settles it server-side.
+  // Returning from a Paystack redirect: open the processing sheet, nudge
+  // settlement once (POST /api/payments/verify re-verifies with Paystack — the
+  // redirect itself proves nothing), then poll the read-only, owner-checked
+  // GET /api/wallet/deposit status endpoint. Settlement keeps being retried
+  // periodically so the deposit clears even if the Paystack webhook is late.
+  // If this tab is closed, the webhook still settles it server-side.
   useEffect(() => {
     if (!pendingFundingRef) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    const MAX_ATTEMPTS = 12;
 
     const finish = (result: FlowResult, refresh: boolean) => {
       if (cancelled) return;
@@ -82,32 +85,53 @@ export function WalletTools({
       if (refresh) router.refresh();
     };
 
-    const poll = async (attempt: number) => {
-      if (cancelled) return;
+    // POST verify drives reconciliation (idempotent; safe to call repeatedly).
+    const driveSettlement = async () => {
       try {
-        const res = await fetch("/api/payments/verify", {
+        await fetch("/api/payments/verify", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ref: pendingFundingRef }),
         });
+      } catch {
+        // Network hiccup — the webhook + later retries still settle it.
+      }
+    };
+
+    const leaveProcessing = (headline: string, message: string) => {
+      finish(
+        { status: "pending", ref: pendingFundingRef, headline, message, etaLabel: "Credits automatically" },
+        true,
+      );
+    };
+
+    const poll = async (attempt: number) => {
+      if (cancelled) return;
+      // Settle immediately, then again every 3rd poll as a webhook fallback.
+      if (attempt === 0 || attempt % 3 === 0) await driveSettlement();
+      if (cancelled) return;
+
+      try {
+        const res = await fetch(`/api/wallet/deposit?ref=${encodeURIComponent(pendingFundingRef)}`, {
+          headers: { "Content-Type": "application/json" },
+        });
         const data = (await res.json()) as {
           ok: boolean;
-          status?: string;
-          balance?: number;
-          amount?: number;
+          deposit?: { status?: string; amount?: number; balance?: number };
         };
-
         if (cancelled) return;
 
-        if (data.ok && data.status === "successful") {
-          const credited = typeof data.amount === "number" ? data.amount : fundAmount;
+        const status = data.ok ? data.deposit?.status : undefined;
+
+        if (status === "successful") {
+          const credited = typeof data.deposit?.amount === "number" ? data.deposit.amount : fundAmount;
           finish(
             {
               status: "successful",
               ref: pendingFundingRef,
               headline: `+${money(credited)} added!`,
               message: "Payment confirmed by Paystack. Your wallet has been credited and is ready to spend.",
-              balance: data.balance,
+              balance: data.deposit?.balance,
               lines: [
                 { label: "Status", value: "Confirmed" },
                 { label: "Fee", value: money(0) },
@@ -119,7 +143,7 @@ export function WalletTools({
           return;
         }
 
-        if (data.ok && (data.status === "failed" || data.status === "abandoned")) {
+        if (status === "failed" || status === "abandoned") {
           finish(
             {
               status: "failed",
@@ -133,19 +157,10 @@ export function WalletTools({
           return;
         }
 
-        // Still pending at Paystack. Keep polling for a while, then leave the
-        // deposit in a visible "processing" state — the webhook will settle it.
-        if (attempt >= 12) {
-          finish(
-            {
-              status: "pending",
-              ref: pendingFundingRef,
-              headline: "Payment processing",
-              message:
-                "We're still confirming your payment with Paystack. Your wallet is credited automatically once it clears — usually within a minute. You can close this safely.",
-              etaLabel: "Credits automatically",
-            },
-            true,
+        if (attempt >= MAX_ATTEMPTS) {
+          leaveProcessing(
+            "Payment processing",
+            "We're still confirming your payment with Paystack. Your wallet is credited automatically once it clears — usually within a minute. You can close this safely.",
           );
           return;
         }
@@ -153,17 +168,10 @@ export function WalletTools({
         timer = setTimeout(() => poll(attempt + 1), 2500);
       } catch {
         if (cancelled) return;
-        if (attempt >= 12) {
-          finish(
-            {
-              status: "pending",
-              ref: pendingFundingRef,
-              headline: "Payment processing",
-              message:
-                "We lost the connection while confirming your payment. It will be credited automatically once Paystack confirms it — check your balance shortly.",
-              etaLabel: "Credits automatically",
-            },
-            true,
+        if (attempt >= MAX_ATTEMPTS) {
+          leaveProcessing(
+            "Payment processing",
+            "We lost the connection while confirming your payment. It will be credited automatically once Paystack confirms it — check your balance shortly.",
           );
           return;
         }
@@ -177,7 +185,7 @@ export function WalletTools({
       if (timer) clearTimeout(timer);
     };
     // fundAmount is intentionally not a dependency: the ref identifies the
-    // deposit and the server returns the credited amount.
+    // deposit and the status endpoint returns the credited amount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingFundingRef, router]);
 
