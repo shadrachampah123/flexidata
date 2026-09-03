@@ -20,6 +20,7 @@ import {
 } from "@/lib/paystack";
 import { hasBundlePlanColumn, withSchemaFallback, type SchemaCapabilities } from "@/lib/schema-compat";
 import { repairCheckoutOrdersSchema } from "@/lib/seed";
+import { resolveAppBaseUrl } from "@/lib/notifications";
 import { POINTS_RATE } from "@/lib/constants";
 import { groupPhone, isValidPhone, makeRef } from "@/lib/format";
 
@@ -148,15 +149,6 @@ async function findBundlePlan(
   return { ...row, providerProductCode: deriveProviderProductCode(network, category, label) };
 }
 
-function appBaseUrl(requestOrigin: string | null): string {
-  const configured = process.env.APP_BASE_URL?.trim();
-  if (configured) return configured.replace(/\/$/, "");
-  if (requestOrigin) return requestOrigin.replace(/\/$/, "");
-  const vercel = process.env.VERCEL_URL?.trim();
-  if (vercel) return `https://${vercel}`;
-  return "http://localhost:3000";
-}
-
 /**
  * Step 1–4 of the flow: validate the selection server-side, create the unique
  * order reference, record the order as `awaiting_payment`, initialise the
@@ -223,12 +215,18 @@ export async function createCheckoutOrder(params: {
     fulfillmentStatus: "queued",
   });
 
+  // Use the same safe public base-URL resolver as deposits and password-reset
+  // links. If a production deployment has no public HTTPS URL, omit the
+  // callback URL instead of generating an incorrect localhost link.
+  const base = resolveAppBaseUrl(params.requestOrigin);
+  const callbackUrl = base ? `${base}/checkout/complete?ref=${encodeURIComponent(ref)}` : null;
+
   try {
     const init = await paystackInitializeTransaction({
       reference: ref,
       amountSubunits,
       email: params.customerEmail,
-      callbackUrl: `${appBaseUrl(params.requestOrigin)}/checkout/complete?ref=${encodeURIComponent(ref)}`,
+      callbackUrl,
       metadata: {
         app: "flexidata",
         kind: "data_bundle",

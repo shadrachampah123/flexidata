@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { users } from "@/db/schema";
 import { requireAccount } from "@/lib/api-auth";
 import { CheckoutInputError, createCheckoutOrder } from "@/lib/checkout";
+import { requestOrigin } from "@/lib/notifications";
 import { isPaystackConfigured, PaystackConfigError, PaystackRequestError } from "@/lib/paystack";
 import { isMissingRelationError } from "@/lib/schema-compat";
 
@@ -54,7 +55,7 @@ export async function POST(req: Request) {
       category: body.category ?? "",
       planLabel: body.planLabel ?? "",
       recipient: body.recipient ?? "",
-      requestOrigin: new URL(req.url).origin,
+      requestOrigin: requestOrigin(req),
     });
 
     return Response.json({
