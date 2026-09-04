@@ -14,7 +14,9 @@
     "verify:security-fixes": "tsx scripts/verify-security-fixes.ts",
     "verify:seed-resilience": "tsx scripts/verify-seed-resilience.ts",
     "verify:signup": "tsx scripts/verify-signup.ts",
-    "verify:auth-flow": "tsx scripts/verify-auth-flow.ts"
+    "verify:auth-flow": "tsx scripts/verify-auth-flow.ts",
+    "verify:demo-deposit-cleanup": "tsx scripts/verify-demo-deposit-cleanup.ts",
+    "cleanup:demo-deposits": "tsx scripts/cleanup-demo-deposits.ts"
   },
   "dependencies": {
     "@fontsource-variable/manrope": "^5.3.0",

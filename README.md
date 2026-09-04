@@ -87,6 +87,8 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run verify:schema-baseline` | Probe a pre-gateway database for the fallback behaviour |
 | `npm run verify:seed-resilience` | Check the shared catalog seed can't take sign-up down on a lagging schema |
 | `npm run verify:signup` | Sign-up regression checks against a real database (needs `DATABASE_URL`) |
+| `npm run verify:demo-deposit-cleanup` | Prove the demo-deposit cleanup tool reverses only mock credits (in-memory, no database needed) |
+| `npm run cleanup:demo-deposits` | Review-first reversal of demo/mock wallet deposit credits (`--apply` to run) |
 
 ## Wallet deposits (Paystack)
 
@@ -205,6 +207,42 @@ tab after paying — not the only way a deposit clears.
 
 Every one of those branches is covered automatically by
 [Phase D of the E2E suite](#paystack-e2e-automated).
+
+### Cleaning up demo/mock deposits
+
+Before Paystack went live, the deposit button simulated an instant top-up: the
+wallet was credited with **no real payment**, and a `deposit_requests` row
+(`provider = "mock"`) plus a "Wallet Top-up" ledger row were written. The app
+now hard-blocks creating those, but any demo credits already in the database
+stay there until removed. `scripts/cleanup-demo-deposits.ts` reverses them,
+review-first:
+
+```bash
+cd flexiData
+npm run cleanup:demo-deposits              # DRY RUN — SELECTs only, prints a plan
+npm run cleanup:demo-deposits -- --apply   # perform the cleanup (asks for confirmation)
+```
+
+For each demo credit it (1) debits the wallet with SQL arithmetic clamped at
+zero (never below zero, never an absolute write), (2) parks the demo
+`deposit_requests` row as `failed` with an audit note, and (3) marks the demo
+ledger row `reversed` (or `failed` on a pre-gateway `tx_status` enum). It is
+idempotent — a second run finds nothing left.
+
+Safety rails, all proven by `npm run verify:demo-deposit-cleanup` (in-memory,
+no database needed):
+
+- **Review-first:** without `--apply` it only reads; nothing is written.
+- **Never touches real money:** real Paystack deposits (matched by
+  `deposit_requests.provider = "paystack"`), transfers (withdrawals),
+  airtime-to-cash conversions, purchases, redemptions and referral rewards are
+  all out of scope.
+- **Production guard:** any non-local database target (Neon/Supabase/RDS/…,
+  or a `NODE_ENV=production` runtime) is refused unless `--allow-production` is
+  passed explicitly, and `--apply` still requires confirmation.
+- **Shortfalls are reported, not invented:** if a wallet's demo balance has
+  since been spent, only what remains is removed and the difference is shown as
+  a shortfall.
 
 ## Paystack E2E (automated)
 
