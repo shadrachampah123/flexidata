@@ -119,12 +119,20 @@ const DEPOSIT_REQUESTS = [
   "provider",
   "method",
   "amount",
+  "amount_subunits",
+  "currency",
   "status",
   "provider_reference",
+  "paystack_transaction_id",
+  "paystack_channel",
+  "paystack_gateway_response",
   "initiated_at",
   "completed_at",
+  "paid_at",
+  "verified_at",
   "provider_payload",
   "created_at",
+  "updated_at",
 ];
 
 
@@ -300,7 +308,13 @@ class FakePg {
   private defaults(table: string): Record<string, unknown> {
     const row: Record<string, unknown> = {};
     for (const column of this.columnsOf(table)) {
-      if (column === "created_at" || column === "updated_at") row[column] = new Date();
+      if (
+        column === "created_at" ||
+        column === "updated_at" ||
+        // deposit_requests.initiated_at is NOT NULL DEFAULT now() in Postgres.
+        column === "initiated_at"
+      )
+        row[column] = new Date();
       else if (column === "points" || column === "fulfillment_attempts") row[column] = 0;
       else if (column === "subtitle") row[column] = "";
       else if (column === "fulfillment_status") row[column] = "queued";

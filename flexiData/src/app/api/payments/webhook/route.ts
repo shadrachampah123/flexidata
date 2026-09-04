@@ -1,5 +1,5 @@
 import { paymentsProvider } from "@/lib/payments";
-import { isPaystackConfigured, isValidPaystackWebhookSignature } from "@/lib/paystack";
+import { isPaystackConfigured, isValidPaystackWebhookSignature, PaystackConfigError } from "@/lib/paystack";
 import { getCheckoutOrder, reconcileCheckoutOrder } from "@/lib/checkout";
 import { getDeposit, reconcileDeposit } from "@/lib/deposits";
 import { isMissingRelationError } from "@/lib/schema-compat";
@@ -62,9 +62,20 @@ export async function POST(req: Request) {
     }
 
     // --- Wallet deposits ---------------------------------------------------
-    if (paymentsProvider() !== "paystack") {
-      // Mock deposits settle at init; a signed Paystack event cannot apply.
-      return Response.json({ ok: true, ignored: "deposits_not_paystack" });
+    try {
+      if (paymentsProvider() !== "paystack") {
+        // Mock deposits settle at init; a signed Paystack event cannot apply.
+        return Response.json({ ok: true, ignored: "deposits_not_paystack" });
+      }
+    } catch (error) {
+      if (error instanceof PaystackConfigError) {
+        // Production funding lockout (mock provider / missing key): deposits
+        // can never be settled here, so ack and ignore instead of 500-retrying
+        // a webhook that can never succeed. Nothing is credited either way.
+        console.error(`webhook deposits locked: ${error.message}`);
+        return Response.json({ ok: true, ignored: "deposits_locked" });
+      }
+      throw error;
     }
 
     let deposit = null;

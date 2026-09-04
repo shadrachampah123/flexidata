@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, gte, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { wallets } from "@/db/schema";
 import { insertTransactionRow } from "@/lib/data";
@@ -24,15 +24,31 @@ export async function POST(req: Request) {
       return Response.json({ ok: false, error: "Not enough points for this reward" }, { status: 400 });
     }
 
-    const newPoints = wallet.points - option.cost;
     const credit = option.kind === "cash" ? option.amount : 0;
-    const newBalance = Number(wallet.balance) + credit;
     const ref = makeRef("RW");
 
-    await db
+    // Atomic, conditional redemption. The `points >= cost` guard lives in the
+    // UPDATE itself and points/balance move by SQL arithmetic, so two concurrent
+    // redemptions cannot both spend the same points (which used to credit cash
+    // twice — creating wallet money that was never earned), and a concurrent
+    // deposit/transfer can no longer be clobbered by a read-modify-write.
+    const redeemed = await db
       .update(wallets)
-      .set({ points: newPoints, balance: newBalance.toFixed(2) })
-      .where(eq(wallets.id, wallet.id));
+      .set({
+        points: sql`${wallets.points} - ${option.cost}`,
+        ...(credit > 0 ? { balance: sql`${wallets.balance} + ${credit.toFixed(2)}::numeric` } : {}),
+      })
+      .where(and(eq(wallets.id, wallet.id), gte(wallets.points, option.cost)))
+      .returning({ points: wallets.points, balance: wallets.balance });
+
+    const updated = redeemed[0];
+    if (!updated) {
+      // Lost the race against a concurrent redemption.
+      return Response.json({ ok: false, error: "Not enough points for this reward" }, { status: 400 });
+    }
+
+    const newPoints = updated.points;
+    const newBalance = Number(updated.balance);
 
     const titleMap: Record<string, string> = {
       cash: `Points → GH₵ ${option.amount} Cash`,

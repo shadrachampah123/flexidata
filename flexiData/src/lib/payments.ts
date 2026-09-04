@@ -22,9 +22,13 @@ import {
   isValidPaystackWebhookSignature,
   paystackInitializeTransaction,
   paystackMode,
-  paystackVerifyTransaction,
   PaystackConfigError,
 } from "@/lib/paystack";
+
+// Re-exported so callers of the funding gateway can catch the production
+// funding lockout (and the key/live-mode config errors) without importing the
+// low-level Paystack client. The class carries no key material.
+export { PaystackConfigError };
 import { resolveAppBaseUrl } from "@/lib/notifications";
 
 export type PaymentMethod = "momo_mtn" | "telecel_cash" | "card";
@@ -223,20 +227,6 @@ export async function initPayment(params: {
     status: "pending",
     providerRef: init.reference,
     authorizationUrl: init.authorizationUrl,
-  };
-}
-
-/** Verify a Paystack transaction by reference. Returns true when paid. */
-export async function verifyPaystackPayment(ref: string): Promise<{ paid: boolean; amountGhs: number | null }> {
-  if (paymentsProvider() !== "paystack") {
-    // Mock deposits are credited at init time; verification is a no-op success.
-    return { paid: true, amountGhs: null };
-  }
-  const verification = await paystackVerifyTransaction(ref);
-  const paid = verification.status === "success";
-  return {
-    paid,
-    amountGhs: verification.amountSubunits != null ? verification.amountSubunits / 100 : null,
   };
 }
 

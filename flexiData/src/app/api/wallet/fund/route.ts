@@ -33,7 +33,19 @@ export async function POST(req: Request) {
     // wallet funds in an improperly configured production runtime at all.
     if (process.env.NODE_ENV === "production") {
       try {
-        paymentsProvider();
+        // Belt: `paymentsProvider()` throws on a production lockout
+        // (PAYMENTS_PROVIDER=mock, or no Paystack key configured).
+        const provider = paymentsProvider();
+        // Braces: even if provider resolution ever changed to return a
+        // non-Paystack gateway instead of throwing, demo/mock funding is
+        // refused outright here — before auth, before any DB write.
+        if (provider !== "paystack") {
+          console.error(`fund production lockout: resolved provider "${provider}" is not paystack`);
+          return Response.json(
+            { ok: false, error: "Wallet funding is not available right now.", code: "demo_funding_disabled" },
+            { status: 503 },
+          );
+        }
       } catch (error) {
         if (error instanceof PaystackConfigError) {
           console.error(

@@ -3,7 +3,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { depositRequests, transactions, wallets } from "@/db/schema";
 import { PAYMENT_METHODS, initPayment, paymentsProvider, type PaymentMethod } from "@/lib/payments";
-import { paystackVerifyTransaction, PAYSTACK_CURRENCY } from "@/lib/paystack";
+import { paystackVerifyTransaction, PAYSTACK_CURRENCY, PaystackConfigError } from "@/lib/paystack";
 import { makeRef } from "@/lib/format";
 import { DEPOSIT_MAX_GHS, DEPOSIT_MIN_GHS } from "@/lib/constants";
 import {
@@ -35,6 +35,17 @@ import {
  *
  * Mock mode (`PAYMENTS_PROVIDER != paystack`) keeps the instant-credit dev
  * experience, but routes that credit through the SAME atomic settle path.
+ *
+ * PRODUCTION LOCK (defence in depth, enforced at every decision point below):
+ * in a production runtime (`NODE_ENV === "production"`) a deposit whose
+ * provider is not `paystack` can NEVER credit a wallet — not through the fund
+ * route, not through /api/payments/verify, not through the webhook, and not
+ * through `settleAtomic` itself (the single choke point where money moves).
+ * `paymentsProvider()` already refuses to resolve to `mock` in production;
+ * these checks guarantee the same outcome even if a future caller resolves the
+ * provider some other way. Production deposits are settled exclusively by
+ * Paystack's server-side verification (exact reference + pesewa amount +
+ * currency).
  */
 
 export class DepositInputError extends Error {
@@ -60,6 +71,16 @@ export type DepositSummary = {
 
 const MIN_DEPOSIT_GHS = DEPOSIT_MIN_GHS;
 const MAX_DEPOSIT_GHS = DEPOSIT_MAX_GHS;
+
+/**
+ * True in a production runtime, where wallet deposits may ONLY be settled by
+ * verified Paystack charges. Every mock/demo settlement path checks this
+ * independently so no refactoring or alternative caller can re-enable
+ * simulated wallet credit in production.
+ */
+function isProductionRuntime(): boolean {
+  return process.env.NODE_ENV === "production";
+}
 
 function clampText(value: string | null | undefined, max = 240): string | null {
   if (!value) return null;
@@ -123,6 +144,20 @@ export async function createDepositRequest(params: {
 
   const provider = paymentsProvider();
   const ref = makeRef("DP");
+
+  // Production lock: the instant mock settlement below must be unreachable in
+  // a production runtime even if the provider was resolved by something other
+  // than `paymentsProvider()`. Throwing the config error keeps the fund route's
+  // existing generic 503 "paystack_unconfigured" response — no details, no
+  // credit.
+  if (isProductionRuntime() && provider !== "paystack") {
+    console.error(
+      `[deposit] blocked a non-Paystack (${provider}) wallet deposit in production — demo/mock funding is disabled.`,
+    );
+    throw new PaystackConfigError(
+      "Wallet funding is locked to verified Paystack payments in production; demo deposits are disabled.",
+    );
+  }
 
   // Record the attempt up front so a Paystack redirect can never be orphaned.
   await db.insert(depositRequests).values({
@@ -226,6 +261,39 @@ export async function reconcileDeposit(ref: string): Promise<DepositSummary | nu
   // Terminal settled state never changes again.
   if (deposit.status === "successful") {
     return toDepositSummary(deposit);
+  }
+
+  // PRODUCTION LOCK: a deposit that was not created through Paystack can never
+  // be settled in a production runtime — there is no real charge behind it.
+  // Park it as failed (auditable, visible to the customer as "not completed")
+  // instead of taking the mock instant-settlement branch below. This is checked
+  // before `paymentsProvider()` so a misconfigured production runtime (mock
+  // provider or missing key) fails this deposit explicitly rather than
+  // erroring or — worse — settling.
+  if (isProductionRuntime() && deposit.provider !== "paystack") {
+    console.error(
+      `[deposit] refused to settle non-Paystack (${deposit.provider}) deposit ${deposit.ref} in production — ` +
+        "demo/mock deposits cannot credit wallets.",
+    );
+    const now = new Date();
+    await db
+      .update(depositRequests)
+      .set({
+        status: "failed",
+        completedAt: now,
+        verifiedAt: now,
+        paystackGatewayResponse: clampText(
+          "Not settled: demo deposits are disabled in production. Wallet was not credited.",
+        ),
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(depositRequests.ref, deposit.ref),
+          inArray(depositRequests.status, ["pending", "abandoned", "failed"]),
+        ),
+      );
+    return toDepositSummary((await getDeposit(ref)) ?? deposit);
   }
 
   const provider = deposit.provider === "paystack" ? "paystack" : paymentsProvider();
@@ -334,6 +402,15 @@ async function settleAtomic(
     paidAt: Date;
   },
 ): Promise<DepositSummary> {
+  // THE money-movement choke point. No deposit that Paystack did not take real
+  // money for can ever credit a wallet in a production runtime — regardless of
+  // which route, webhook or future caller asked for settlement.
+  if (isProductionRuntime() && deposit.provider !== "paystack") {
+    throw new PaystackConfigError(
+      "Mock settlement is disabled in production; wallets can only be credited from verified Paystack payments.",
+    );
+  }
+
   const methodConf = PAYMENT_METHODS[deposit.method as PaymentMethod];
   const methodLabel = methodConf?.label ?? "Card";
   const amount = Number(deposit.amount);
