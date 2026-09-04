@@ -7,11 +7,18 @@ import { SideNav } from "@/components/side-nav";
 // Routes that show the focused auth shell (no app navigation chrome).
 const AUTH_ROUTES = ["/login", "/register", "/forgot-password", "/reset-password"];
 
+// Routes rendered as a bare shell. The admin area is server-gated and brings
+// its own chrome (see src/app/admin/layout.tsx), so customer navigation must
+// not appear there — and the customer nav must never link into it.
+const BARE_SHELL_ROUTES = [...AUTH_ROUTES, "/admin"];
+
 export function AppChrome({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const isAuth = AUTH_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));
+  const isBareShell = BARE_SHELL_ROUTES.some(
+    (r) => pathname === r || pathname.startsWith(`${r}/`),
+  );
 
-  if (isAuth) {
+  if (isBareShell) {
     return <main className="min-h-dvh">{children}</main>;
   }
 
