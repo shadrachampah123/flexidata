@@ -15,6 +15,8 @@
     "verify:seed-resilience": "tsx scripts/verify-seed-resilience.ts",
     "verify:signup": "tsx scripts/verify-signup.ts",
     "verify:auth-flow": "tsx scripts/verify-auth-flow.ts",
+    "verify:admin-access": "tsx scripts/verify-admin-access.ts",
+    "admin:grant": "tsx scripts/grant-admin.ts",
     "verify:demo-deposit-cleanup": "tsx scripts/verify-demo-deposit-cleanup.ts",
     "cleanup:demo-deposits": "tsx scripts/cleanup-demo-deposits.ts",
     "report:paystack-transactions": "tsx scripts/report-paystack-transactions.ts",
