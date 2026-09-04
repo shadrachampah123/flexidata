@@ -556,6 +556,181 @@ async function main() {
     );
 
     await stub.close();
+
+    // --- 7. Purchase provider-callback refund/charge integrity --------------
+    // The data-provider callback used to settle wallet refunds with a
+    // read-modify-write against a stale wallet snapshot (absolute balance
+    // write, ledger flag written after the wallet, no transaction). Prove the
+    // replacement claim-once + atomic-arithmetic behaviour.
+    env.NODE_ENV = "production";
+    env.DATA_API_WEBHOOK_SECRET = "test-webhook-secret";
+    const signCb = (body: string) =>
+      createHmac("sha256", env.DATA_API_WEBHOOK_SECRET!).update(body).digest("hex");
+    const postCallback = async (payload: Record<string, unknown>) => {
+      const raw = JSON.stringify(payload);
+      return callbackRoute.POST(
+        new Request("http://localhost/api/purchase/callback", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-data-api-signature": signCb(raw) },
+          body: raw,
+        }),
+      );
+    };
+    let cbTxId = 6000;
+    const addCallbackTx = (overrides: {
+      status?: string;
+      charged: boolean;
+      refunded?: boolean;
+      points?: number;
+      amount?: string;
+    }) => {
+      const id = ++cbTxId;
+      pool().rows.transactions.push({
+        id,
+        ref: `FD-CB-${id}`,
+        wallet_id: 1,
+        type: "data",
+        status: overrides.status ?? "successful",
+        fulfillment_status: overrides.charged ? "delivered" : "processing",
+        direction: "out",
+        title: "MTN 1GB Data",
+        subtitle: "To 024 41 23 456",
+        amount: overrides.amount ?? "40.00",
+        points: overrides.points ?? 150,
+        network: "MTN",
+        recipient: "0244123456",
+        provider: "mock",
+        provider_product_code: "MTN-UP2U-1GB",
+        provider_reference: `prov-${id}`,
+        provider_status: overrides.charged ? "successful" : "pending",
+        provider_message: null,
+        fulfillment_attempts: 1,
+        charged_at: overrides.charged ? new Date() : null,
+        fulfilled_at: null,
+        refunded_at: overrides.refunded ? new Date() : null,
+        last_provider_sync_at: new Date(),
+        provider_payload: null,
+        provider_response: null,
+        created_at: new Date(),
+      });
+      return `FD-CB-${id}`;
+    };
+    const walletState = () => ({
+      balance: Number(pool().rows.wallets[0].balance),
+      points: pool().rows.wallets[0].points,
+    });
+
+    // 7a. A charged order reported reversed: refund + points clawback, once.
+    pool().rows.wallets[0].balance = "100.00";
+    pool().rows.wallets[0].points = 50;
+    pool().rows.transactions.length = 0;
+    const refundRef = addCallbackTx({ charged: true, points: 150 });
+    const refundRes = await postCallback({ clientReference: refundRef, status: "reversed" });
+    const refundResBody = await refundRes.json();
+    const refundedTx = pool().rows.transactions.find((r) => r.ref === refundRef);
+    check(
+      "callback: provider refund credits the wallet atomically (balance 100→140) and claws back points (150→0), exactly once",
+      refundRes.status === 200 &&
+        refundResBody.ok === true &&
+        walletState().balance === 140 &&
+        walletState().points === 0 &&
+        refundedTx?.status === "reversed" &&
+        refundedTx?.refunded_at != null &&
+        Number(refundedTx?.points) === 0,
+      { status: refundRes.status, body: refundResBody, wallet: walletState(), tx: refundedTx },
+    );
+
+    // 7b. Provider redelivers the same reversed event: no second refund.
+    const afterReplay = walletState();
+    const replayRes = await postCallback({ clientReference: refundRef, status: "reversed" });
+    const replayResBody = await replayRes.json();
+    check(
+      "callback: redelivered refund event does NOT credit the wallet twice (idempotent replay)",
+      replayRes.status === 200 &&
+        replayResBody.ok === true &&
+        walletState().balance === afterReplay.balance &&
+        walletState().points === afterReplay.points,
+      { status: replayRes.status, body: replayResBody, wallet: walletState() },
+    );
+
+    // 7c. TWO concurrent redeliveries race: exactly one refund may win.
+    pool().rows.wallets[0].balance = "100.00";
+    pool().rows.wallets[0].points = 50;
+    const raceRef = addCallbackTx({ charged: true, points: 150 });
+    const claimMark = pool().captured.length;
+    const [raceA, raceB] = await Promise.all([
+      postCallback({ clientReference: raceRef, status: "reversed" }),
+      postCallback({ clientReference: raceRef, status: "reversed" }),
+    ]);
+    const raceWrites = pool().captured.slice(claimMark).filter((c) => c.kind === "update" && c.table === "wallets");
+    const claimIdx = pool().captured
+      .slice(claimMark)
+      .findIndex((c) => c.kind === "update" && c.table === "transactions");
+    const walletIdx = pool().captured
+      .slice(claimMark)
+      .findIndex((c) => c.kind === "update" && c.table === "wallets");
+    check(
+      "callback: concurrent duplicate refund deliveries settle exactly once (one wallet write, claim before credit, balance 100→140 not 180)",
+      raceA.status === 200 &&
+        raceB.status === 200 &&
+        raceWrites.length === 1 &&
+        claimIdx !== -1 &&
+        walletIdx !== -1 &&
+        claimIdx < walletIdx &&
+        walletState().balance === 140 &&
+        walletState().points === 0,
+      {
+        a: raceA.status,
+        b: raceB.status,
+        walletWrites: raceWrites.length,
+        wallet: walletState(),
+        writes: raceWrites.map((w) => w.sql),
+      },
+    );
+    check(
+      "callback: the refund wallet mutation is SQL arithmetic on the live row (balance = balance + amount), never an absolute value",
+      raceWrites.length === 1 &&
+        /"balance"\s*=\s*"wallets"\."balance"\s*\+/.test(raceWrites[0]?.sql ?? "") &&
+        !/"balance"\s*=\s*\$/.test(raceWrites[0]?.sql ?? "") &&
+        /GREATEST\(0,\s*"wallets"\."points"\s*-/.test(raceWrites[0]?.sql ?? ""),
+      raceWrites[0]?.sql,
+    );
+
+    // 7d. Charge-on-confirmation for an uncharged order: debited once, points
+    // awarded once; a duplicate delivery neither re-charges nor re-awards.
+    pool().rows.wallets[0].balance = "100.00";
+    pool().rows.wallets[0].points = 50;
+    const unchargedRef = addCallbackTx({ status: "pending", charged: false, points: 0 });
+    const chargeRes = await postCallback({ clientReference: unchargedRef, status: "successful" });
+    const chargeResBody = await chargeRes.json();
+    const chargedTx = pool().rows.transactions.find((r) => r.ref === unchargedRef);
+    const afterCharge = walletState();
+    check(
+      "callback: delivery confirmation charges an uncharged order exactly once (balance 100→60) and awards points once (50→130)",
+      chargeRes.status === 200 &&
+        chargeResBody.ok === true &&
+        afterCharge.balance === 60 &&
+        afterCharge.points === 50 + Math.max(1, Math.round(40 * 2)) &&
+        chargedTx?.charged_at != null &&
+        chargedTx?.status === "successful",
+      { status: chargeRes.status, body: chargeResBody, wallet: afterCharge, tx: chargedTx },
+    );
+    const chargeReplayRes = await postCallback({ clientReference: unchargedRef, status: "successful" });
+    check(
+      "callback: duplicate delivery confirmation neither re-charges nor re-awards points",
+      chargeReplayRes.status === 200 && walletState().balance === afterCharge.balance && walletState().points === afterCharge.points,
+      { status: chargeReplayRes.status, wallet: walletState() },
+    );
+
+    // 7e. Failure for an uncharged order: status sync only, wallet untouched.
+    const failRef = addCallbackTx({ status: "pending", charged: false, points: 0 });
+    const failRes = await postCallback({ clientReference: failRef, status: "failed" });
+    const failedTx = pool().rows.transactions.find((r) => r.ref === failRef);
+    check(
+      "callback: failure for an uncharged order never moves the wallet (status sync only)",
+      failRes.status === 200 && walletState().balance === afterCharge.balance && failedTx?.status === "failed",
+      { status: failRes.status, wallet: walletState(), tx: failedTx },
+    );
   } finally {
     if (originalNodeEnv === undefined) delete env.NODE_ENV;
     else env.NODE_ENV = originalNodeEnv;
