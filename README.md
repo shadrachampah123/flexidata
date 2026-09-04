@@ -19,8 +19,10 @@ Telecel bundle delivery, referral rewards and a vendor/agent program.
   card, pay on Paystack's hosted checkout, and the wallet is credited only after the
   server verifies the charge (see [Wallet deposits](#wallet-deposits-paystack)). Money
   can also be transferred to any other registered FlexiData user. A simulated instant
-  MoMo deposit still exists for offline demos (`PAYMENTS_PROVIDER=mock`) but is never the
-  default once a Paystack key is configured.
+  MoMo deposit still exists for offline development demos (`PAYMENTS_PROVIDER=mock`) but
+  is **hard-disabled in production**: there, deposits run only through verified Paystack
+  charges, the fund API refuses any demo/mock request server-side, and the demo UI is
+  removed from production builds.
 - **Shop** — discounted MTN (UP2U, SME non-expiry, Corporate, Social) & Telecel bundles,
   airtime at 2% off, and airtime-to-cash conversion.
 - **Order tracking** — every data/airtime order gets a live delivery tracker with an
@@ -91,7 +93,27 @@ Open [http://localhost:3000](http://localhost:3000).
 The **Deposit / Add money** button on `/wallet` runs a real Paystack charge. The
 simulated MTN MoMo top-up is no longer on that path: it only runs if you
 explicitly set `PAYMENTS_PROVIDER=mock` (a demo aid — it credits the wallet with
-**no real payment**) or if no Paystack key is configured at all.
+**no real payment**) **and the runtime is not production**. In a production
+runtime (`NODE_ENV=production`) demo/mock deposits are hard-disabled at every
+layer:
+
+- `paymentsProvider()` refuses to resolve to the mock provider (fail-closed
+  production lockout — with `PAYMENTS_PROVIDER=mock`, or with no Paystack key
+  configured, wallet funding returns `503 paystack_unconfigured`).
+- `POST /api/wallet/fund` re-checks the lock **before authentication**: any
+  request that could resolve to a non-Paystack provider is rejected server-side,
+  so the disabled UI cannot be bypassed by calling the API directly.
+- The deposit service (`src/lib/deposits.ts`) refuses to create or settle a
+  non-Paystack deposit in production — `reconcileDeposit` parks any legacy mock
+  deposit as `failed` (never credited) and `settleAtomic`, the single
+  money-movement choke point, throws before touching a wallet. A mock provider
+  can therefore never credit a real wallet in production, through any route,
+  webhook or future caller.
+- Production client builds hard-disable the demo top-up UI (the controls and
+  the demo "Approve deposit" flow are removed; `NODE_ENV` is inlined at build
+  time), so the demo deposit button cannot appear in production even with
+  tampered client state.
+
 
 ```
 GH₵ 20 → POST /api/wallet/fund                    (session required)
@@ -241,7 +263,7 @@ flexiData/
 | `DATABASE_URL` | PostgreSQL connection string (required) |
 | `AUTH_SECRET` | Long random string used to sign session cookies / reset tokens (required — sign-up fails before writing anything when it is missing, so no account can be orphaned) |
 | `APP_BASE_URL` | Public deployment URL for links in emails & payment callbacks (e.g. `https://flexidata.app`). Optional for reset links: they are built from the origin of the incoming request, then `VERCEL_URL`, never `localhost` in production |
-| `PAYMENTS_PROVIDER` | Which gateway funds the wallet: `paystack`, or `mock` for the instant **simulated** MoMo deposit (demo aid — it credits the wallet with no real payment). **Unset (recommended): Paystack whenever `PAYSTACK_SECRET_KEY` is set, `mock` otherwise** — a Paystack-configured deployment can never silently fall back to simulated deposits. See [Wallet deposits](#wallet-deposits-paystack) |
+| `PAYMENTS_PROVIDER` | Which gateway funds the wallet: `paystack`, or `mock` for the instant **simulated** MoMo deposit — **development/demo environments only; ignored (refused) in production**, where deposits run only through verified Paystack charges. **Unset (recommended): Paystack whenever `PAYSTACK_SECRET_KEY` is set, `mock` otherwise** — a Paystack-configured deployment can never silently fall back to simulated deposits. See [Wallet deposits](#wallet-deposits-paystack) |
 | `PAYSTACK_SECRET_KEY` | Paystack secret key (`sk_test_…` for TEST mode). Server-only — never sent to the browser, never logged. Required for wallet deposits and the data-bundle checkout |
 | `PAYSTACK_PUBLIC_KEY` | Optional and currently unused: the redirect/authorization-URL flow needs no client-side key. Safe to set (`pk_test_…`); nothing key-related reaches the browser either way |
 | `PAYSTACK_LIVE_MODE` | Safety lock. A `sk_live_…` key is refused unless this is `true`, so going live is a deliberate two-step change. Leave unset/false while testing |
@@ -312,8 +334,9 @@ Then check `/api/health`: `gatewaySchema` and `signupSchema` should both read
      `PAYSTACK_SECRET_KEY` = your `sk_test_…` key for testing, or `sk_live_…`
      **plus** `PAYSTACK_LIVE_MODE=true` for real money. Wallet funding uses
      Paystack automatically once the key is set — make sure `PAYMENTS_PROVIDER`
-     is **not** `mock` (delete the variable, or set it to `paystack`), otherwise
-     deposits stay simulated and credit wallets without a payment. Set the
+     is **not** `mock` (delete the variable, or set it to `paystack`); in
+     production a leftover `mock` does not simulate anything any more — wallet
+     funding is refused outright until the variable is removed. Set the
      Paystack webhook URL to `https://<domain>/api/payments/webhook` in the
      dashboard. See [Wallet deposits](#wallet-deposits-paystack).
    - For **password reset emails** (recommended): add `RESEND_API_KEY` and

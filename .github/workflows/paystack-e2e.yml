@@ -30,6 +30,7 @@ on:
       - arena/01a06438-flexidata
       - arena/01a06842-flexidata
       - arena/01a0688c-flexidata
+      - arena/01a06c9e-flexidata
 
 jobs:
   e2e:

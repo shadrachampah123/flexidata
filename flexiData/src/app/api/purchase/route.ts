@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { bundlePlans, transactions, wallets } from "@/db/schema";
 import { insertTransactionRow } from "@/lib/data";
@@ -154,6 +154,24 @@ export async function POST(req: Request) {
         return Response.json({ ok: false, error: "insufficient_funds", needed: cost, balance }, { status: 402 });
       }
 
+      // Atomic, conditional debit BEFORE the provider call: the `balance >= cost`
+      // guard lives in the UPDATE itself, so concurrent purchases/transfers can
+      // never overdraft the wallet and a concurrent deposit can never be
+      // clobbered by a read-modify-write (which previously could let two
+      // simultaneous purchases share one balance — spendable money out of thin
+      // air). If the provider then fails, the same atomic arithmetic refunds the
+      // pre-debit below, matching the "Not charged" ledger row.
+      const debited = await db
+        .update(wallets)
+        .set({ balance: sql`${wallets.balance} - ${cost.toFixed(2)}::numeric` })
+        .where(and(eq(wallets.id, wallet.id), sql`${wallets.balance} >= ${cost.toFixed(2)}::numeric`))
+        .returning({ balance: wallets.balance });
+      const chargedWallet = debited[0];
+      if (!chargedWallet) {
+        // Lost the race against a concurrent spend.
+        return Response.json({ ok: false, error: "insufficient_funds", needed: cost, balance }, { status: 402 });
+      }
+
       await ensureProviderFloatCapacity(network, cost);
       const gateway = await submitDataBundleOrder({
         reference: ref,
@@ -171,8 +189,32 @@ export async function POST(req: Request) {
       const chargedAt = shouldCharge ? new Date() : null;
       const fulfilledAt = status === "successful" ? new Date() : null;
       const pointsEarned = status === "successful" ? Math.max(1, Math.round(cost * POINTS_RATE)) : 0;
-      const newBalance = shouldCharge ? balance - cost : balance;
       const providerHint = clampText(gateway.providerMessage, 90);
+
+      // Live wallet state after the (atomic) debit/refund — never re-derived
+      // from the stale session snapshot.
+      let liveBalance = Number(chargedWallet.balance);
+      let livePoints = wallet.points;
+
+      if (!shouldCharge) {
+        // Provider failed: refund the pre-debit atomically. The ledger row
+        // below says "Not charged" and carries no chargedAt, so the callback
+        // path will never refund it a second time.
+        const refunded = await db
+          .update(wallets)
+          .set({ balance: sql`${wallets.balance} + ${cost.toFixed(2)}::numeric` })
+          .where(eq(wallets.id, wallet.id))
+          .returning({ balance: wallets.balance });
+        liveBalance = Number(refunded[0]?.balance ?? liveBalance);
+      } else if (pointsEarned > 0) {
+        const withPoints = await db
+          .update(wallets)
+          .set({ points: sql`${wallets.points} + ${pointsEarned}` })
+          .where(eq(wallets.id, wallet.id))
+          .returning({ points: wallets.points });
+        livePoints = withPoints[0]?.points ?? livePoints;
+      }
+
       const txSubtitle =
         status === "failed"
           ? `${subtitle} • Not charged`
@@ -180,15 +222,8 @@ export async function POST(req: Request) {
             ? clampText(`${subtitle} • ${providerHint}`)
             : subtitle;
 
-      if (shouldCharge) {
-        await db
-          .update(wallets)
-          .set({
-            balance: newBalance.toFixed(2),
-            points: wallet.points + pointsEarned,
-          })
-          .where(eq(wallets.id, wallet.id));
-      }
+      // (The wallet debit/refund and points award already happened atomically
+      // above — before the provider call — so no further balance write here.)
 
       const txValues: typeof transactions.$inferInsert = {
         ref,
@@ -267,8 +302,8 @@ export async function POST(req: Request) {
         title,
         cost,
         pointsEarned,
-        balance: newBalance,
-        points: wallet.points + pointsEarned,
+        balance: liveBalance,
+        points: livePoints,
         provider: gateway.providerCode,
         providerMessage: gateway.providerMessage,
         fulfillmentStatus: gateway.fulfillmentStatus,
@@ -292,17 +327,29 @@ export async function POST(req: Request) {
       }
 
       const status = rollLocalStatus();
-      const newBalance = status === "failed" ? balance : balance - cost;
       const pointsEarned = status === "successful" ? Math.max(1, Math.round(cost * POINTS_RATE)) : 0;
 
+      // Same atomic, conditional debit as the data branch: no overdraft, no
+      // clobbered concurrent deposit, and the response carries the values the
+      // database actually has after the write.
+      let newBalance = balance;
+      let livePoints = wallet.points;
       if (status !== "failed") {
-        await db
+        const debited = await db
           .update(wallets)
           .set({
-            balance: newBalance.toFixed(2),
-            points: wallet.points + pointsEarned,
+            balance: sql`${wallets.balance} - ${cost.toFixed(2)}::numeric`,
+            ...(pointsEarned > 0 ? { points: sql`${wallets.points} + ${pointsEarned}` } : {}),
           })
-          .where(eq(wallets.id, wallet.id));
+          .where(and(eq(wallets.id, wallet.id), sql`${wallets.balance} >= ${cost.toFixed(2)}::numeric`))
+          .returning({ balance: wallets.balance, points: wallets.points });
+        const chargedWallet = debited[0];
+        if (!chargedWallet) {
+          // Lost the race against a concurrent spend — nothing was charged.
+          return Response.json({ ok: false, error: "insufficient_funds", needed: cost, balance }, { status: 402 });
+        }
+        newBalance = Number(chargedWallet.balance);
+        livePoints = chargedWallet.points;
       }
 
       const airtimeValues: typeof transactions.$inferInsert = {
@@ -346,7 +393,7 @@ export async function POST(req: Request) {
         cost,
         pointsEarned,
         balance: newBalance,
-        points: wallet.points + pointsEarned,
+        points: livePoints,
         trackable: true,
         etaSeconds: airtimeEta,
       });

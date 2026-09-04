@@ -43,11 +43,21 @@ export function WalletTools({
    * `src/app/wallet/page.tsx` via `paymentsProvider()`. It defaults to
    * `"paystack"` so this UI can never present a simulated instant top-up as a
    * real deposit unless the deployment explicitly opted into the mock provider.
+   *
+   * `"unavailable"` means the server refused to resolve a provider at all
+   * (production funding lockout): the fund tab renders hard-disabled.
    */
-  fundingProvider?: "paystack" | "mock";
+  fundingProvider?: "paystack" | "mock" | "unavailable";
 }) {
   const router = useRouter();
   const isPaystackFunding = fundingProvider === "paystack";
+  // `NODE_ENV` is inlined into the client bundle at build time, so a PRODUCTION
+  // BUILD of this component can never render a working demo top-up: demo/mock
+  // funding only exists in development builds (where the server honours
+  // PAYMENTS_PROVIDER=mock). This is UI hardening only — the server refuses
+  // demo deposits in production regardless of what the client sends.
+  const isProductionBuild = process.env.NODE_ENV === "production";
+  const demoFundingDisabled = isProductionBuild && fundingProvider !== "paystack";
   // When we land here straight back from a Paystack redirect the sheet opens
   // straight into its processing/polling state.
   const [tab, setTab] = useState<"fund" | "transfer">(pendingFundingRef ? "fund" : initialTab);
@@ -234,6 +244,19 @@ export function WalletTools({
 
   const submit = async () => {
     flowSeq.current += 1;
+    // Hard client-side guard to match the server's production lock: a
+    // production build never asks the server to fund the wallet through a
+    // non-Paystack gateway, so the demo "Approve deposit" flow is unreachable
+    // there even with tampered client state.
+    if (tab === "fund" && demoFundingDisabled) {
+      setResult({
+        status: "failed",
+        headline: "Deposit unavailable",
+        message: "Wallet funding is not available right now. Please try again later.",
+      });
+      setPhase("result");
+      return;
+    }
     setStage("init");
     setPhase("processing");
     try {
@@ -355,6 +378,13 @@ export function WalletTools({
 
       {tab === "fund" ? (
         <>
+          {demoFundingDisabled && (
+            <div className="flex items-start gap-2 rounded-2xl bg-amber-400/15 px-4 py-3 text-xs font-bold text-amber-600 dark:text-amber-400">
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              Wallet funding is unavailable right now. Online deposits are disabled; please contact
+              support if you need to top up.
+            </div>
+          )}
           <div className="animate-fade-up" style={{ animationDelay: "60ms" }}>
             <FieldLabel>Payment method</FieldLabel>
             <div className="space-y-2">
@@ -455,11 +485,11 @@ export function WalletTools({
       )}
 
       <button
-        disabled={!ready}
+        disabled={!ready || (tab === "fund" && demoFundingDisabled)}
         onClick={() => setPhase("confirm")}
         className={cn(
           "animate-fade-up flex w-full items-center justify-center gap-2 rounded-2xl py-4 font-display text-[15px] font-bold transition-all",
-          ready
+          ready && !(tab === "fund" && demoFundingDisabled)
             ? "bg-brand text-ink shadow-[0_12px_28px_rgba(255,203,5,0.35)] hover:-translate-y-0.5 active:scale-[0.98]"
             : "cursor-not-allowed bg-black/[0.05] text-zinc-400 dark:bg-white/[0.06] dark:text-zinc-500",
         )}
@@ -467,7 +497,9 @@ export function WalletTools({
       >
         <ShieldCheck className="h-5 w-5" strokeWidth={2.2} />
         {tab === "fund"
-          ? `Deposit ${fundAmount > 0 ? money(fundAmount) : ""}`
+          ? demoFundingDisabled
+            ? "Deposits unavailable"
+            : `Deposit ${fundAmount > 0 ? money(fundAmount) : ""}`
           : `Send ${trAmount > 0 ? money(trAmount) : ""}`}
       </button>
 

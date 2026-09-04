@@ -1,6 +1,6 @@
 import { WalletTools } from "@/components/wallet-tools";
 import { PageHeader } from "@/components/page-header";
-import { paymentsProvider } from "@/lib/payments";
+import { paymentsProvider, PaystackConfigError } from "@/lib/payments";
 import { requireSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +17,18 @@ export default async function WalletPage({
   // Resolved server-side so the funding UI describes the gateway that will
   // really be used (Paystack checkout vs the opt-in local simulator). The
   // client never decides this, and no key material is involved.
-  const fundingProvider = paymentsProvider();
+  //
+  // A production funding lockout (PAYMENTS_PROVIDER=mock, or no Paystack key)
+  // does not take the whole wallet page down: funding is rendered as
+  // "unavailable" — and the WalletTools production build hard-disables every
+  // demo top-up control — while transfers still work. Fail closed, not down.
+  let fundingProvider: "paystack" | "mock" | "unavailable" = "paystack";
+  try {
+    fundingProvider = paymentsProvider();
+  } catch (error) {
+    if (!(error instanceof PaystackConfigError)) throw error;
+    fundingProvider = "unavailable";
+  }
   return (
     <div>
       <PageHeader

@@ -119,12 +119,20 @@ const DEPOSIT_REQUESTS = [
   "provider",
   "method",
   "amount",
+  "amount_subunits",
+  "currency",
   "status",
   "provider_reference",
+  "paystack_transaction_id",
+  "paystack_channel",
+  "paystack_gateway_response",
   "initiated_at",
   "completed_at",
+  "paid_at",
+  "verified_at",
   "provider_payload",
   "created_at",
+  "updated_at",
 ];
 
 
@@ -209,7 +217,7 @@ class FakePg {
     scheduled_topups: [],
     agent_profiles: [],
   };
-  captured: { kind: string; table: string; columns: string[] }[] = [];
+  captured: { kind: string; table: string; columns: string[]; sql?: string }[] = [];
   errors: string[] = [];
   serials: Record<string, number> = {};
 
@@ -300,7 +308,13 @@ class FakePg {
   private defaults(table: string): Record<string, unknown> {
     const row: Record<string, unknown> = {};
     for (const column of this.columnsOf(table)) {
-      if (column === "created_at" || column === "updated_at") row[column] = new Date();
+      if (
+        column === "created_at" ||
+        column === "updated_at" ||
+        // deposit_requests.initiated_at is NOT NULL DEFAULT now() in Postgres.
+        column === "initiated_at"
+      )
+        row[column] = new Date();
       else if (column === "points" || column === "fulfillment_attempts") row[column] = 0;
       else if (column === "subtitle") row[column] = "";
       else if (column === "fulfillment_status") row[column] = "queued";
@@ -321,6 +335,13 @@ class FakePg {
   }
 
   private matchCondition(cond: string, params: unknown[], row: Record<string, unknown>): boolean {
+    // IS NULL / IS NOT NULL — the claim preconditions used by the
+    // purchase-callback settlement (e.g. refunded_at IS NULL).
+    const nullM = cond.match(/(?:\"([a-z_]+)\"\.)?\"?([a-z_]+)\"?\s+is\s+(not\s+)?null/i);
+    if (nullM) {
+      const actual: unknown = row[nullM[2]];
+      return nullM[1] ? actual == null : actual != null;
+    }
     const m = cond.match(/(?:"([a-z_]+)"\.)?"?([a-z_]+)"?\s*=\s*\$(\d+)/i);
     if (!m) return true;
     const column = m[2];
@@ -482,18 +503,65 @@ class FakePg {
       return { rows: projected, rowCount: projected.length, command: "SELECT" };
     }
 
-    if ((m = sql.match(/^update "?([a-z_]+)"? set ([\s\S]*?)( where ([\s\S]*?))?$/i))) {
+    // UPDATE ... RETURNING: pre-extract the returning clause so the WHERE
+    // matcher sees only the predicate (the claim on the ledger row), then
+    // project the updated rows to the requested columns below.
+    let updateReturning: string[] | null = null;
+    let updateSql = sql;
+    if (lower.startsWith("update")) {
+      const retMatch = updateSql.match(/\breturning\s+([\s\S]+)$/i);
+      if (retMatch) {
+        updateReturning = splitTop(retMatch[1], ",").map((piece) => {
+          const parts = piece.trim().replace(/"/g, "").split(".");
+          return parts[parts.length - 1].trim();
+        });
+        updateSql = updateSql.slice(0, retMatch.index).trim();
+      }
+    }
+
+    if ((m = updateSql.match(/^update "?([a-z_]+)"? set ([\s\S]*?)( where ([\s\S]*?))?$/i))) {
       const table = m[1];
       this.assertTable(table);
       const assignments = splitTop(m[2], ",");
       const written: string[] = [];
       const parsed: { column: string; value: unknown }[] = [];
+      const arithmetic: { column: string; apply: (current: number) => number }[] = [];
       for (const assignment of assignments) {
         const a = assignment.match(/"([a-z_]+)"\s*=\s*\$(\d+)/i);
-        if (!a) continue;
-        this.assertColumn(table, a[1], true);
-        parsed.push({ column: a[1], value: params[Number(a[2]) - 1] });
-        written.push(a[1]);
+        if (a) {
+          this.assertColumn(table, a[1], true);
+          parsed.push({ column: a[1], value: params[Number(a[2]) - 1] });
+          written.push(a[1]);
+          continue;
+        }
+        // Self-arithmetic: "col" = "col" + $n[::numeric] / - $n — the
+        // overdraft-safe balance/points pattern (never a computed absolute).
+        const arith = assignment.match(
+          /(?:\"([a-z_]+)\"\.)?\"([a-z_]+)\"\s*=\s*(?:\"([a-z_]+)\"\.)?\"([a-z_]+)\"\s*(\+|-)\s*\$(\d+)(?:::numeric)?/i,
+        );
+        if (arith) {
+          const column = arith[2];
+          this.assertColumn(table, column, true);
+          const sign = arith[5] === "+" ? 1 : -1;
+          const delta = Number(params[Number(arith[6]) - 1]);
+          arithmetic.push({ column, apply: (current) => current + sign * delta });
+          written.push(column);
+          continue;
+        }
+        // Clamped decrement: "col" = GREATEST(0, "col" - $n) — the points
+        // clawback pattern (never below the floor).
+        const greatest = assignment.match(
+          /(?:\"([a-z_]+)\"\.)?\"([a-z_]+)\"\s*=\s*GREATEST\(\s*(\d+)\s*,\s*(?:\"([a-z_]+)\"\.)?\"([a-z_]+)\"\s*-\s*\$(\d+)\s*\)/i,
+        );
+        if (greatest) {
+          const column = greatest[2];
+          this.assertColumn(table, column, true);
+          const floor = Number(greatest[3]);
+          const delta = Number(params[Number(greatest[6]) - 1]);
+          arithmetic.push({ column, apply: (current) => Math.max(floor, current - delta) });
+          written.push(column);
+          continue;
+        }
       }
       const targets = this.filter(table, m[4], params);
       for (const row of targets) {
@@ -501,8 +569,20 @@ class FakePg {
           this.assertEnumValue(table, column, value);
           row[column] = value;
         }
+        for (const { column, apply } of arithmetic) {
+          const next = apply(Number(row[column] ?? 0));
+          row[column] = column === "points" ? Math.max(0, Math.round(next)) : next.toFixed(2);
+        }
       }
-      this.captured.push({ kind: "update", table, columns: written });
+      this.captured.push({ kind: "update", table, columns: written, sql: sqlRaw });
+      if (updateReturning) {
+        this.selectOrder = updateReturning;
+        return {
+          rows: targets.map((row) => this.pick(row, updateReturning!)),
+          rowCount: targets.length,
+          command: "UPDATE",
+        };
+      }
       return { rows: targets, rowCount: targets.length, command: "UPDATE" };
     }
 

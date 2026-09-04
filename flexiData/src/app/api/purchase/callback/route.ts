@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { eq, or } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { transactions, wallets } from "@/db/schema";
 import {
@@ -233,78 +233,147 @@ export async function POST(req: Request) {
     const wasRefunded = Boolean(tx.refundedAt);
     const wasSuccessful = tx.status === "successful";
     const earnedPoints = Math.max(1, Math.round(amount * POINTS_RATE));
+    const isSuccess = normalized.status === "successful";
+    const isFailure = normalized.status === "failed" || normalized.status === "reversed";
 
-    let balance = Number(wallet.balance);
-    let points = wallet.points;
     let txPoints = tx.points;
     let chargedAt = tx.chargedAt;
     let fulfilledAt = tx.fulfilledAt;
     let refundedAt = tx.refundedAt;
 
-    if (normalized.status === "successful") {
-      if (!wasCharged) {
-        balance -= amount;
-        chargedAt = now;
-      }
-      if (!wasSuccessful && tx.points === 0) {
-        points += earnedPoints;
-        txPoints = earnedPoints;
-      }
+    // Money/points intents — the same business rules this route has always
+    // applied, but they are no longer computed against a stale wallet snapshot
+    // and written back as absolute values (a read-modify-write that could
+    // silently erase a concurrent deposit, transfer, or purchase — and whose
+    // ledger flag was written AFTER the wallet in a separate statement, so a
+    // failure in between let the provider's redelivery refund twice).
+    //
+    // Instead: ONE conditional claim on the ledger row (the WHERE clause
+    // carries the exact precondition of the mutation — refunded_at IS NULL /
+    // charged_at IS NULL / points = 0), and only the single caller that wins
+    // the claim applies the wallet change as SQL arithmetic — all inside one
+    // transaction. Concurrent duplicate deliveries therefore apply exactly
+    // once, and the balance can never be computed from stale state.
+    const refundWallet = isFailure && wasCharged && !wasRefunded;
+    const clawbackPoints = isFailure && wasSuccessful && tx.points > 0;
+    const chargeWallet = isSuccess && !wasCharged;
+    const awardPoints = isSuccess && !wasSuccessful && tx.points === 0;
+    const walletMutation = refundWallet || clawbackPoints || chargeWallet || awardPoints;
+
+    if (isSuccess) {
+      if (chargeWallet) chargedAt = now;
+      if (awardPoints) txPoints = earnedPoints;
       fulfilledAt = now;
       refundedAt = null;
     }
-
-    if (normalized.status === "failed" || normalized.status === "reversed") {
-      if (wasCharged && !wasRefunded) {
-        balance += amount;
-        refundedAt = now;
-      }
-      if (wasSuccessful && tx.points > 0) {
-        points = Math.max(0, points - tx.points);
-        txPoints = 0;
-      }
+    if (isFailure) {
+      if (refundWallet) refundedAt = now;
+      if (clawbackPoints) txPoints = 0;
       fulfilledAt = null;
     }
 
-    if (balance !== Number(wallet.balance) || points !== wallet.points) {
-      await db
-        .update(wallets)
-        .set({
-          balance: balance.toFixed(2),
-          points,
-        })
-        .where(eq(wallets.id, wallet.id));
-    }
-
-    await withSchemaFallback(async (compat) => {
+    // The settlement is built through `withSchemaFallback`: its capability
+    // probe runs on its own connection BEFORE the transaction below opens
+    // (same pattern as the deposit settle path in src/lib/deposits.ts), and a
+    // schema-incompatible error downgrades the caps and re-runs the whole
+    // transaction against the legacy schema — status coerced for the legacy
+    // enum, gateway columns omitted.
+    const buildPatch = (caps: SchemaCapabilities) => ({
       // A legacy `tx_status` enum has no "reversed" label; a refund is still a
-      // non-successful outcome there, and the wallet above was already credited.
-      const status = supportsTxStatusValue(compat, normalized.status)
+      // non-successful outcome there, and the wallet below was already
+      // credited.
+      status: supportsTxStatusValue(caps, normalized.status)
         ? normalized.status
         : normalized.status === "reversed"
-          ? "failed"
-          : normalized.status;
+          ? ("failed" as const)
+          : normalized.status,
+      fulfillmentStatus: normalized.fulfillmentStatus,
+      subtitle: buildSubtitle(tx.recipient, normalized.status, normalized.providerMessage),
+      points: txPoints,
+      providerReference: normalized.providerReference ?? tx.providerReference,
+      providerStatus: normalized.providerStatus,
+      providerMessage: clampText(normalized.providerMessage),
+      fulfilledAt,
+      refundedAt,
+      chargedAt,
+      lastProviderSyncAt: now,
+      providerResponse: payload,
+    });
 
-      const patch = {
-        status,
-        fulfillmentStatus: normalized.fulfillmentStatus,
-        subtitle: buildSubtitle(tx.recipient, normalized.status, normalized.providerMessage),
-        points: txPoints,
-        providerReference: normalized.providerReference ?? tx.providerReference,
-        providerStatus: normalized.providerStatus,
-        providerMessage: clampText(normalized.providerMessage),
-        fulfilledAt,
-        refundedAt,
-        chargedAt,
-        lastProviderSyncAt: now,
-        providerResponse: payload,
-      };
+    if (walletMutation) {
+      const outcome = await withSchemaFallback(async (caps) => {
+        return db.transaction(async (txdb) => {
+          // Claim the ledger row: the conditional UPDATE hands the row to
+          // exactly one concurrent delivery of this event. Everyone else gets
+          // zero rows and must not touch the wallet. The guards are the exact
+          // preconditions of the mutation, so a redelivery that arrives after
+          // the first one applied loses the claim.
+          const guards = [
+            ...(chargeWallet && hasTransactionColumn(caps, "chargedAt")
+              ? [isNull(transactions.chargedAt)]
+              : []),
+            ...(refundWallet && hasTransactionColumn(caps, "refundedAt")
+              ? [isNull(transactions.refundedAt)]
+              : []),
+            ...(awardPoints ? [eq(transactions.points, 0)] : []),
+          ];
+          const claimed = await txdb
+            .update(transactions)
+            .set(omitMissingGatewayColumns(caps, "transactions", buildPatch(caps)))
+            .where(guards.length > 0 ? and(eq(transactions.id, tx.id), ...guards) : eq(transactions.id, tx.id))
+            .returning({ id: transactions.id });
 
-      await db
-        .update(transactions)
-        .set(omitMissingGatewayColumns(compat, "transactions", patch))
-        .where(eq(transactions.id, tx.id));
-    }, "callback reconciliation write");
+          if (!claimed[0]) {
+            // Lost the race: a concurrent delivery of the same event already
+            // applied the ledger patch and the wallet mutation.
+            return { applied: false as const };
+          }
+
+          // Atomic wallet arithmetic on the LIVE row — never a value derived
+          // from the earlier read, so a deposit/transfer/purchase that commits
+          // concurrently cannot be clobbered. (The charge-on-confirmation
+          // debit is deliberately not bounded by `balance >= amount`: the
+          // bundle was already delivered, so the honest outcome is the same
+          // debt record the route has always written — now without corrupting
+          // the balance.)
+          const updated = await txdb
+            .update(wallets)
+            .set({
+              ...(refundWallet
+                ? { balance: sql`${wallets.balance} + ${amount.toFixed(2)}::numeric` }
+                : chargeWallet
+                  ? { balance: sql`${wallets.balance} - ${amount.toFixed(2)}::numeric` }
+                  : {}),
+              ...(clawbackPoints
+                ? { points: sql`GREATEST(0, ${wallets.points} - ${tx.points})` }
+                : awardPoints
+                  ? { points: sql`${wallets.points} + ${earnedPoints}` }
+                  : {}),
+            })
+            .where(eq(wallets.id, wallet.id))
+            .returning({ balance: wallets.balance, points: wallets.points });
+
+          return {
+            applied: true as const,
+            balance: Number(updated[0]?.balance ?? wallet.balance),
+            points: updated[0]?.points ?? wallet.points,
+          };
+        });
+      }, "callback settlement");
+
+      if (!outcome.applied) {
+        console.info(`[callback] ${tx.ref}: settlement claim lost — a concurrent delivery already applied it`);
+      }
+    } else {
+      // No money movement for this event (already-terminal delivery, or a
+      // plain status/message sync): best-effort ledger-only write.
+      await withSchemaFallback(async (caps) => {
+        await db
+          .update(transactions)
+          .set(omitMissingGatewayColumns(caps, "transactions", buildPatch(caps)))
+          .where(eq(transactions.id, tx.id));
+      }, "callback reconciliation write");
+    }
 
     if (tx.network) {
       if (normalized.floatBalance != null) {
