@@ -17,7 +17,8 @@
     "verify:auth-flow": "tsx scripts/verify-auth-flow.ts",
     "verify:demo-deposit-cleanup": "tsx scripts/verify-demo-deposit-cleanup.ts",
     "cleanup:demo-deposits": "tsx scripts/cleanup-demo-deposits.ts",
-    "report:paystack-transactions": "tsx scripts/report-paystack-transactions.ts"
+    "report:paystack-transactions": "tsx scripts/report-paystack-transactions.ts",
+    "report:wallet-audit": "tsx scripts/report-wallet-audit.ts"
   },
   "dependencies": {
     "@fontsource-variable/manrope": "^5.3.0",
