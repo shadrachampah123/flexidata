@@ -73,6 +73,10 @@ export const SIGNUP_INSERT_FIELDS = {
     notifyPromos: "notify_promos",
     notifyTx: "notify_tx",
     isAdmin: "is_admin",
+    // Optional (has a database default): tracked here so a deployment whose
+    // users table predates the customer-management migration is detected as
+    // drifted and the column is simply left out of the insert.
+    status: "status",
     createdAt: "created_at",
     updatedAt: "updated_at",
   },
@@ -362,6 +366,9 @@ async function probeCapabilities(): Promise<SchemaCapabilities> {
       "deposit_requests",
       ...SIGNUP_TABLES,
       ...AUTH_WRITE_TABLES,
+      // Customer-management audit trail (Phase 2, Step 1): read by the customer
+      // detail screen, which must degrade to an empty history on a lagging DB.
+      "admin_audit_logs",
     ]
       .map((table) => `('${table}')`)
       .join(", ");

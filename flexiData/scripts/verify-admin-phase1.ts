@@ -7,8 +7,11 @@
  *   A. Pure functions        masking, filter parsing, reconciliation classifier.
  *   B. Statement guard       the JS-level guard refuses anything that is not a read.
  *   C. Source guarantees     every admin handler/page calls the gate; no mutation
- *                            API is used anywhere under `src/lib/admin`; no
- *                            migration was added.
+ *                            API is used anywhere under `src/lib/admin`; the only
+ *                            browser write surface is the confirmed
+ *                            suspend/activate action; the only migration is the
+ *                            reviewed customer-management one, which touches no
+ *                            financial table.
  *   D. Database enforcement  PostgreSQL itself rejects a write inside the admin
  *                            transaction (SQLSTATE 25006), independent of the
  *                            JS guard.
@@ -29,7 +32,6 @@
  * Usage: npm run verify:admin-phase1
  */
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -560,32 +562,61 @@ async function main(): Promise<void> {
     });
   }
 
-  // The browser can only ever ask for data: no client component or admin page
-  // may issue a non-GET request, so no write path can be reached from the UI.
+  // The browser can only ever ask for data, with ONE deliberate exception added
+  // by Phase 2: the customer-actions confirmation, which POSTs to the gated
+  // customer-status endpoint and can never move money. Everything else must
+  // remain read-only.
   const browserFacing = [
     ...walk(path.join(process.cwd(), "src/app/admin")),
     ...walk(path.join(process.cwd(), "src/components/admin")),
   ];
   const writeCalls = /\bmethod:\s*["'](POST|PUT|PATCH|DELETE)["']|\.post\(|\.put\(|\.patch\(|\.delete\(|\baction=\{/i;
+  const CUSTOMER_ACTIONS = path.join(process.cwd(), "src/components/admin/customer-actions.tsx");
   for (const file of browserFacing) {
     const source = readFileSync(file, "utf8");
-    check(`${file.replace(process.cwd(), "")} issues no non-GET request`, !writeCalls.test(source));
+    const rel = file.replace(process.cwd(), "");
+    if (file === CUSTOMER_ACTIONS) {
+      check(
+        `${rel} is the sole write surface and posts only to the gated status endpoint`,
+        source.includes("/api/admin/users/") &&
+          source.includes("/status") &&
+          source.includes("confirm: true") &&
+          !/method:\s*["'](PUT|PATCH|DELETE)["']/.test(source),
+      );
+      continue;
+    }
+    check(`${rel} issues no non-GET request`, !writeCalls.test(source));
   }
 
-  // No migration: the drizzle directory and the schema must be untouched.
-  let gitClean = true;
-  let gitDetail = "";
-  try {
-    const changed = execFileSync("git", ["status", "--porcelain", "--", "drizzle", "src/db/schema.ts"], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-    }).trim();
-    gitClean = changed.length === 0;
-    gitDetail = changed;
-  } catch (error) {
-    gitDetail = `git unavailable: ${(error as Error).message}`;
-  }
-  check("no migration or schema change (drizzle/ and src/db/schema.ts are clean)", gitClean, gitDetail);
+  // Phase 2 deliberately adds a reviewed migration (`users.status` +
+  // `admin_audit_logs`). Assert it is exactly what was approved and that it
+  // touches no financial table — the read-only guarantee over money is
+  // unchanged.
+  const drizzleDir = path.join(process.cwd(), "drizzle");
+  const migrationFiles = readdirSync(drizzleDir).filter((f) => f.endsWith(".sql")).sort();
+  check("migrations present (0000/0001/0002)", migrationFiles.length >= 3, migrationFiles);
+  const phase2Migration = migrationFiles
+    .filter((f) => f.startsWith("0002"))
+    .map((f) => readFileSync(path.join(drizzleDir, f), "utf8"))
+    .join("\n");
+  check("the Phase 2 customer-management migration exists", phase2Migration.length > 0);
+  const financialTables = [
+    "wallets",
+    "transactions",
+    "deposit_requests",
+    "checkout_orders",
+    "provider_float_balances",
+    "agent_profiles",
+    "bundle_plans",
+    "scheduled_topups",
+    "price_alerts",
+  ];
+  const touchedFinancial = financialTables.filter((t) =>
+    new RegExp(`(create table|alter table)\\s+"?${t}"?`, "i").test(phase2Migration),
+  );
+  check("the Phase 2 migration touches no financial table", touchedFinancial.length === 0, touchedFinancial);
+  check("the Phase 2 migration adds users.status", /add column "status"/i.test(phase2Migration));
+  check("the Phase 2 migration creates admin_audit_logs", /create table "admin_audit_logs"/i.test(phase2Migration));
 
   // -------------------------------------------------------------------------
   section("D–G. Live database checks");

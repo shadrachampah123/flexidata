@@ -98,6 +98,7 @@ const USERS = [
   "notify_promos",
   "notify_tx",
   "is_admin",
+  "status",
   "created_at",
   "updated_at",
 ];
@@ -112,6 +113,14 @@ const SESSIONS = [
   "expires_at",
 ];
 const PASSWORD_RESETS = ["id", "user_id", "token_hash", "used_at", "expires_at", "created_at"];
+const ADMIN_AUDIT_LOGS = [
+  "id",
+  "admin_user_id",
+  "target_user_id",
+  "action",
+  "reason",
+  "created_at",
+];
 const DEPOSIT_REQUESTS = [
   "id",
   "ref",
@@ -162,6 +171,7 @@ const schema: Schema = {
       "created_at",
     ],
     agent_profiles: ["id", "wallet_id", "tier", "referral_code", "referrals", "commission", "volume", "created_at"],
+    admin_audit_logs: ADMIN_AUDIT_LOGS,
   },
   enums: {
     tx_status: migrated
@@ -216,6 +226,7 @@ class FakePg {
     price_alerts: [],
     scheduled_topups: [],
     agent_profiles: [],
+    admin_audit_logs: [],
   };
   captured: { kind: string; table: string; columns: string[]; sql?: string }[] = [];
   errors: string[] = [];
@@ -317,6 +328,7 @@ class FakePg {
         row[column] = new Date();
       else if (column === "points" || column === "fulfillment_attempts") row[column] = 0;
       else if (column === "subtitle") row[column] = "";
+      else if (column === "status") row[column] = "active";
       else if (column === "fulfillment_status") row[column] = "queued";
       else if (column === "currency") row[column] = "GHS";
       else if (column === "is_agent" || column === "active") row[column] = false;

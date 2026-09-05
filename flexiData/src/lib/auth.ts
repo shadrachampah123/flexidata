@@ -259,6 +259,14 @@ export type AuthUser = {
   notifyPromos: boolean;
   notifyTx: boolean;
   isAgent: boolean;
+  /**
+   * True while the account is suspended by an administrator (Phase 2, Step 1).
+   * Read from `users.status` on every request, so a suspension blocks the very
+   * next authenticated customer action. On a database that predates the
+   * customer-management migration the column is absent and this is `false`
+   * (nothing can be suspended there anyway, since the suspend write needs it).
+   */
+  suspended: boolean;
 };
 
 async function findUserBySessionToken(token: string): Promise<AuthUser | null> {
@@ -313,6 +321,14 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
 
 /** Resolve the AuthUser for an id directly (test seam / internal callers). */
 export async function getAuthUserById(userId: number): Promise<AuthUser | null> {
+  // `users.status` arrives with the customer-management migration. A deployment
+  // whose users table predates it must keep authenticating — the suspend write
+  // itself requires the column, so such a database can never have a suspended
+  // account — so the missing column reads as `suspended = false` rather than a
+  // hard outage. (Same degrade-around-lagging-schema rule as the rest of auth.)
+  const caps = await getSchemaCapabilities();
+  const hasStatus = missingTableColumns(caps, "users", ["status"]).length === 0;
+
   const rows = await db
     .select({
       id: users.id,
@@ -323,18 +339,23 @@ export async function getAuthUserById(userId: number): Promise<AuthUser | null> 
       referredBy: users.referredBy,
       notifyPromos: users.notifyPromos,
       notifyTx: users.notifyTx,
+      ...(hasStatus ? { status: users.status } : {}),
     })
     .from(users)
     .where(eq(users.id, userId))
     .limit(1);
-  const row = rows[0];
+  const row = rows[0] as (typeof rows)[number] & { status?: string | null };
   if (!row) return null;
   const walletRows = await db
     .select({ isAgent: wallets.isAgent })
     .from(wallets)
     .where(eq(wallets.userId, userId))
     .limit(1);
-  return { ...row, isAgent: walletRows[0]?.isAgent ?? false };
+  return {
+    ...row,
+    isAgent: walletRows[0]?.isAgent ?? false,
+    suspended: hasStatus && row.status === "suspended",
+  };
 }
 
 export async function destroyCurrentSession(): Promise<void> {

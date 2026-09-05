@@ -26,6 +26,7 @@ import {
 import { clampText, maskEmail, maskPhone } from "@/lib/admin/redact";
 import { likePattern, offsetFor, parsePageSize, parseSearch, type AdminList } from "@/lib/admin/filters";
 import type {
+  AccountStatusView,
   AdminCapsView,
   AdminFloatRow,
   AdminIssue,
@@ -148,6 +149,21 @@ function searchAny(term: string, columns: SQL[]): SQL | null {
 }
 
 const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+
+/** `active` / `suspended` / null — an unknown or missing value is "not available". */
+function accountStatusOf(value: unknown): AccountStatusView {
+  return value === "active" || value === "suspended" ? value : null;
+}
+
+/** Columns the customer-management audit table is expected to carry. */
+const ADMIN_AUDIT_LOG_COLUMNS = [
+  "id",
+  "admin_user_id",
+  "target_user_id",
+  "action",
+  "reason",
+  "created_at",
+] as const;
 
 // ---------------------------------------------------------------------------
 // 1. Overview
@@ -807,7 +823,8 @@ export type UserQuery = {
 };
 
 export async function loadUsers(query: UserQuery): Promise<AdminList<AdminUserRow>> {
-  return withSchemaFallback(async () => {
+  return withSchemaFallback(async (rawCaps) => {
+    const hasStatus = hasTableColumns(rawCaps, "users", ["status"]);
     const term = parseSearch(query.search);
     const pageSize = parsePageSize(query.pageSize);
     const page = Math.max(1, Math.trunc(query.page ?? 1));
@@ -829,6 +846,7 @@ export async function loadUsers(query: UserQuery): Promise<AdminList<AdminUserRo
           "u"."id" as "userId", "u"."name" as "name", "u"."email" as "email", "u"."phone" as "phone",
           "u"."created_at" as "createdAt", "u"."email_verified_at" as "emailVerifiedAt",
           "u"."is_admin" as "isAdmin", "u"."referral_code" as "referralCode",
+          ${hasStatus ? sql`"u"."status" as "status"` : sql`null::text as "status"`},
           "w"."wallet_id" as "walletId", coalesce("w"."wallet_count", 0)::int as "walletCount",
           coalesce("w"."balance", 0)::text as "balance", coalesce("w"."points", 0)::int as "points",
           coalesce("s"."active_sessions", 0)::int as "activeSessions", "s"."last_seen_at" as "lastSeenAt"
@@ -861,6 +879,7 @@ export async function loadUsers(query: UserQuery): Promise<AdminList<AdminUserRo
           emailVerifiedAt: iso(row.emailVerifiedAt),
           isAdmin: Boolean(row.isAdmin),
           referralCode: text(row.referralCode),
+          status: accountStatusOf(row.status),
           walletId: row.walletId === null || row.walletId === undefined ? null : Number(row.walletId),
           walletCount: Number(row.walletCount ?? 0),
           balance: money2(row.balance),
@@ -879,13 +898,16 @@ export async function loadUsers(query: UserQuery): Promise<AdminList<AdminUserRo
 export async function loadUserDetail(userId: number): Promise<AdminUserDetail | null> {
   return withSchemaFallback(async (rawCaps) => {
     const caps = toAdminCaps(rawCaps);
+    const hasStatus = hasTableColumns(rawCaps, "users", ["status"]);
+    const hasAuditTable = hasTableColumns(rawCaps, "admin_audit_logs", ADMIN_AUDIT_LOG_COLUMNS);
 
     return withReadOnlyTx("admin.user-detail", async (tx) => {
       const row = await first<Record<string, unknown>>(
         tx,
         sql`select "id", "name", "email", "phone", "created_at", "updated_at",
                    "email_verified_at", "is_admin", "referral_code", "referred_by",
-                   "referral_rewarded_at", "notify_promos", "notify_tx"
+                   "referral_rewarded_at", "notify_promos", "notify_tx",
+                   ${hasStatus ? sql`"status"` : sql`null::text as "status"`}
             from "users" where "id" = ${userId} limit 1`,
       );
       if (!row) return null;
@@ -945,6 +967,23 @@ export async function loadUserDetail(userId: number): Promise<AdminUserDetail | 
           )
         : [];
 
+      // Suspend / activate history. Degrades to an empty list on a database that
+      // predates the customer-management migration (the capability probe tells
+      // us whether the table exists), rather than taking the page down.
+      const accountActions = hasAuditTable
+        ? await all<Record<string, unknown>>(
+            tx,
+            sql`select "a"."id", "a"."admin_user_id" as "adminUserId",
+                       "a"."action" as "action", "a"."reason" as "reason",
+                       "a"."created_at" as "createdAt",
+                       "adm"."name" as "adminName", "adm"."email" as "adminEmail"
+                from "admin_audit_logs" "a"
+                left join "users" "adm" on "adm"."id" = "a"."admin_user_id"
+                where "a"."target_user_id" = ${userId}
+                order by "a"."created_at" desc, "a"."id" desc limit 20`,
+          )
+        : [];
+
       return {
         user: {
           userId: Number(row.id),
@@ -955,6 +994,7 @@ export async function loadUserDetail(userId: number): Promise<AdminUserDetail | 
           updatedAt: iso(row.updated_at),
           emailVerifiedAt: iso(row.email_verified_at),
           isAdmin: Boolean(row.is_admin),
+          status: accountStatusOf(row.status),
           referralCode: text(row.referral_code),
           referredBy: row.referred_by === null || row.referred_by === undefined ? null : Number(row.referred_by),
           referralRewardedAt: iso(row.referral_rewarded_at),
@@ -1007,6 +1047,15 @@ export async function loadUserDetail(userId: number): Promise<AdminUserDetail | 
           deliverySeverity: "unknown" as const,
           createdAt: iso(order.createdAt) ?? "",
           updatedAt: iso(order.updatedAt),
+        })),
+        accountActions: accountActions.map((entry) => ({
+          id: Number(entry.id),
+          adminUserId: Number(entry.adminUserId),
+          adminName: text(entry.adminName),
+          adminEmail: text(entry.adminEmail),
+          action: (entry.action === "activate" ? "activate" : "suspend") as "suspend" | "activate",
+          reason: text(entry.reason),
+          createdAt: iso(entry.createdAt) ?? "",
         })),
         totals: {
           successfulDeposits: row0(totalsRow.deposits),

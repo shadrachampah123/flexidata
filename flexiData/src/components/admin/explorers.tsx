@@ -993,6 +993,17 @@ export function UsersExplorer({
     { key: "email", header: "Email", cell: (row) => <span className="font-mono text-[12px]">{row.email}</span> },
     { key: "phone", header: "Phone", cell: (row) => <span className="font-mono text-[12px]">{row.phone}</span> },
     {
+      key: "status",
+      header: "Status",
+      cell: (row) => (
+        <StatusPill
+          severity={row.status === "suspended" ? "critical" : row.status === "active" ? "healthy" : "unknown"}
+        >
+          {row.status === null ? "Not available" : row.status === "suspended" ? "Suspended" : "Active"}
+        </StatusPill>
+      ),
+    },
+    {
       key: "wallet",
       header: "Wallet",
       cell: (row) =>
@@ -1060,7 +1071,7 @@ export function UsersExplorer({
       pageSize={pageSize}
       rowKey={(row) => `user-${row.userId}`}
       emptyLabel="No customers match this search."
-      note="Contact details are masked in lists and shown in full only on a deliberately opened customer page. Accounts cannot be created, edited, suspended or promoted here."
+      note="Contact details are masked in lists and shown in full only on a deliberately opened customer page. Accounts cannot be created, edited or promoted here — suspend / activate lives on the customer page, behind an explicit confirmation."
     />
   );
 }
