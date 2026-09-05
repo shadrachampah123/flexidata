@@ -18,6 +18,8 @@
     "verify:admin-access": "tsx scripts/verify-admin-access.ts",
     "verify:admin-phase1": "tsx scripts/verify-admin-phase1.ts",
     "admin:grant": "tsx scripts/grant-admin.ts",
+    "admin:email": "tsx scripts/change-admin-email.ts",
+    "verify:admin-email-change": "tsx scripts/verify-admin-email-change.ts",
     "verify:demo-deposit-cleanup": "tsx scripts/verify-demo-deposit-cleanup.ts",
     "cleanup:demo-deposits": "tsx scripts/cleanup-demo-deposits.ts",
     "report:paystack-transactions": "tsx scripts/report-paystack-transactions.ts",

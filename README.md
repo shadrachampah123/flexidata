@@ -89,6 +89,76 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run verify:signup` | Sign-up regression checks against a real database (needs `DATABASE_URL`) |
 | `npm run verify:demo-deposit-cleanup` | Prove the demo-deposit cleanup tool reverses only mock credits (in-memory, no database needed) |
 | `npm run cleanup:demo-deposits` | Review-first reversal of demo/mock wallet deposit credits (`--apply` to run) |
+| `npm run admin:email` | Rename an administrator's login email in place (`--from`/`--to`, `--yes` to apply) |
+| `npm run verify:admin-email-change` | Prove the rename touches one row and nothing else, against a real PostgreSQL |
+
+## Renaming the administrator's email address
+
+An administrator's login address is renamed **in place** — the same `users` row,
+the same `id`, the same password hash, the same wallet and the same live
+sessions. A second account is never created, and no financial record is
+rewritten.
+
+```bash
+cd flexiData
+
+# 1. Inspect the account you are about to rename (read-only).
+npm run admin:email -- --from shadrachampah@gmail.com --status
+
+# 2. Dry run: prints the exact UPDATE and everything it preserves. No write.
+npm run admin:email -- --from shadrachampah@gmail.com --to shadrachampah123@gmail.com
+
+# 3. Apply it.
+npm run admin:email -- --from shadrachampah@gmail.com --to shadrachampah123@gmail.com --yes
+```
+
+The tool refuses to run — changing nothing — when
+
+- no account has the `--from` address, or
+- that account has `users.is_admin = false` (this tool only renames an
+  administrator, so a customer's address can never be repointed by mistake), or
+- **any** account already uses the `--to` address (checked case-insensitively
+  before anything is written; `users.email` is `UNIQUE`), or
+- `--yes` is missing (the default is a dry run).
+
+What it writes is exactly one statement, scoped to one row:
+
+```sql
+update "users" set "email" = $1, "updated_at" = now()
+ where "id" = $2 and "email" = $3 and "is_admin" = true
+```
+
+Everything else is guarded three ways. A statement guard refuses to send
+anything that is not a read or that exact UPDATE, so the tool has no code path
+to a wallet, a balance, a ledger row, a deposit, a checkout order, a scheduled
+top-up or a session. Inside the same transaction — *before* `COMMIT` — it
+re-reads an md5 content digest of every financial table and re-counts the
+admins, the users, the wallets and the sessions; any mismatch rolls the whole
+thing back. After `COMMIT` it reports that exactly one admin holds the new
+address and that the row differs from its pre-rename snapshot in `email` and
+`updated_at` alone.
+
+Two follow-ups the tool prints for you:
+
+- **`ADMIN_EMAILS` must be updated to the new address.** The admin gate needs
+  both `users.is_admin = true` *and* an entry in that environment allowlist, so
+  a renamed admin is locked out of `/admin` on their next request until the
+  variable lists the new address. The tool says so when the allowlist still
+  holds the old one.
+- **History keeps the old address on purpose.** `checkout_orders.customer_email`
+  is a point-in-time record of what Paystack was told, so it is not rewritten.
+
+`npm run verify:admin-email-change` proves all of the above against a real
+PostgreSQL: it spawns the CLI the way an operator does, seeds an admin with a
+wallet, sessions, ledger rows, a Paystack deposit and a paid checkout order, and
+asserts that every refusal changes nothing, that the rename changes only
+`email` + `updated_at`, that every other table is byte-identical, that the new
+address signs in with the *same* password while the old one no longer does, and
+that the same live session still passes the admin gate once the allowlist
+catches up. It uses `DATABASE_URL` only when `FLEXIDATA_ADMIN_EMAIL_TEST_DB=1`
+is also set, and otherwise starts a throwaway cluster through the optional
+`embedded-postgres` package (`npm i --no-save embedded-postgres`). With no
+database available it **fails** rather than reporting a hollow pass.
 
 ## Wallet deposits (Paystack)
 
