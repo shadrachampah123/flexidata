@@ -16,6 +16,7 @@
     "verify:signup": "tsx scripts/verify-signup.ts",
     "verify:auth-flow": "tsx scripts/verify-auth-flow.ts",
     "verify:admin-access": "tsx scripts/verify-admin-access.ts",
+    "verify:admin-phase1": "tsx scripts/verify-admin-phase1.ts",
     "admin:grant": "tsx scripts/grant-admin.ts",
     "verify:demo-deposit-cleanup": "tsx scripts/verify-demo-deposit-cleanup.ts",
     "cleanup:demo-deposits": "tsx scripts/cleanup-demo-deposits.ts",
