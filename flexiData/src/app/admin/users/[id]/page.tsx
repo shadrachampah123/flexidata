@@ -4,18 +4,20 @@ import { requireAdmin } from "@/lib/admin/auth";
 import { loadUserDetail } from "@/lib/admin/queries";
 import { AdminPageHead } from "@/components/admin/page-head";
 import { Badge, KeyValues, MoneyCell, Note, Panel, StatusPill } from "@/components/admin/ui";
+import { CustomerActions } from "@/components/admin/customer-actions";
 import { adminMoney, formatDateTime } from "@/lib/admin/format";
 
 /**
- * `/admin/users/[id]` — one customer, read-only.
+ * `/admin/users/[id]` — one customer.
  *
  * This is the deliberately opened single-record view, so the real email and
  * phone are shown (lists stay masked) and the recent session trail is included:
  * an operator investigating a disputed account needs the login history, and it
  * is one account at a time rather than a bulk list.
  *
- * Nothing here modifies the user: no reset, no suspension, no role change, no
- * deletion.
+ * The only change made from here is the explicitly-confirmed suspend / activate
+ * action (Phase 2, Step 1). No reset, no role change, no deletion, and nothing
+ * that touches a wallet, payment or ledger row.
  */
 export const dynamic = "force-dynamic";
 
@@ -31,7 +33,7 @@ export default async function AdminUserDetailPage({ params }: { params: Promise<
   const detail = await loadUserDetail(userId);
   if (!detail) notFound();
 
-  const { user, wallets, sessions, recentTransactions, recentOrders, totals } = detail;
+  const { user, wallets, sessions, recentTransactions, recentOrders, accountActions, totals } = detail;
   const primaryWallet = wallets[0];
 
   return (
@@ -40,9 +42,17 @@ export default async function AdminUserDetailPage({ params }: { params: Promise<
         title={user.name}
         subtitle={`Customer #${user.userId} · joined ${formatDateTime(user.createdAt)}`}
         actions={
-          <Link href="/admin/users" className="text-[12px] font-semibold opacity-65 hover:opacity-100">
-            ← All customers
-          </Link>
+          <div className="flex items-center gap-3">
+            <CustomerActions
+              userId={user.userId}
+              name={user.name}
+              status={user.status}
+              isAdmin={user.isAdmin}
+            />
+            <Link href="/admin/users" className="text-[12px] font-semibold opacity-65 hover:opacity-100">
+              ← All customers
+            </Link>
+          </div>
         }
       />
 
@@ -68,6 +78,17 @@ export default async function AdminUserDetailPage({ params }: { params: Promise<
 
         <Panel title="Account status" bodyClassName="px-4 py-3">
           <div className="mb-3 flex flex-wrap gap-1.5">
+            <StatusPill
+              severity={
+                user.status === "suspended" ? "critical" : user.status === "active" ? "healthy" : "unknown"
+              }
+            >
+              {user.status === null
+                ? "Status not available"
+                : user.status === "suspended"
+                  ? "Suspended"
+                  : "Active"}
+            </StatusPill>
             <StatusPill severity={user.isAdmin ? "attention" : "healthy"}>
               {user.isAdmin ? "Administrator" : "Standard account"}
             </StatusPill>
@@ -288,9 +309,40 @@ export default async function AdminUserDetailPage({ params }: { params: Promise<
         </Panel>
       </div>
 
+      <Panel
+        title="Account actions"
+        subtitle="Suspend and activate history for this account, most recent first."
+        bodyClassName="px-4 py-3"
+      >
+        {accountActions.length === 0 ? (
+          <Note>No suspend or activate actions have been recorded for this account.</Note>
+        ) : (
+          <ul className="space-y-2">
+            {accountActions.map((entry) => (
+              <li
+                key={entry.id}
+                className="rounded-xl border border-black/[0.06] px-3 py-2 text-[12px] dark:border-line"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5">
+                    <StatusPill severity={entry.action === "suspend" ? "critical" : "healthy"}>
+                      {entry.action === "suspend" ? "Suspended" : "Activated"}
+                    </StatusPill>
+                    <span className="opacity-60">by {entry.adminName ?? `admin #${entry.adminUserId}`}</span>
+                  </span>
+                  <span className="tabular-nums opacity-60">{formatDateTime(entry.createdAt)}</span>
+                </div>
+                {entry.reason && <p className="mt-1 opacity-60">Reason: {entry.reason}</p>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+
       <Note>
-        Read-only customer view. Accounts cannot be edited, suspended, promoted, password-reset or
-        deleted from the dashboard.
+        Customer view. The only change that can be made here is an explicitly-confirmed suspend or
+        activate. Accounts cannot be edited, promoted, password-reset or deleted, and no wallet,
+        payment or ledger record is ever modified.
       </Note>
     </div>
   );

@@ -264,6 +264,20 @@ export type AdminPaymentRow = {
 // Users
 // ---------------------------------------------------------------------------
 
+/** `null` when the database predates the customer-management migration. */
+export type AccountStatusView = "active" | "suspended" | null;
+
+/** One suspend / activate event from `admin_audit_logs`, for the customer page. */
+export type AdminAccountActionRow = {
+  id: number;
+  adminUserId: number;
+  adminName: string | null;
+  adminEmail: string | null;
+  action: "suspend" | "activate";
+  reason: string | null;
+  createdAt: string;
+};
+
 export type AdminUserRow = {
   userId: number;
   name: string;
@@ -274,6 +288,8 @@ export type AdminUserRow = {
   emailVerifiedAt: string | null;
   isAdmin: boolean;
   referralCode: string | null;
+  /** Account status; null = not available on a pre-migration database. */
+  status: AccountStatusView;
   walletId: number | null;
   /** More than one wallet for one user is a reconciliation finding, not a fix. */
   walletCount: number;
@@ -313,6 +329,7 @@ export type AdminUserDetail = {
     updatedAt: string | null;
     emailVerifiedAt: string | null;
     isAdmin: boolean;
+    status: AccountStatusView;
     referralCode: string | null;
     referredBy: number | null;
     referralRewardedAt: string | null;
@@ -323,6 +340,8 @@ export type AdminUserDetail = {
   sessions: AdminUserSessionRow[];
   recentTransactions: AdminTransactionRow[];
   recentOrders: AdminDataOrderRow[];
+  /** Suspend / activate history for this account (most recent first). */
+  accountActions: AdminAccountActionRow[];
   totals: {
     successfulDeposits: number | null;
     successfulDepositValue: number | null;

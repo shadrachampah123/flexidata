@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   serial,
@@ -10,6 +11,7 @@ import {
   jsonb,
   index,
   uniqueIndex,
+  check,
 } from "drizzle-orm/pg-core";
 
 export const txTypeEnum = pgEnum("tx_type", [
@@ -80,13 +82,23 @@ export const users = pgTable(
     notifyPromos: boolean("notify_promos").notNull().default(true),
     notifyTx: boolean("notify_tx").notNull().default(true),
     isAdmin: boolean("is_admin").notNull().default(false),
+    /**
+     * Customer account status. The only write path is the admin suspend /
+     * activate action (Phase 2, Step 1); it is read on every authenticated
+     * customer action so a suspension takes effect on the very next request.
+     * `active` is the fail-open default for every existing row.
+     */
+    status: varchar("status", { length: 20 }).notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   // Deliberately NOT unique: many users share one referrer. The "pay a
   // referrer only once" rule lives on `referralRewardedAt`, not here — a
   // unique index would reject the 2nd+ signup using any referral code.
-  (table) => [index("users_referred_by_idx").on(table.referredBy)],
+  (table) => [
+    index("users_referred_by_idx").on(table.referredBy),
+    check("users_status_check", sql`${table.status} in ('active', 'suspended')`),
+  ],
 );
 
 /**
@@ -347,3 +359,36 @@ export const agentProfiles = pgTable("agent_profiles", {
   volume: numeric("volume", { precision: 12, scale: 2 }).notNull().default("0"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Durable audit trail for the Phase 2, Step 1 customer-management action
+ * (suspend / activate). One row per *effective* status change — the writer is
+ * guarded by a conditional UPDATE so replaying the same action never inserts a
+ * duplicate row.
+ *
+ * It records exactly what the requirement asks for and nothing else: the
+ * authenticated admin (from the server-side gate, never browser input), the
+ * target customer, the action, an optional operator-supplied reason, and a
+ * timestamp. `onDelete: "restrict"` keeps the trail intact even if an account
+ * is later removed by some other process.
+ */
+export const adminAuditLogs = pgTable(
+  "admin_audit_logs",
+  {
+    id: serial("id").primaryKey(),
+    adminUserId: integer("admin_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    targetUserId: integer("target_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    action: varchar("action", { length: 40 }).notNull(),
+    reason: varchar("reason", { length: 240 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("admin_audit_logs_target_idx").on(table.targetUserId),
+    index("admin_audit_logs_admin_idx").on(table.adminUserId),
+    check("admin_audit_logs_action_check", sql`${table.action} in ('suspend', 'activate')`),
+  ],
+);

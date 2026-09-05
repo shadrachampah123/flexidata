@@ -46,7 +46,7 @@ export default async function AdminLayout({
             </span>
             <span className="font-display text-sm font-bold">FlexiData Operations</span>
             <span className="hidden rounded-md bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-400 sm:inline">
-              Read-only
+              No financial actions
             </span>
           </div>
           <div className="flex items-center gap-4">
@@ -64,8 +64,8 @@ export default async function AdminLayout({
           <div className="sticky top-[57px] max-h-[calc(100dvh-57px)] overflow-y-auto py-4">
             <AdminNav badges={badges} />
             <p className="mt-4 px-4 text-[10px] leading-relaxed opacity-45">
-              Phase 1 is an observation layer. Nothing on these screens can move money, change a
-              balance or alter an order.
+              Nothing on these screens can move money, change a balance or alter an order. The only
+              write is the explicitly-confirmed customer suspend / activate action.
             </p>
           </div>
         </aside>
