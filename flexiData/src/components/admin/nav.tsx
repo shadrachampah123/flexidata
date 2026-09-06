@@ -9,6 +9,8 @@ import {
   LifeBuoy,
   PackageSearch,
   PieChart,
+  ReceiptText,
+  ScrollText,
   Users,
   Wallet,
 } from "lucide-react";
@@ -22,17 +24,32 @@ import { cn } from "@/lib/format";
  * and holds no data — hiding a link is never the control, the layout gate is.
  */
 
-export type AdminNavBadges = { support: number | null; stuck: number | null };
+export type AdminNavBadges = {
+  support: number | null;
+  stuck: number | null;
+  /** Open refund reviews (Phase 2, Step 3); null when the schema cannot say. */
+  reviews: number | null;
+};
 
-const LINKS = [
+type BadgeKey = "support" | "reviews";
+
+const LINKS: {
+  href: string;
+  label: string;
+  icon: typeof Gauge;
+  exact?: boolean;
+  badge?: BadgeKey;
+}[] = [
   { href: "/admin", label: "Overview", icon: Gauge, exact: true },
-  { href: "/admin/attention", label: "Requires support", icon: LifeBuoy, badge: "support" as const },
+  { href: "/admin/attention", label: "Requires support", icon: LifeBuoy, badge: "support" },
+  { href: "/admin/reviews", label: "Refund reviews", icon: ReceiptText, badge: "reviews" },
   { href: "/admin/data", label: "Data operations", icon: PackageSearch },
   { href: "/admin/transactions", label: "Transactions", icon: ArrowLeftRight },
   { href: "/admin/payments", label: "Payments", icon: Wallet },
   { href: "/admin/wallets", label: "Wallets", icon: PieChart },
   { href: "/admin/reconciliation", label: "Reconciliation", icon: AlertTriangle },
   { href: "/admin/users", label: "Customers", icon: Users },
+  { href: "/admin/audit", label: "Admin activity", icon: ScrollText },
 ];
 
 export function AdminNav({ badges }: { badges: AdminNavBadges }) {
@@ -42,7 +59,7 @@ export function AdminNav({ badges }: { badges: AdminNavBadges }) {
     <nav className="flex gap-1 overflow-x-auto px-3 py-2 md:flex-col md:overflow-visible md:px-2 md:py-3">
       {LINKS.map((link) => {
         const active = link.exact ? pathname === link.href : pathname.startsWith(link.href);
-        const badgeValue = link.badge === "support" ? badges.support : null;
+        const badgeValue = link.badge ? (badges[link.badge] ?? null) : null;
         const Icon = link.icon;
         return (
           <Link
@@ -59,7 +76,14 @@ export function AdminNav({ badges }: { badges: AdminNavBadges }) {
             <Icon className="h-4 w-4 shrink-0" strokeWidth={2.2} />
             <span className="whitespace-nowrap">{link.label}</span>
             {badgeValue !== null && badgeValue > 0 && (
-              <span className="ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-rose-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
+              <span
+                className={cn(
+                  "ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full px-1.5 py-0.5 text-[10px] font-bold text-white",
+                  // Requires support is an incident (red); refund reviews are a
+                  // queue of decisions already recorded and waiting (amber).
+                  link.badge === "reviews" ? "bg-amber-500" : "bg-rose-500",
+                )}
+              >
                 {badgeValue > 99 ? "99+" : badgeValue}
               </span>
             )}

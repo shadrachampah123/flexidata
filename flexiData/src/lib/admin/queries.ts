@@ -165,6 +165,35 @@ const ADMIN_AUDIT_LOG_COLUMNS = [
   "created_at",
 ] as const;
 
+/**
+ * The same table once the support-workflow migration (0003) has been applied:
+ * order-level actions also fill `target_ref`. Probed separately so a database
+ * between the two migrations still reports account activity and simply has no
+ * order references. Declared here rather than imported from
+ * `queries-operations.ts` because that module imports THIS one — the read layer
+ * stays acyclic.
+ */
+const ADMIN_AUDIT_REF_COLUMNS = [...ADMIN_AUDIT_LOG_COLUMNS, "target_ref"] as const;
+
+/**
+ * Open refund reviews: a `refund_review` with no `delivery_resolved` recorded at
+ * or after it. The identical rule `loadRefundReviews()` and the pure
+ * `hasOpenRefundReview()` use, so the badge, the overview tile and the backlog
+ * page can never report different numbers.
+ */
+function openRefundReviewCountSql(): SQL {
+  return sql`(select count(*)::int
+        from "admin_audit_logs" "a"
+        where "a"."action" = 'refund_review'
+          and "a"."target_ref" is not null
+          and not exists (
+            select 1 from "admin_audit_logs" "b"
+            where "b"."target_ref" = "a"."target_ref"
+              and "b"."action" = 'delivery_resolved'
+              and "b"."created_at" >= "a"."created_at"
+          ))`;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Overview
 // ---------------------------------------------------------------------------
@@ -247,6 +276,16 @@ export async function loadOverview(): Promise<AdminOverview> {
 
       columns.push(sql`${discrepancyCountSql(caps)} as "walletDiscrepancies"`);
 
+      // Phase 2, Step 3: the refund-review backlog Step 2 could record but
+      // nothing could count. Null (rendered "Not available") on a database
+      // without the order-reference column, rather than a misleading zero.
+      const refTrail = hasTableColumns(rawCaps, "admin_audit_logs", ADMIN_AUDIT_REF_COLUMNS);
+      columns.push(
+        refTrail
+          ? sql`${openRefundReviewCountSql()} as "openRefundReviews"`
+          : sql`null::int as "openRefundReviews"`,
+      );
+
       const row = (await first<Record<string, unknown>>(tx, sql`select ${sql.join(columns, sql`, `)}`)) ?? {};
 
       const counts: AdminOverviewCounts = {
@@ -270,6 +309,7 @@ export async function loadOverview(): Promise<AdminOverview> {
         stuckCheckoutOrders: nullableInt(row.stuckCheckoutOrders),
         supportQueue: nullableInt(row.supportQueue),
         walletDiscrepancies: nullableInt(row.walletDiscrepancies ?? row.discrepancy ?? null),
+        openRefundReviews: nullableInt(row.openRefundReviews),
       };
 
       const float = caps.floatTable
@@ -306,10 +346,16 @@ export async function loadOverview(): Promise<AdminOverview> {
  * which is indexed on `order_status`) because the layout runs it on every admin
  * page. Anything that needs a ledger scan belongs on the overview, not here.
  */
-export async function loadNavBadges(): Promise<{ support: number | null; stuck: number | null }> {
+export async function loadNavBadges(): Promise<{
+  support: number | null;
+  stuck: number | null;
+  /** Open refund reviews; null when the audit trail cannot answer it. */
+  reviews: number | null;
+}> {
   return withSchemaFallback(async (rawCaps) => {
     const caps = toAdminCaps(rawCaps);
-    if (!caps.checkoutTable) return { support: null, stuck: null };
+    if (!caps.checkoutTable) return { support: null, stuck: null, reviews: null };
+    const refTrail = hasTableColumns(rawCaps, "admin_audit_logs", ADMIN_AUDIT_REF_COLUMNS);
     return withReadOnlyTx("admin.nav", async (tx) => {
       const row = await first<Record<string, unknown>>(
         tx,
@@ -319,9 +365,20 @@ export async function loadNavBadges(): Promise<{ support: number | null; stuck: 
                                 and "updated_at" < ${new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()}::timestamptz)::int as "stuck"
             from "checkout_orders"`,
       );
+      // One extra count over `admin_audit_logs`, which is a small table (one row
+      // per effective admin action) and is skipped entirely when the schema
+      // cannot answer it. Still cheap enough for a layout that runs per page.
+      const reviewRow = refTrail
+        ? await first<Record<string, unknown>>(tx, sql`select ${openRefundReviewCountSql()} as "c"`)
+        : null;
+
       return {
         support: row?.support === null || row?.support === undefined ? null : Number(row.support),
         stuck: row?.stuck === null || row?.stuck === undefined ? null : Number(row.stuck),
+        reviews:
+          !refTrail || reviewRow?.c === null || reviewRow?.c === undefined
+            ? null
+            : Number(reviewRow.c),
       };
     });
   }, "admin nav badges");
@@ -387,6 +444,14 @@ function buildIssues(counts: AdminOverviewCounts, float: Record<string, unknown>
     "critical",
     "Stored wallet balance does not match the balance calculated from the ledger.",
     "/admin/reconciliation?only=mismatches",
+  );
+  add(
+    "refund-reviews",
+    "Refund reviews awaiting a decision",
+    counts.openRefundReviews,
+    "critical",
+    "An administrator recorded that finance should look at refunding these orders. Recording a review moves no money, so each one is still waiting on a human decision.",
+    "/admin/reviews?state=open",
   );
   add(
     "stuck-orders",

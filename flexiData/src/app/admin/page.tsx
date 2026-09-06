@@ -192,6 +192,13 @@ export default async function AdminOverviewPage() {
             hint="Paid but unfulfilled for over two hours"
           />
           <StatTile
+            label="Open refund reviews"
+            value={counts.openRefundReviews}
+            severity={metricSeverity(counts.openRefundReviews)}
+            href="/admin/reviews?state=open"
+            hint="Recorded by an administrator, awaiting a human decision — no money moved"
+          />
+          <StatTile
             label="Pending deposits"
             value={counts.pendingDeposits}
             severity={metricSeverity(counts.pendingDeposits)}

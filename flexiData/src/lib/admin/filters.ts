@@ -69,6 +69,34 @@ export function parseId(value: unknown): number | null {
   return parsed;
 }
 
+/** Longest reference this dashboard will act on (`varchar(40)` in the schema). */
+export const MAX_REF_LENGTH = 40;
+/** Shortest plausible generated reference (`CO-XXXX` / `DP-XXXX` / `FD-XXXX`). */
+export const MIN_REF_LENGTH = 4;
+/** Generated references are base36 + a dash; nothing else is a reference. */
+const REF_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * A record reference (`CO-…` checkout order, `DP-…` deposit, `FD-…` ledger).
+ *
+ * Trimmed, length-bounded and charset-checked BEFORE it reaches a query, so a
+ * malformed value can never bend a statement — and rejected references cost
+ * zero database round trips.
+ *
+ * This is the read layer's copy of the contract `normalizeOrderRef()`
+ * (`src/lib/support-actions.ts`) enforces on the write side. The two are
+ * deliberately identical, and the Step 3 harness asserts they agree on the same
+ * inputs so a read view can never offer a reference the write surface would
+ * refuse (or vice versa).
+ */
+export function parseRef(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length < MIN_REF_LENGTH || trimmed.length > MAX_REF_LENGTH) return null;
+  if (!REF_PATTERN.test(trimmed)) return null;
+  return trimmed;
+}
+
 export function parseAmount(value: unknown): number | null {
   if (value === null || value === undefined || value === "") return null;
   const parsed = Number(value);
