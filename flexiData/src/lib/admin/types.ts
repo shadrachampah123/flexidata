@@ -179,6 +179,14 @@ export type AdminTransactionRow = {
 
 export type AdminDataChannel = "wallet" | "checkout";
 
+/**
+ * Order-level support actions recorded through the Phase 2 Step 2 write
+ * surface. They come from `admin_audit_logs`, NOT from the order row —
+ * `refund_review` in particular never changes the order: it records that a
+ * finance review is pending.
+ */
+export type AdminOrderSupportAction = "delivery_resolved" | "refund_review";
+
 export type AdminDataOrderRow = {
   channel: AdminDataChannel;
   id: number;
@@ -202,6 +210,10 @@ export type AdminDataOrderRow = {
   deliveryStatus: string | null;
   delivery: string;
   deliverySeverity: AdminSeverity;
+  /** Latest support action recorded for this order, if any (checkout only). */
+  supportAction: AdminOrderSupportAction | null;
+  /** When that action was recorded (checkout channel only). */
+  supportAt: string | null;
   createdAt: string;
   updatedAt: string | null;
 };
@@ -224,6 +236,25 @@ export type AdminAttentionRow = {
   status: string;
   reason: string;
   severity: AdminSeverity;
+  /**
+   * The latest support action recorded for this queue item, if any. Only
+   * checkout orders carry one — and `delivery_resolved` normally removes the
+   * order from this queue, so seeing it here means the record predates the
+   * queue refresh.
+   */
+  supportAction: AdminOrderSupportAction | null;
+  /** When that support action was recorded. */
+  supportAt: string | null;
+  /** Name of the admin who recorded it (admin-to-admin context, list-safe). */
+  supportAdminName: string | null;
+  /**
+   * Whether a support action MAY be attempted. True only for Paystack
+   * checkout orders with a captured payment whose delivery failed or has been
+   * stuck beyond the queue's window — the wallet-channel items are ledger rows
+   * (financial records this dashboard must never mutate) and deposits belong
+   * to the funding flow, so both stay read-only diagnostics by design.
+   */
+  actionable: boolean;
   createdAt: string;
   updatedAt: string | null;
 };

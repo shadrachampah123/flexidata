@@ -1,7 +1,7 @@
 import "server-only";
 
 import { sql, type SQL } from "drizzle-orm";
-import { withSchemaFallback } from "@/lib/schema-compat";
+import { hasTableColumns, withSchemaFallback } from "@/lib/schema-compat";
 import { withReadOnlyTx, countRows, iso, money2, type AdminExecutor } from "@/lib/admin/db";
 import { maskEmail, maskPhone, clampText } from "@/lib/admin/redact";
 import {
@@ -20,6 +20,7 @@ import type {
   AdminAttentionRow,
   AdminDataOrderRow,
   AdminDepositCreditState,
+  AdminOrderSupportAction,
   AdminPaymentRow,
   AdminSeverity,
   AdminTransactionRow,
@@ -281,7 +282,14 @@ function bucketCondition(bucket: DeliveryBucket, caps: AdminCaps): SQL | null {
     const unresolved = caps.fulfillmentStatus
       ? sql`("t"."fulfillment_status" = 'failed' or "t"."created_at" < ${agoIso(STUCK_AFTER_MS)}::timestamptz)`
       : sql`true`;
-    return sql`(${notRefunded} and ${tookMoney} and ${failedState} and ${unresolved})`;
+    // Ledger rows mirrored from a Paystack checkout order are the same order
+    // the checkout queue already lists (their money was never a wallet debit),
+    // so they must not appear twice — or linger after support resolved the
+    // order on its own channel.
+    const notCheckoutMirror = caps.checkoutTable
+      ? sql`not exists (select 1 from "checkout_orders" "co" where "co"."ref" = "t"."ref")`
+      : sql`true`;
+    return sql`(${notCheckoutMirror} and ${notRefunded} and ${tookMoney} and ${failedState} and ${unresolved})`;
   }
   return null;
 }
@@ -504,8 +512,25 @@ export async function loadDataOrders(
           ),
         );
         const buckets = await countCheckoutBuckets(tx);
+        // Phase 2 Step 2: decorate each order with its latest recorded support
+        // action, read from the audit trail in the same read-only transaction.
+        const supportReadable = hasSupportSchema(rawCaps);
+        const support = supportReadable
+          ? await loadSupportStateByRef(
+              tx,
+              rows.map((row) => String(row.ref ?? "")).filter((ref) => ref.length > 0),
+            )
+          : new Map<string, AdminSupportActionRecord>();
         return {
-          rows: rows.map((row) => mapCheckoutOrder(row)),
+          rows: rows.map((row) => {
+            const base = mapCheckoutOrder(row);
+            const record = support.get(base.ref);
+            return {
+              ...base,
+              supportAction: record?.action ?? null,
+              supportAt: record?.at ?? null,
+            };
+          }),
           total,
           page,
           pageSize,
@@ -676,6 +701,10 @@ function mapWalletOrder(row: Record<string, unknown>, caps: AdminCaps): AdminDat
     deliveryStatus: fulfillment,
     delivery: label.delivery,
     deliverySeverity: label.severity,
+    // Wallet-channel orders are ledger rows; support actions never apply (and
+    // the write surface refuses to mutate the ledger).
+    supportAction: null,
+    supportAt: null,
     createdAt: iso(row.createdAt) ?? "",
     // The ledger has no updated_at column: the last provider sync is the
     // closest existing "last touched" signal, and is null when the gateway
@@ -707,6 +736,10 @@ function mapCheckoutOrder(row: Record<string, unknown>): AdminDataOrderRow {
     deliveryStatus: orderStatus,
     delivery: label.delivery,
     deliverySeverity: label.severity,
+    // Filled by the caller when the support audit table is readable; a
+    // single record never carries an order action unless one was recorded.
+    supportAction: null,
+    supportAt: null,
     createdAt: iso(row.createdAt) ?? "",
     updatedAt: iso(row.updatedAt),
   };
@@ -715,6 +748,104 @@ function mapCheckoutOrder(row: Record<string, unknown>): AdminDataOrderRow {
 // ---------------------------------------------------------------------------
 // 5. Orders requiring support (the checkout.ts:541 queue and friends)
 // ---------------------------------------------------------------------------
+
+/**
+ * Capability probe for the Phase 2 Step 2 support workflow: the audit table
+ * exists AND carries the order-support columns the migration adds. A lagging
+ * database degrades every support view to "no recorded actions, no actions
+ * available" instead of erroring — reads must never depend on 0003 being
+ * applied, and the write surface fails closed with its own clear message.
+ */
+const SUPPORT_AUDIT_COLUMNS = [
+  "id",
+  "admin_user_id",
+  "target_user_id",
+  "action",
+  "reason",
+  "created_at",
+  "target_ref",
+] as const;
+
+export function hasSupportSchema(
+  caps: Parameters<typeof hasTableColumns>[0],
+): boolean {
+  return hasTableColumns(caps, "admin_audit_logs", SUPPORT_AUDIT_COLUMNS);
+}
+
+export type AdminSupportActionRecord = {
+  action: AdminOrderSupportAction | null;
+  at: string | null;
+  adminName: string | null;
+};
+
+/**
+ * Latest support action per order reference, read from `admin_audit_logs`
+ * inside the SAME read-only transaction as the list it decorates. This is a
+ * read: support state is derived from the audit trail, never stored on the
+ * order row.
+ */
+async function loadSupportStateByRef(
+  tx: AdminExecutor,
+  refs: string[],
+): Promise<Map<string, AdminSupportActionRecord>> {
+  const byRef = new Map<string, AdminSupportActionRecord>();
+  if (refs.length === 0) return byRef;
+  const list = sql.join(
+    refs.map((ref) => sql`${ref}`),
+    sql`, `,
+  );
+  const found = await all<Record<string, unknown>>(
+    tx,
+    sql`select distinct on ("a"."target_ref")
+               "a"."target_ref" as "ref", "a"."action" as "action",
+               "a"."created_at" as "createdAt", "adm"."name" as "adminName"
+        from "admin_audit_logs" "a"
+        left join "users" "adm" on "adm"."id" = "a"."admin_user_id"
+        where "a"."target_ref" in (${list})
+          and "a"."action" in ('delivery_resolved', 'refund_review')
+        order by "a"."target_ref" asc, "a"."created_at" desc, "a"."id" desc`,
+  );
+  for (const row of found) {
+    const ref = String(row.ref ?? "");
+    const rawAction = String(row.action ?? "");
+    byRef.set(ref, {
+      action:
+        rawAction === "delivery_resolved" || rawAction === "refund_review"
+          ? rawAction
+          : null,
+      at: iso(row.createdAt),
+      adminName: row.adminName ? clampText(String(row.adminName), 120) : null,
+    });
+  }
+  return byRef;
+}
+
+/**
+ * PURE mirror of the queue's own eligibility rule (kept in sync with
+ * `isSupportableOrder` in `src/lib/support-actions.ts`, which the write
+ * surface re-checks server-side; the harness asserts both agree): a support
+ * action may be offered only for a Paystack order whose payment was captured
+ * and whose delivery either failed outright or has been stuck beyond
+ * `STUCK_AFTER_MS`. Wallet-channel and deposit rows can never be actionable —
+ * the first are ledger records (financial data this dashboard must not
+ * mutate), the second belong to the funding flow.
+ */
+export function isAttentionRowActionable(input: {
+  paymentStatus: string;
+  orderStatus: string;
+  updatedAtMs: number | null;
+  now?: number;
+}): boolean {
+  if (input.paymentStatus !== "successful") return false;
+  if (input.orderStatus === "fulfillment_failed") return true;
+  if (input.orderStatus === "paid" || input.orderStatus === "fulfilling") {
+    return (
+      input.updatedAtMs !== null &&
+      (input.now ?? Date.now()) - input.updatedAtMs > STUCK_AFTER_MS
+    );
+  }
+  return false;
+}
 
 export type AttentionQuery = {
   source?: AdminAttentionSource | null;
@@ -756,10 +887,13 @@ export async function loadAttention(
   AdminList<AdminAttentionRow> & {
     counts: { checkout: number | null; wallet: number | null; deposit: number | null };
     capped: boolean;
+    /** False on a database that predates the support workflow schema (0003). */
+    actionsAvailable: boolean;
   }
 > {
   return withSchemaFallback(async (rawCaps) => {
     const caps = toAdminCaps(rawCaps);
+    const supportReadable = hasSupportSchema(rawCaps);
     const term = parseSearch(input.search);
     const pageSize = parsePageSize(input.pageSize);
     const page = Math.max(1, Math.trunc(input.page ?? 1));
@@ -816,14 +950,33 @@ export async function loadAttention(
                 where (${where}) and ${checkoutQueue}`,
           ),
         );
+        // Support state is derived from the audit trail (a read), never from
+        // the order row. Page-bounded: one lookup for the refs on this page.
+        const support = supportReadable
+          ? await loadSupportStateByRef(
+              tx,
+              found
+                .map((row) => String(row.ref ?? ""))
+                .filter((ref) => ref.length > 0),
+            )
+          : new Map<string, AdminSupportActionRecord>();
+
         for (const row of found) {
           const orderStatus = String(row.orderStatus ?? "");
           const paymentStatus = String(row.paymentStatus ?? "");
           const critical = orderStatus === "fulfillment_failed" || orderStatus === "fulfilling" || orderStatus === "paid";
+          const ref = String(row.ref ?? "");
+          const supportRecord = support.get(ref);
+          const updatedMs = (() => {
+            const at = iso(row.updatedAt);
+            if (!at) return null;
+            const ms = new Date(at).getTime();
+            return Number.isFinite(ms) ? ms : null;
+          })();
           rows.push({
             source: "checkout",
             id: Number(row.id),
-            ref: String(row.ref ?? ""),
+            ref,
             customerName: row.userName ? String(row.userName) : null,
             customerEmail: maskEmail(row.customerEmail),
             phone: maskPhone(row.recipient),
@@ -837,6 +990,12 @@ export async function loadAttention(
                 clampText(row.gatewayResponse ? String(row.gatewayResponse) : null, 160),
             ),
             severity: critical ? "critical" : "attention",
+            supportAction: supportRecord?.action ?? null,
+            supportAt: supportRecord?.at ?? null,
+            supportAdminName: supportRecord?.adminName ?? null,
+            actionable:
+              supportReadable &&
+              isAttentionRowActionable({ paymentStatus, orderStatus, updatedAtMs: updatedMs }),
             createdAt: iso(row.createdAt) ?? "",
             updatedAt: iso(row.updatedAt),
           });
@@ -865,6 +1024,13 @@ export async function loadAttention(
         const walletQueue = caps.fulfillmentStatus
           ? sql`(${failedState} and ("t"."fulfillment_status" = 'failed' or "t"."created_at" < ${agoIso(STUCK_AFTER_MS)}::timestamptz))`
           : sql`(${failedState} and "t"."created_at" < ${agoIso(STUCK_AFTER_MS)}::timestamptz)`;
+        // Ledger rows mirrored from a Paystack checkout order are the SAME order
+        // the checkout queue already lists; showing them again here would
+        // double-count the work item and leave a ghost behind after support
+        // resolves the order on its own channel.
+        const notCheckoutMirror = caps.checkoutTable
+          ? sql`and not exists (select 1 from "checkout_orders" "co" where "co"."ref" = "t"."ref")`
+          : sql``;
         const found = await all<Record<string, unknown>>(
           tx,
           sql`select "t"."id" as "id", "t"."ref" as "ref", "t"."recipient" as "recipient",
@@ -890,6 +1056,7 @@ export async function loadAttention(
                 and "t"."charged_at" is not null
                 and ${notRefunded}
                 and ${walletQueue}
+                ${notCheckoutMirror}
               order by "t"."created_at" asc
               limit ${ATTENTION_SOURCE_LIMIT}`,
         );
@@ -904,7 +1071,8 @@ export async function loadAttention(
                   and "t"."type" in ('data', 'airtime')
                   and "t"."charged_at" is not null
                   and ${notRefunded}
-                  and ${walletQueue}`,
+                  and ${walletQueue}
+                  ${notCheckoutMirror}`,
           ),
         );
         for (const row of found) {
@@ -923,6 +1091,13 @@ export async function loadAttention(
               ? "Wallet was charged and later refunded, but the order never completed."
               : "Wallet debit recorded but the bundle was never delivered and no refund is recorded.",
             severity: refunded ? "attention" : "critical",
+            // Wallet-channel items are ledger rows: the admin dashboard must
+            // never mutate the financial ledger, so support actions do not
+            // apply here by design.
+            supportAction: null,
+            supportAt: null,
+            supportAdminName: null,
+            actionable: false,
             createdAt: iso(row.createdAt) ?? "",
             updatedAt: iso(row.refundedAt),
           });
@@ -987,6 +1162,13 @@ export async function loadAttention(
               : clampText(row.gatewayResponse ? String(row.gatewayResponse) : null, 160) ??
                 "Deposit failed at the provider and was not credited.",
             severity: stuck ? "attention" : "critical",
+            // Deposits are funding attempts settled by the Paystack flow; no
+            // support action applies here, and none could be allowed to touch
+            // a deposit or a wallet credit.
+            supportAction: null,
+            supportAt: null,
+            supportAdminName: null,
+            actionable: false,
             createdAt: iso(row.initiatedAt) ?? "",
             updatedAt: iso(row.updatedAt),
           });
@@ -1008,6 +1190,7 @@ export async function loadAttention(
         pageSize,
         counts,
         capped,
+        actionsAvailable: supportReadable,
       };
     });
   }, "admin attention");

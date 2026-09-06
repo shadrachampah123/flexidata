@@ -49,6 +49,12 @@ export type AdminExplorerProps<T> = {
   rowKey: (row: T, index: number) => string;
   /** Extra query parameters that never change (e.g. a fixed channel). */
   fixedParams?: Record<string, string>;
+  /**
+   * Bumping this value re-runs the current GET request. Used after a support
+   * action records so the list shows its new state — it only ever triggers
+   * the same read, never a write.
+   */
+  refreshToken?: number;
   note?: ReactNode;
   toolbar?: ReactNode;
 };
@@ -65,6 +71,7 @@ export function AdminExplorer<T>({
   emptyLabel,
   rowKey,
   fixedParams,
+  refreshToken = 0,
   note,
   toolbar,
 }: AdminExplorerProps<T>) {
@@ -117,6 +124,15 @@ export function AdminExplorer<T>({
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query]);
+
+  // A refreshToken bump (e.g. after a support action records) reloads the
+  // current page — the same read-only GET, no write.
+  useEffect(() => {
+    if (refreshToken === 0) return;
+    const timer = setTimeout(() => void load(query.page, query.filters), 0);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshToken]);
 
   const setFilter = (name: string, value: string) => {
     setQuery((current) => ({ page: 1, filters: { ...current.filters, [name]: value } }));

@@ -970,6 +970,10 @@ export async function loadUserDetail(userId: number): Promise<AdminUserDetail | 
       // Suspend / activate history. Degrades to an empty list on a database that
       // predates the customer-management migration (the capability probe tells
       // us whether the table exists), rather than taking the page down.
+      // The explicit action filter keeps this panel's meaning stable after the
+      // Phase 2 Step 2 support actions (delivery_resolved / refund_review)
+      // started sharing the same audit table: order-level history belongs to the
+      // Data Operations / Requires support screens, not to "Account actions".
       const accountActions = hasAuditTable
         ? await all<Record<string, unknown>>(
             tx,
@@ -980,6 +984,7 @@ export async function loadUserDetail(userId: number): Promise<AdminUserDetail | 
                 from "admin_audit_logs" "a"
                 left join "users" "adm" on "adm"."id" = "a"."admin_user_id"
                 where "a"."target_user_id" = ${userId}
+                  and "a"."action" in ('suspend', 'activate')
                 order by "a"."created_at" desc, "a"."id" desc limit 20`,
           )
         : [];
@@ -1045,6 +1050,10 @@ export async function loadUserDetail(userId: number): Promise<AdminUserDetail | 
           deliveryStatus: String(order.orderStatus ?? ""),
           delivery: String(order.orderStatus ?? "").replace(/_/g, " "),
           deliverySeverity: "unknown" as const,
+          // Per-order support history is shown on the Data Operations and
+          // Requires support screens; the customer page lists the orders only.
+          supportAction: null,
+          supportAt: null,
           createdAt: iso(order.createdAt) ?? "",
           updatedAt: iso(order.updatedAt),
         })),

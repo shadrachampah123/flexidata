@@ -119,6 +119,7 @@ const ADMIN_AUDIT_LOGS = [
   "target_user_id",
   "action",
   "reason",
+  "target_ref",
   "created_at",
 ];
 const DEPOSIT_REQUESTS = [

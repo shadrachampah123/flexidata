@@ -8,7 +8,12 @@ import { adminError, adminJson, pageParam, pageSizeParam, searchParamsOf, strPar
  * Includes the orders `src/lib/checkout.ts` parks as `fulfillment_failed`
  * ("Support will fulfil or refund this order"), wallet orders that were charged
  * but never delivered, and Paystack deposits parked by the verification
- * mismatch guard. Read-only: Phase 1 exposes the queue, it does not work it.
+ * mismatch guard. This handler itself remains read-only: it only reads.
+ * Since Phase 2 Step 2 each checkout row also carries its recorded support
+ * state (`supportAction` / `supportAt` / `supportAdminName`, derived from
+ * `admin_audit_logs`) and an `actionable` flag; the writes themselves go
+ * through `POST /api/admin/orders/[ref]/support`, which re-runs the admin gate
+ * and never moves money.
  */
 export const dynamic = "force-dynamic";
 

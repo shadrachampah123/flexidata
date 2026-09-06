@@ -361,16 +361,27 @@ export const agentProfiles = pgTable("agent_profiles", {
 });
 
 /**
- * Durable audit trail for the Phase 2, Step 1 customer-management action
- * (suspend / activate). One row per *effective* status change — the writer is
- * guarded by a conditional UPDATE so replaying the same action never inserts a
- * duplicate row.
+ * Durable audit trail for every administrative action in the dashboard.
  *
- * It records exactly what the requirement asks for and nothing else: the
+ * - Phase 2, Step 1: the customer-management actions (suspend / activate).
+ *   One row per *effective* status change — the writer is guarded by a
+ *   conditional UPDATE so replaying the same action never inserts a duplicate.
+ * - Phase 2, Step 2: the failed-order support actions (delivery_resolved /
+ *   refund_review). These target an ORDER, so they also fill `targetRef` with
+ *   the `checkout_orders.ref` they acted on; `targetUserId` records the
+ *   customer who owns that order. A partial unique index makes "one recorded
+ *   action per (order, action)" database-enforced, so a replayed refund review
+ *   can never duplicate the record even under a race.
+ *
+ * It records exactly what the requirements ask for and nothing else: the
  * authenticated admin (from the server-side gate, never browser input), the
- * target customer, the action, an optional operator-supplied reason, and a
- * timestamp. `onDelete: "restrict"` keeps the trail intact even if an account
- * is later removed by some other process.
+ * target customer/order, the action, an optional operator-supplied reason, and
+ * a timestamp. `onDelete: "restrict"` keeps the trail intact even if an account
+ * is later removed by some other process. There is deliberately NO foreign key
+ * onto `checkout_orders` — the audit trail must never constrain the lifecycle
+ * of (or add behavior to) a financial order table; `target_ref` denormalises
+ * the order reference so the record stays meaningful even if an order row is
+ * ever archived by a future retention process.
  */
 export const adminAuditLogs = pgTable(
   "admin_audit_logs",
@@ -384,11 +395,26 @@ export const adminAuditLogs = pgTable(
       .references(() => users.id, { onDelete: "restrict" }),
     action: varchar("action", { length: 40 }).notNull(),
     reason: varchar("reason", { length: 240 }),
+    /**
+     * Order reference (`checkout_orders.ref`) for order-level support actions;
+     * NULL for account-level actions (suspend / activate).
+     */
+    targetRef: varchar("target_ref", { length: 40 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index("admin_audit_logs_target_idx").on(table.targetUserId),
     index("admin_audit_logs_admin_idx").on(table.adminUserId),
-    check("admin_audit_logs_action_check", sql`${table.action} in ('suspend', 'activate')`),
+    index("admin_audit_logs_ref_idx").on(table.targetRef),
+    check(
+      "admin_audit_logs_action_check",
+      sql`${table.action} in ('suspend', 'activate', 'delivery_resolved', 'refund_review')`,
+    ),
+    // Replay safety for order-level actions: at most ONE audit row per
+    // (order, action). Suspends/activates are unaffected (target_ref IS NULL
+    // excludes them from this partial index).
+    uniqueIndex("admin_audit_logs_order_action_idx")
+      .on(table.targetRef, table.action)
+      .where(sql`${table.targetRef} is not null and ${table.action} in ('delivery_resolved', 'refund_review')`),
   ],
 );

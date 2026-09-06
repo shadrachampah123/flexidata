@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { AdminExplorer, type AdminColumn, type AdminFilterField } from "@/components/admin/explorer";
 import { Badge, MoneyCell, MoneyDelta, Note, Panel, SeverityDot, StatusPill } from "@/components/admin/ui";
+import { OrderSupportActions } from "@/components/admin/order-support-actions";
 import { adminMoney, formatDate, formatDateTime } from "@/lib/admin/format";
 import type { DataChannel } from "@/lib/admin/queries-operations";
 import type {
@@ -440,6 +441,30 @@ export function DataOrdersExplorer({
       header: "Delivery",
       cell: (row) => <StatusPill severity={row.deliverySeverity}>{row.delivery}</StatusPill>,
     },
+    // Support-recorded state (checkout channel only): a refund review queued
+    // is shown here so the order list and the Needs Attention queue can never
+    // disagree about what support recorded.
+    ...(channel === "checkout"
+      ? ([
+          {
+            key: "support",
+            header: "Support",
+            cell: (row: AdminDataOrderRow) =>
+              row.supportAction ? (
+                <TwoLine
+                  primary={
+                    <StatusPill severity={row.supportAction === "delivery_resolved" ? "healthy" : "attention"}>
+                      {row.supportAction === "delivery_resolved" ? "Marked delivered" : "Refund review"}
+                    </StatusPill>
+                  }
+                  secondary={row.supportAt ? formatDateTime(row.supportAt) : undefined}
+                />
+              ) : (
+                <span className="text-[11px] opacity-45">—</span>
+              ),
+          },
+        ] as AdminColumn<AdminDataOrderRow>[])
+      : []),
     {
       key: "provider",
       header: "Provider",
@@ -534,6 +559,7 @@ export function AttentionExplorer({
   pageSize,
   initialFilters,
   counts,
+  actionsAvailable,
 }: {
   initialRows: AdminAttentionRow[];
   initialTotal: number;
@@ -541,7 +567,14 @@ export function AttentionExplorer({
   pageSize: number;
   initialFilters: Record<string, string>;
   counts: { checkout: number | null; wallet: number | null; deposit: number | null };
+  /** False on a database that predates the support workflow schema (0003). */
+  actionsAvailable: boolean;
 }) {
+  // Bumped after a recorded action so the list re-fetches its state from the
+  // (still read-only) attention endpoint.
+  const [refreshToken, setRefreshToken] = useState(0);
+  const refresh = () => setRefreshToken((value) => value + 1);
+
   const filters: AdminFilterField[] = [
     { name: "search", label: "Search", type: "text", placeholder: "Reference, customer or phone" },
     {
@@ -596,15 +629,63 @@ export function AttentionExplorer({
     },
     {
       key: "reason",
-      header: "Reason / status information",
+      header: "Reason / failure information",
       cell: (row) => <span className="block max-w-[320px] text-[12px] leading-snug opacity-75">{row.reason}</span>,
     },
     { key: "created", header: "Opened", cell: (row) => <TimeCell value={row.createdAt} /> },
+    {
+      key: "support",
+      header: "Support record",
+      cell: (row) =>
+        row.supportAction ? (
+          <TwoLine
+            primary={
+              <StatusPill severity={row.supportAction === "delivery_resolved" ? "healthy" : "attention"}>
+                {row.supportAction === "delivery_resolved" ? "Marked delivered" : "Refund review queued"}
+              </StatusPill>
+            }
+            secondary={
+              row.supportAt
+                ? `${row.supportAdminName ?? "Support"} · ${formatDateTime(row.supportAt)}`
+                : undefined
+            }
+          />
+        ) : row.source === "checkout" && actionsAvailable ? (
+          <span className="text-[11px] opacity-45">No action recorded yet</span>
+        ) : (
+          <span className="text-[11px] opacity-45">—</span>
+        ),
+    },
+    {
+      key: "actions",
+      header: "Support actions",
+      cell: (row) =>
+        actionsAvailable && (row.actionable || row.supportAction === "refund_review") ? (
+          <OrderSupportActions
+            order={{
+              ref: row.ref,
+              customerName: row.customerName,
+              phone: row.phone,
+              bundle: row.bundle,
+              amount: row.amount,
+              status: row.status,
+              reason: row.reason,
+              createdAt: row.createdAt,
+            }}
+            canResolve={row.actionable}
+            canReview={row.actionable && row.supportAction !== "refund_review"}
+            onDone={refresh}
+          />
+        ) : (
+          <span className="text-[11px] opacity-45">Read-only diagnostics</span>
+        ),
+    },
   ];
 
   return (
     <AdminExplorer
       endpoint="/api/admin/attention"
+      refreshToken={refreshToken}
       columns={columns}
       filters={filters}
       initialFilters={initialFilters}
@@ -614,7 +695,11 @@ export function AttentionExplorer({
       pageSize={pageSize}
       rowKey={(row) => `${row.source}-${row.id}`}
       emptyLabel="Nothing is waiting for support. This queue is empty."
-      note="Diagnosis only: Phase 1 exposes these orders but cannot fulfil, refund or retry them."
+      note={
+        actionsAvailable
+          ? "Paystack orders in this queue can be marked delivered (only after you confirm the customer actually received the data) or queued for refund review. Both actions are audited and move no money: no wallet, deposit, Paystack or ledger row is ever written, and deliveries are never auto-retried. Wallet and deposit items are diagnosis-only — the ledger and the funding flow must not be mutated from here."
+          : "The support workflow schema (0003) is not applied on this database, so this queue is read-only. Run `npx drizzle-kit push` to enable recorded actions."
+      }
     />
   );
 }
