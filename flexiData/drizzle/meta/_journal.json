@@ -22,6 +22,13 @@
       "when": 1788642953639,
       "tag": "0002_customer_management",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788652303948,
+      "tag": "0003_support_workflow",
+      "breakpoints": true
     }
   ]
 }

@@ -16,8 +16,12 @@ import { parsePage, parsePageSize, q, type RawSearchParams } from "@/lib/admin/f
  *  - `checkout` — Paystack pay-as-you-go orders (`checkout_orders`, the wallet
  *                 is never touched)
  *
- * Both are read-only. Nothing here retries a delivery, resends a bundle,
- * refunds an order or changes a status.
+ * Both lists are read-only. Nothing here retries a delivery, resends a
+ * bundle, refunds an order or changes a status. Since Phase 2 Step 2 the
+ * checkout list also shows the support action recorded against each order
+ * (delivered-confirmation / refund review, read from the audit trail) — the
+ * actions themselves are worked from `/admin/attention`, and even there they
+ * never move money or touch the ledger.
  */
 export const dynamic = "force-dynamic";
 

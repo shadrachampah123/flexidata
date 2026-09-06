@@ -562,30 +562,40 @@ async function main(): Promise<void> {
     });
   }
 
-  // The browser can only ever ask for data, with ONE deliberate exception added
-  // by Phase 2: the customer-actions confirmation, which POSTs to the gated
-  // customer-status endpoint and can never move money. Everything else must
-  // remain read-only.
+  // The browser can only ever ask for data, with TWO deliberate exceptions
+  // added by Phase 2 — each a confirmation modal that POSTs to one gated,
+  // audited endpoint that can never move money:
+  //   - Step 1: customer-actions → /api/admin/users/[id]/status
+  //   - Step 2: order-support-actions → /api/admin/orders/[ref]/support
+  // Everything else must remain read-only.
   const browserFacing = [
     ...walk(path.join(process.cwd(), "src/app/admin")),
     ...walk(path.join(process.cwd(), "src/components/admin")),
-  ];
+  ].map((file) => file.replace(process.cwd(), ""));
   const writeCalls = /\bmethod:\s*["'](POST|PUT|PATCH|DELETE)["']|\.post\(|\.put\(|\.patch\(|\.delete\(|\baction=\{/i;
-  const CUSTOMER_ACTIONS = path.join(process.cwd(), "src/components/admin/customer-actions.tsx");
-  for (const file of browserFacing) {
-    const source = readFileSync(file, "utf8");
-    const rel = file.replace(process.cwd(), "");
-    if (file === CUSTOMER_ACTIONS) {
+  const WRITE_SURFACES = new Map<string, [string, string]>([
+    ["/src/components/admin/customer-actions.tsx", ["/api/admin/users/", "/status"]],
+    ["/src/components/admin/order-support-actions.tsx", ["/api/admin/orders/", "/support"]],
+  ]);
+  for (const rel of browserFacing) {
+    const source = readFileSync(path.join(process.cwd(), rel), "utf8");
+    const endpoints = WRITE_SURFACES.get(rel);
+    if (endpoints) {
       check(
-        `${rel} is the sole write surface and posts only to the gated status endpoint`,
-        source.includes("/api/admin/users/") &&
-          source.includes("/status") &&
+        `${rel} is an allowlisted write surface posting only to its gated endpoint`,
+        source.includes(endpoints[0]) &&
+          source.includes(endpoints[1]) &&
           source.includes("confirm: true") &&
           !/method:\s*["'](PUT|PATCH|DELETE)["']/.test(source),
       );
       continue;
     }
     check(`${rel} issues no non-GET request`, !writeCalls.test(source));
+  }
+  // The map's keys must all exist as real files — an allowlisted write surface
+  // cannot quietly disappear from the UI while the scan keeps "passing".
+  for (const surface of WRITE_SURFACES.keys()) {
+    check(`allowlisted write surface ${surface} exists`, browserFacing.includes(surface));
   }
 
   // Phase 2 deliberately adds a reviewed migration (`users.status` +

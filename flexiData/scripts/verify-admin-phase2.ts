@@ -377,7 +377,9 @@ async function main(): Promise<void> {
   check("the migration adds the status column", /add column "status"/i.test(phase2Migration));
   check("the migration creates admin_audit_logs", /create table "admin_audit_logs"/i.test(phase2Migration));
 
-  // The only browser write surface is the confirmed customer-status POST.
+  // The only browser write surfaces are the two confirmation modals: the
+  // customer-status POST (Step 1) and the order-support POST (Step 2). Each
+  // posts `confirm: true` to exactly one gated endpoint and nothing else.
   const browserFacing = [
     ...walk(path.join(process.cwd(), "src/app/admin")),
     ...walk(path.join(process.cwd(), "src/components/admin")),
@@ -389,9 +391,12 @@ async function main(): Promise<void> {
     if (writeCalls.test(source)) writes.push(file.replace(process.cwd(), ""));
   }
   equal(
-    "the only browser write surface is the customer-actions component",
-    writes,
-    ["/src/components/admin/customer-actions.tsx"],
+    "the browser write surfaces are exactly the two confirmation modals",
+    writes.sort(),
+    [
+      "/src/components/admin/customer-actions.tsx",
+      "/src/components/admin/order-support-actions.tsx",
+    ],
   );
   const actionsComponent = readFileSync(
     path.join(process.cwd(), "src/components/admin/customer-actions.tsx"),
