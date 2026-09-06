@@ -34,7 +34,7 @@ export default async function AdminLayout({
 
   // Cosmetic: a failure here must never take the dashboard down, so the badges
   // degrade to "unknown" rather than propagating.
-  const badges = await loadNavBadges().catch(() => ({ support: null, stuck: null }));
+  const badges = await loadNavBadges().catch(() => ({ support: null, stuck: null, reviews: null }));
 
   return (
     <div className="min-h-dvh bg-cream text-[#18191f] dark:bg-night dark:text-white">
@@ -64,8 +64,11 @@ export default async function AdminLayout({
           <div className="sticky top-[57px] max-h-[calc(100dvh-57px)] overflow-y-auto py-4">
             <AdminNav badges={badges} />
             <p className="mt-4 px-4 text-[10px] leading-relaxed opacity-45">
-              Nothing on these screens can move money, change a balance or alter an order. The only
-              write is the explicitly-confirmed customer suspend / activate action.
+              Nothing on these screens can move money, change a balance, refund or retry a delivery.
+              The only writes are the two explicitly-confirmed, audited actions: customer
+              suspend / activate, and the failed-order support actions (mark delivered / record a
+              refund review). Everything else — including the investigation pages and the Paystack
+              status check — only reads.
             </p>
           </div>
         </aside>

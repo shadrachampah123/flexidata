@@ -51,6 +51,20 @@ function TwoLine({ primary, secondary }: { primary: ReactNode; secondary?: React
   );
 }
 
+/**
+ * Where a queue row is investigated (Phase 2, Step 3).
+ *
+ *  - `checkout` -> the order investigation page (the ledger mirror may not exist)
+ *  - `wallet`   -> the ledger row, which IS the record for that channel
+ *  - `deposit`  -> the deposit investigation page
+ */
+function hrefForAttentionRow(row: AdminAttentionRow): string {
+  const encoded = encodeURIComponent(row.ref);
+  if (row.source === "checkout") return `/admin/orders/${encoded}`;
+  if (row.source === "deposit") return `/admin/payments/${encoded}`;
+  return `/admin/transactions/${encoded}`;
+}
+
 function TimeCell({ value }: { value: string | null }) {
   return <span className="whitespace-nowrap text-[12px] tabular-nums opacity-70">{formatDateTime(value)}</span>;
 }
@@ -396,7 +410,23 @@ export function DataOrdersExplorer({
     {
       key: "ref",
       header: "Reference",
-      cell: (row) => <MonoLink href={`/admin/transactions/${encodeURIComponent(row.ref)}`}>{row.ref}</MonoLink>,
+      // Phase 2, Step 3 (F1): a CHECKOUT order is investigated on its own page.
+      // Linking it to the ledger view 404s for every order that never reached
+      // the provider submit path — awaiting payment, payment failed, abandoned,
+      // in flight, and parked by the fulfillment error handler — because
+      // `checkout.ts` only writes the ledger mirror once that path runs.
+      // Wallet-channel rows genuinely ARE ledger rows, so they still link there.
+      cell: (row) => (
+        <MonoLink
+          href={
+            row.channel === "checkout"
+              ? `/admin/orders/${encodeURIComponent(row.ref)}`
+              : `/admin/transactions/${encodeURIComponent(row.ref)}`
+          }
+        >
+          {row.ref}
+        </MonoLink>
+      ),
     },
     { key: "created", header: "Created", cell: (row) => <TimeCell value={row.createdAt} /> },
     {
@@ -600,9 +630,14 @@ export function AttentionExplorer({
     {
       key: "ref",
       header: "Order",
+      // Phase 2, Step 3 (F1/F2): each source links to the view that actually
+      // holds its record. Previously every row linked to the LEDGER view, which
+      // 404s for parked checkout orders (no mirror row was written) and for
+      // every deposit in this queue (a parked deposit has no credit row by
+      // definition) — the drill-down was broken on exactly the rows that need it.
       cell: (row) => (
         <TwoLine
-          primary={<MonoLink href={`/admin/transactions/${encodeURIComponent(row.ref)}`}>{row.ref}</MonoLink>}
+          primary={<MonoLink href={hrefForAttentionRow(row)}>{row.ref}</MonoLink>}
           secondary={<Badge>{row.source}</Badge>}
         />
       ),
@@ -786,7 +821,7 @@ export function PaymentsExplorer({
       header: "Payment reference",
       cell: (row) => (
         <TwoLine
-          primary={<MonoLink href={`/admin/payments?search=${encodeURIComponent(row.ref)}`}>{row.ref}</MonoLink>}
+          primary={<MonoLink href={`/admin/payments/${encodeURIComponent(row.ref)}`}>{row.ref}</MonoLink>}
           secondary={row.paystackTransactionId ? `Paystack ${row.paystackTransactionId}` : undefined}
         />
       ),

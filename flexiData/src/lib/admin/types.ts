@@ -1,4 +1,5 @@
 import type { AdminList } from "@/lib/admin/filters";
+import type { DiagnosisFinding, DiagnosisVerdict, PaystackProbeView } from "@/lib/admin/diagnosis";
 
 /**
  * JSON-safe shapes returned by the Phase 1 admin read layer.
@@ -58,6 +59,13 @@ export type AdminOverviewCounts = {
   stuckCheckoutOrders: number | null;
   supportQueue: number | null;
   walletDiscrepancies: number | null;
+  /**
+   * Refund reviews recorded by an administrator and not yet resolved
+   * (Phase 2, Step 3). `null` when the database cannot answer — the
+   * order-reference column is missing — which renders as "Not available"
+   * rather than a misleading zero.
+   */
+  openRefundReviews: number | null;
 };
 
 export type AdminFloatRow = {
@@ -409,4 +417,245 @@ export type AdminReconciliationResult = AdminList<AdminReconciliationRow> & {
   walletsExamined: number;
   mismatches: number;
   notAvailable: boolean;
+};
+
+// ---------------------------------------------------------------------------
+// Phase 2, Step 3 — investigation, audit trail and refund-review backlog
+// ---------------------------------------------------------------------------
+//
+// Every shape below is produced by `src/lib/admin/queries-investigation.ts`
+// inside `withReadOnlyTx` and classified by the PURE engine in
+// `src/lib/admin/diagnosis.ts`. They are diagnosis payloads: a findings list,
+// the stored facts it was derived from, and — for the Paystack probe — the
+// gateway's own answer next to ours. None of them carries a control, an
+// instruction or a value this dashboard could write back.
+
+/** One recorded administrator action, as shown on an investigation page. */
+export type AdminRecordedAction = {
+  id: number;
+  action: string;
+  adminUserId: number;
+  adminName: string | null;
+  reason: string | null;
+  targetRef: string | null;
+  createdAt: string;
+};
+
+/** The stored `checkout_orders` facts an investigator needs, nothing more. */
+export type AdminOrderRecord = {
+  id: number;
+  ref: string;
+  userId: number | null;
+  walletId: number | null;
+  customerName: string | null;
+  /** Unmasked: this is a deliberately-opened single record. */
+  customerEmail: string;
+  customerPhone: string;
+  accountStatus: AccountStatusView;
+  walletNumber: string | null;
+  network: string | null;
+  category: string | null;
+  planLabel: string | null;
+  providerProductCode: string | null;
+  recipient: string;
+  amount: number;
+  /** The integer pesewas Paystack was asked to charge — the authoritative figure. */
+  amountSubunits: number | null;
+  currency: string;
+  paymentStatus: string;
+  orderStatus: string;
+  fulfillmentStatus: string | null;
+  paystackTransactionId: string | null;
+  paystackChannel: string | null;
+  paystackGatewayResponse: string | null;
+  providerReference: string | null;
+  providerStatus: string | null;
+  providerMessage: string | null;
+  paidAt: string | null;
+  verifiedAt: string | null;
+  fulfilledAt: string | null;
+  failedAt: string | null;
+  abandonedAt: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+  /** True when the order is eligible for a Step 2 support action. */
+  supportActionable: boolean;
+};
+
+export type AdminOrderInvestigation = {
+  order: AdminOrderRecord;
+  /** The ledger mirror row `checkout.ts` writes, when it exists. */
+  mirror: AdminTransactionRow | null;
+  /** Delivery timeline, from the existing pure `buildTrackingInfo()`. */
+  tracking: {
+    phase: string;
+    progress: number;
+    overdue: boolean;
+    etaLabel: string;
+    stages: { id: string; label: string; hint: string; state: string; at: string | null }[];
+  };
+  findings: DiagnosisFinding[];
+  verdict: DiagnosisVerdict;
+  /** Every admin action recorded against this ref (Step 2 support actions). */
+  recordedActions: AdminRecordedAction[];
+  /** Suspend / activate history for the customer who owns the order. */
+  accountActions: AdminRecordedAction[];
+  /** False on a database without the audit trail; the panels degrade. */
+  auditAvailable: boolean;
+  /** False when the database predates `target_ref` (migration 0003). */
+  refTrailAvailable: boolean;
+  /** Whether the read-only Paystack probe can run at all here. */
+  probe: { available: boolean; mode: "test" | "live" | "unconfigured"; reason: string | null };
+};
+
+/** The stored `deposit_requests` facts, plus whether the credit landed. */
+export type AdminDepositRecord = {
+  id: number;
+  ref: string;
+  walletId: number;
+  walletNumber: string | null;
+  userId: number | null;
+  customerName: string | null;
+  customerEmail: string;
+  customerPhone: string;
+  provider: string;
+  method: string;
+  amount: number;
+  amountSubunits: number | null;
+  currency: string;
+  status: string;
+  paystackTransactionId: string | null;
+  paystackChannel: string | null;
+  paystackGatewayResponse: string | null;
+  initiatedAt: string;
+  paidAt: string | null;
+  verifiedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string | null;
+  creditRows: number;
+  successfulCredits: number;
+  reversedRows: number;
+  creditedAmount: number | null;
+  creditedAt: string | null;
+  walletCredit: AdminDepositCreditState;
+};
+
+export type AdminDepositInvestigation = {
+  deposit: AdminDepositRecord;
+  /** The ledger rows carrying this reference — evidence, never an accusation. */
+  creditRows: AdminTransactionRow[];
+  /** The owning wallet's stored-vs-calculated verdict, from the existing rule. */
+  walletReconciliation: {
+    available: boolean;
+    storedBalance: number | null;
+    calculatedBalance: number | null;
+    difference: number | null;
+    status: WalletDiffStatus;
+    severity: AdminSeverity;
+    label: string;
+    guidance: string;
+  };
+  findings: DiagnosisFinding[];
+  verdict: DiagnosisVerdict;
+  accountActions: AdminRecordedAction[];
+  auditAvailable: boolean;
+  probe: { available: boolean; mode: "test" | "live" | "unconfigured"; reason: string | null };
+};
+
+/** The read-only Paystack probe result (S3.6). Nothing here was written. */
+export type AdminPaystackProbeResult = {
+  ok: true;
+  kind: "order" | "deposit";
+  ref: string;
+  mode: "test" | "live";
+  probedAt: string;
+  elapsedMs: number;
+  verification: PaystackProbeView;
+  findings: DiagnosisFinding[];
+  verdict: DiagnosisVerdict;
+  /** Restated on every response so the payload can never be read as a settle. */
+  notice: string;
+};
+
+export type AdminPaystackProbeRefusal = {
+  ok: false;
+  kind: "order" | "deposit";
+  ref: string;
+  error: "not-found" | "unavailable" | "throttled" | "upstream" | "timeout";
+  message: string;
+  retryAfterSeconds?: number;
+};
+
+/** One row of the admin activity log (`/admin/audit`). */
+export type AdminAuditRow = {
+  id: number;
+  action: string;
+  /** Human label for the action value. */
+  actionLabel: string;
+  adminUserId: number;
+  adminName: string | null;
+  /** Masked in the list view. */
+  adminEmail: string;
+  targetUserId: number;
+  targetName: string | null;
+  targetEmail: string;
+  targetRef: string | null;
+  /** `order` when a ref is present, otherwise `account`. */
+  targetKind: "order" | "account";
+  reason: string | null;
+  createdAt: string;
+};
+
+export type AdminAuditResult = AdminList<AdminAuditRow> & {
+  /** False on a database without `admin_audit_logs` (pre-migration 0002). */
+  available: boolean;
+  /** False when `target_ref` is missing (pre-migration 0003). */
+  refTrailAvailable: boolean;
+  summary: {
+    all: number | null;
+    inRange: number | null;
+    admins: number | null;
+    byAction: { action: string; label: string; count: number }[];
+  };
+  /** Administrators that can appear in the filter (id + name only). */
+  adminOptions: { id: number; name: string }[];
+  actionOptions: { value: string; label: string }[];
+};
+
+/** One refund review from the audit trail, joined to the order it concerns. */
+export type AdminRefundReviewRow = {
+  ref: string;
+  orderId: number | null;
+  userId: number | null;
+  customerName: string | null;
+  customerEmail: string;
+  phone: string;
+  network: string | null;
+  bundle: string;
+  amount: number;
+  currency: string;
+  orderStatus: string | null;
+  paymentStatus: string | null;
+  /** Open = no `delivery_resolved` recorded at or after the review. */
+  state: "open" | "closed";
+  reviewCount: number;
+  firstReviewAt: string;
+  lastReviewAt: string | null;
+  resolvedAt: string | null;
+  /** Age of the review in whole hours (open reviews only). */
+  ageHours: number | null;
+  reviewedBy: string | null;
+  reason: string | null;
+  orderCreatedAt: string | null;
+};
+
+export type AdminRefundReviewResult = AdminList<AdminRefundReviewRow> & {
+  available: boolean;
+  summary: {
+    open: number | null;
+    closed: number | null;
+    /** Total value of the OPEN reviews — the money finance still has to decide on. */
+    openValue: number | null;
+    oldestOpenHours: number | null;
+  };
 };
