@@ -415,6 +415,20 @@ async function main(): Promise<void> {
   equal("maskEmail keeps the domain", maskEmail("kwame@flexidata.test"), "k•••@flexidata.test");
   equal("maskEmail handles a missing value", maskEmail(null), "—");
 
+  const { adminMoney, adminMoneyDelta } = await import("@/lib/admin/format");
+  equal("adminMoney preserves a negative calculated balance", adminMoney(-32.4), "− GH₵ 32.40");
+  equal("adminMoney preserves grouping for negative balances", adminMoney(-1268.4), "− GH₵ 1,268.40");
+  equal("adminMoney keeps positive balances unsigned", adminMoney(32.4), "GH₵ 32.40");
+  equal("adminMoney preserves grouping for positive balances", adminMoney(1268.4), "GH₵ 1,268.40");
+  equal("adminMoney keeps zero unsigned", adminMoney(0), "GH₵ 0.00");
+  equal("adminMoney keeps negative zero unsigned", adminMoney(-0), "GH₵ 0.00");
+  equal("adminMoney preserves the null placeholder", adminMoney(null), "—");
+  equal("adminMoney preserves the undefined placeholder", adminMoney(undefined), "—");
+  equal("adminMoneyDelta keeps negative deltas signed", adminMoneyDelta(-32.4), "− GH₵ 32.40");
+  equal("adminMoneyDelta keeps positive deltas signed", adminMoneyDelta(32.4), "+ GH₵ 32.40");
+  equal("adminMoneyDelta keeps zero unsigned", adminMoneyDelta(0), "GH₵ 0.00");
+  equal("adminMoneyDelta keeps rounded zero unsigned", adminMoneyDelta(-0.001), "GH₵ 0.00");
+
   const filters = await import("@/lib/admin/filters");
   equal("parsePage clamps below 1", filters.parsePage("0"), 1);
   equal("parsePageSize rejects an unsupported size", filters.parsePageSize("1000"), 25);

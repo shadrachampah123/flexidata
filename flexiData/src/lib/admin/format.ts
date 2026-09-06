@@ -9,10 +9,10 @@ import { money } from "@/lib/format";
  * mismatch on every table.
  */
 
-/** `GH₵ 1,268.00` — the same money format the customer app uses. */
+/** `GH₵ 1,268.00` / `− GH₵ 32.40` — negatives retain their sign; zero/positives stay unsigned. */
 export function adminMoney(amount: number | null | undefined): string {
   if (amount === null || amount === undefined) return "—";
-  return money(amount);
+  return money(amount, { sign: amount < 0 });
 }
 
 /** Signed money for deltas: `+ GH₵ 52.50` / `− GH₵ 52.50`. */
