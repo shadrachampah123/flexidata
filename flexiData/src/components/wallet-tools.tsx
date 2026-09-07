@@ -36,7 +36,7 @@ export function WalletTools({
   fundingProvider = "paystack",
 }: {
   wallet: WalletDTO;
-  initialTab: "fund" | "transfer";
+  initialTab: "fund" | "transfer" | "withdraw";
   pendingFundingRef?: string | null;
   /**
    * Which gateway the SERVER will use for deposits, resolved in
@@ -60,7 +60,7 @@ export function WalletTools({
   const demoFundingDisabled = isProductionBuild && fundingProvider !== "paystack";
   // When we land here straight back from a Paystack redirect the sheet opens
   // straight into its processing/polling state.
-  const [tab, setTab] = useState<"fund" | "transfer">(pendingFundingRef ? "fund" : initialTab);
+  const [tab, setTab] = useState<"fund" | "transfer" | "withdraw">(pendingFundingRef ? "fund" : initialTab);
   const [method, setMethod] = useState("momo_mtn");
   const [balance, setBalance] = useState(wallet.balance);
 
@@ -71,6 +71,11 @@ export function WalletTools({
   const [trChip, setTrChip] = useState<number | null>(20);
   const [trCustom, setTrCustom] = useState("");
   const [dest, setDest] = useState("");
+
+  const [wdChip, setWdChip] = useState<number | null>(50);
+  const [wdCustom, setWdCustom] = useState("");
+  const [wdDest, setWdDest] = useState(wallet.number);
+  const [wdMethod, setWdMethod] = useState("momo_mtn");
 
   const [phase, setPhase] = useState<"idle" | "confirm" | "processing" | "result">(
     pendingFundingRef ? "processing" : "idle",
@@ -88,6 +93,7 @@ export function WalletTools({
 
   const fundAmount = fundChip ?? (Number(fundCustom.replace(/\D/g, "")) || 0);
   const trAmount = trChip ?? (Number(trCustom.replace(/\D/g, "")) || 0);
+  const wdAmount = wdChip ?? (Number(wdCustom.replace(/\D/g, "")) || 0);
   const methodConf = METHODS.find((m) => m.id === method)!;
   const isCard = method === "card";
 
@@ -99,6 +105,11 @@ export function WalletTools({
     (isCard || isValidPhone(source));
   const insufficient = trAmount > balance;
   const transferReady = trAmount >= 1 && isValidPhone(dest) && !insufficient;
+
+  const wdInsufficient = wdAmount > balance;
+  const withdrawReady = wdAmount >= 5 && isValidPhone(wdDest) && !wdInsufficient;
+  const wdFee = wdAmount * 0.02;
+  const wdNet = wdAmount - wdFee;
 
   // Returning from a Paystack redirect: open the processing sheet, nudge
   // settlement once (POST /api/payments/verify re-verifies with Paystack — the
@@ -260,13 +271,15 @@ export function WalletTools({
     setStage("init");
     setPhase("processing");
     try {
-      const res = await fetch(tab === "fund" ? "/api/wallet/fund" : "/api/wallet/transfer", {
+      const res = await fetch(tab === "fund" ? "/api/wallet/fund" : tab === "transfer" ? "/api/wallet/transfer" : "/api/wallet/withdraw", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
           tab === "fund"
             ? { method, amount: fundAmount, source: isCard ? undefined : groupPhone(source) }
-            : { account: dest, amount: trAmount },
+            : tab === "transfer"
+            ? { account: dest, amount: trAmount }
+            : { amount: wdAmount, method: wdMethod, dest: groupPhone(wdDest) },
         ),
       });
       const data = (await res.json()) as {
@@ -361,7 +374,7 @@ export function WalletTools({
   };
 
   const amount = tab === "fund" ? fundAmount : trAmount;
-  const ready = tab === "fund" ? fundReady : transferReady;
+  const ready = tab === "fund" ? fundReady : tab === "transfer" ? transferReady : withdrawReady;
 
   return (
     <div className="space-y-5">
@@ -454,7 +467,7 @@ export function WalletTools({
             note={`Deposit limit GH₵ ${DEPOSIT_MIN_GHS} – GH₵ ${DEPOSIT_MAX_GHS.toLocaleString()} per transaction.`}
           />
         </>
-      ) : (
+      ) : tab === "transfer" ? (
         <>
           <div className="animate-fade-up" style={{ animationDelay: "60ms" }}>
             <PhoneInput value={dest} onChange={setDest} label="Recipient wallet number" />
@@ -482,6 +495,66 @@ export function WalletTools({
             </Link>
           )}
         </>
+      ) : (
+        <>
+          <div className="animate-fade-up" style={{ animationDelay: "60ms" }}>
+            <FieldLabel>Withdrawal method</FieldLabel>
+            <div className="space-y-2 mb-4">
+              {METHODS.filter(m => m.id !== 'card').map((m) => {
+                const active = wdMethod === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => setWdMethod(m.id)}
+                    className={cn(
+                      "flex w-full items-center gap-3 rounded-2xl border bg-paper px-4 py-3.5 text-left transition-all active:scale-[0.99] dark:bg-card",
+                      active
+                        ? "border-brand ring-2 ring-brand/30"
+                        : "border-black/[0.06] hover:border-brand/40 dark:border-line",
+                    )}
+                  >
+                    <span
+                      className="flex h-10 w-10 items-center justify-center rounded-xl"
+                      style={{ backgroundColor: `${m.dot}22`, color: m.dot === "#FFCB05" ? "#c79e00" : m.dot }}
+                    >
+                      <m.icon className="h-5 w-5" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-[13px] font-bold">{m.label}</span>
+                    </span>
+                    <span
+                      className={cn(
+                        "h-4 w-4 rounded-full border-[5px] transition-all",
+                        active ? "border-brand" : "border-zinc-300 dark:border-zinc-600",
+                      )}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+            <PhoneInput value={wdDest} onChange={setWdDest} label="Destination number" />
+          </div>
+          <AmountBlock
+            chips={[20, 50, 100, 200, 500]}
+            chip={wdChip}
+            setChip={setWdChip}
+            custom={wdCustom}
+            setCustom={setWdCustom}
+            delay={120}
+            note="Minimum withdrawal is GH₵5."
+          />
+          <div className="animate-fade-up px-2 space-y-1 text-sm text-zinc-600 dark:text-zinc-400 mt-2" style={{ animationDelay: "140ms" }}>
+            <div className="flex justify-between"><span>Amount</span> <span>{money(wdAmount)}</span></div>
+            <div className="flex justify-between"><span>Fee (2%)</span> <span>{money(wdFee)}</span></div>
+            <div className="flex justify-between font-bold text-ink dark:text-white"><span>You receive</span> <span>{money(wdNet)}</span></div>
+          </div>
+          {wdInsufficient && (
+             <div className="mt-4 flex items-center gap-2 rounded-2xl bg-amber-400/15 px-4 py-3 text-xs font-bold text-amber-600 dark:text-amber-400">
+               <TriangleAlert className="h-4 w-4 shrink-0" />
+               Insufficient balance
+             </div>
+          )}
+        </>
       )}
 
       <button
@@ -507,7 +580,7 @@ export function WalletTools({
         open={phase !== "idle"}
         phase={phase === "idle" ? "confirm" : phase}
         onClose={() => setPhase("idle")}
-        title={tab === "fund" ? "Confirm deposit" : "Confirm transfer"}
+        title={tab === "fund" ? "Confirm deposit" : tab === "transfer" ? "Confirm transfer" : "Confirm withdrawal"}
         rows={
           tab === "fund"
             ? [
@@ -525,34 +598,40 @@ export function WalletTools({
                     ]),
                 { label: "Fee", value: money(0) },
               ]
-            : [
+            : tab === "transfer"
+            ? [
                 { label: "Recipient wallet", value: groupPhone(dest) },
                 { label: "Fee", value: money(0) },
+              ]
+            : [
+                { label: "Destination", value: groupPhone(wdDest) },
+                { label: "Method", value: METHODS.find(m => m.id === wdMethod)?.label ?? wdMethod },
+                { label: "Fee", value: money(wdFee) },
               ]
         }
         total={
           tab === "fund"
             ? { label: "Top-up", value: money(fundAmount) }
-            : { label: "You send", value: money(trAmount) }
+            : tab === "transfer"
+            ? { label: "You send", value: money(trAmount) }
+            : { label: "Total deducted", value: money(wdAmount) }
         }
         ctaLabel={
-          tab === "fund" ? (isPaystackFunding ? "Continue to Paystack" : "Approve deposit") : "Send money"
+          tab === "fund" ? (isPaystackFunding ? "Continue to Paystack" : "Approve deposit") : tab === "transfer" ? "Send money" : "Submit Request"
         }
         onConfirm={submit}
         processingSteps={
           tab === "fund"
             ? isPaystackFunding
               ? stage === "verify"
-                ? // Back from the Paystack checkout: nothing is claimed until
-                  // the server has verified the charge.
-                  ["Verifying payment…", "Confirming with Paystack…", "Crediting your wallet…"]
-                : // Creating the charge server-side, then handing the browser
-                  // to Paystack's hosted checkout.
-                  ["Connecting to Paystack…", "Opening secure checkout…"]
+                ? ["Verifying payment…", "Confirming with Paystack…", "Crediting your wallet…"]
+                : ["Connecting to Paystack…", "Opening secure checkout…"]
               : isCard
                 ? ["Contacting your bank…", "Verifying card…", "Crediting wallet…"]
                 : [`Contacting ${methodConf.label}…`, "Approve the prompt on your phone…", "Crediting wallet…"]
-            : ["Verifying recipient…", "Moving funds…", "Notifying recipient…"]
+            : tab === "transfer"
+            ? ["Verifying recipient…", "Moving funds…", "Notifying recipient…"]
+            : ["Submitting request…", "Verifying balance…", "Recording withdrawal…"]
         }
         footnote={
           tab === "fund" && isPaystackFunding

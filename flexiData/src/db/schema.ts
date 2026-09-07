@@ -22,6 +22,16 @@ export const txTypeEnum = pgEnum("tx_type", [
   "transfer",
   "redemption",
   "referral",
+  "withdrawal",
+]);
+
+export const withdrawalStatusEnum = pgEnum("withdrawal_status", [
+  "pending",
+  "processing",
+  "successful",
+  "failed",
+  "rejected",
+  "cancelled",
 ]);
 
 export const txStatusEnum = pgEnum("tx_status", ["successful", "pending", "failed", "reversed"]);
@@ -422,13 +432,37 @@ export const adminAuditLogs = pgTable(
     index("admin_audit_logs_ref_idx").on(table.targetRef),
     check(
       "admin_audit_logs_action_check",
-      sql`${table.action} in ('suspend', 'activate', 'delivery_resolved', 'refund_review')`,
+      sql`${table.action} in ('suspend', 'activate', 'delivery_resolved', 'refund_review', 'approve_withdrawal', 'reject_withdrawal')`,
     ),
     // Replay safety for order-level actions: at most ONE audit row per
     // (order, action). Suspends/activates are unaffected (target_ref IS NULL
     // excludes them from this partial index).
     uniqueIndex("admin_audit_logs_order_action_idx")
       .on(table.targetRef, table.action)
-      .where(sql`${table.targetRef} is not null and ${table.action} in ('delivery_resolved', 'refund_review')`),
+      .where(sql`${table.targetRef} is not null and ${table.action} in ('delivery_resolved', 'refund_review', 'approve_withdrawal', 'reject_withdrawal')`),
   ],
 );
+
+
+export const withdrawalRequests = pgTable("withdrawal_requests", {
+  id: serial("id").primaryKey(),
+  ref: varchar("ref", { length: 40 }).notNull().unique(),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  walletId: integer("wallet_id").notNull().references(() => wallets.id, { onDelete: "cascade" }),
+  amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+  fee: numeric("fee", { precision: 12, scale: 2 }).notNull(),
+  netAmount: numeric("net_amount", { precision: 12, scale: 2 }).notNull(),
+  destinationMethod: varchar("destination_method", { length: 40 }).notNull(), // e.g., 'momo'
+  destinationDetails: jsonb("destination_details").notNull(),
+  status: withdrawalStatusEnum("status").notNull().default("pending"),
+  adminUserId: integer("admin_user_id"),
+  adminRejectionReason: varchar("admin_rejection_reason", { length: 240 }),
+  providerFields: jsonb("provider_fields"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index("withdrawal_requests_user_idx").on(table.userId),
+  index("withdrawal_requests_wallet_idx").on(table.walletId),
+  index("withdrawal_requests_status_idx").on(table.status),
+  index("withdrawal_requests_created_at_idx").on(table.createdAt),
+]);
