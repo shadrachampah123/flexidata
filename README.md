@@ -588,6 +588,80 @@ payout, a request, or a ledger row. The genuine live Paystack deposit
 changed. No money moves: the withdrawal feature records a request and holds the
 balance, and payout is still manual admin approval.
 
+### Admin reject/approve of withdrawals ("Failed to process action")
+
+An admin clicking **Reject** (or **Approve**) on a pending withdrawal in
+`/admin/withdrawals` got a bare failure while everything else — the list, the
+customer's own withdrawal request — kept working. The exact server error,
+captured from the action endpoint's log line:
+
+```text
+SQLSTATE 23514 (check_violation)
+new row for relation "admin_audit_logs" violates check constraint
+"admin_audit_logs_action_check"   (action = 'reject_withdrawal')
+```
+
+The route itself was correct: it locks the withdrawal (`SELECT … FOR UPDATE`),
+verifies it is still `pending`, refunds the wallet, flips the ledger row and
+inserts the admin audit row — all in ONE transaction. That final audit INSERT
+is the only statement the database refused. `admin_audit_logs_action_check`
+shipped narrow (`0002`/`0003`: suspend / activate / delivery_resolved /
+refund_review) and only `drizzle/0006` widens it with
+`approve_withdrawal` / `reject_withdrawal`. A production database that never
+ran 0006 therefore rejects the audit row, which rolls back the entire action —
+correctly, since a partial refund must never commit — and the API answers 500,
+which the admin UI showed as "Failed to process action". Three things kept the
+cause invisible: `drizzle-kit push` does not reliably re-diff an existing CHECK
+definition, the runtime self-heal covered only `withdrawal_requests`, and
+`/api/health` had no probe for the audit constraint.
+
+The fix (both paths covered, nothing dropped, no row rewritten):
+
+1. **`drizzle/0007_widen_admin_audit_log_actions.sql`** — drops and immediately
+   re-adds the CHECK with the exact widened definition `src/db/schema.ts`
+   declares, and rebuilds the replay-safe partial unique index
+   (`admin_audit_logs_order_action_idx`) with the four-action predicate so
+   "one audit row per (target_ref, action)" finally covers withdrawals.
+   Additive and idempotent: on a database that already ran 0006 it re-creates
+   identical objects; existing rows were written under the narrower list, so
+   they satisfy the wider one by construction.
+2. **Runtime self-heal** — `ensureAdminAuditActions()` in `src/lib/seed.ts`
+   probes the catalog (constraint + index definitions) and performs the same
+   widening only when a withdrawal action is actually missing, so a deployment
+   recovers on the first admin action even if nobody runs a migration by hand.
+   Registered with the boot repairs and awaited by the action route, exactly
+   like `ensureWithdrawalSchema()`.
+3. **`/api/health` reports it** — an `adminAuditSchema` block
+   (`status`/`blocked`/`missing`/`hint`) plus an `adminAuditWarning` while the
+   constraint predates the withdrawal actions, so this drift can never hide
+   behind `withdrawalSchema: "current"` again.
+
+The action route was also hardened while there: the reject flow now locks the
+user's wallet row before refunding (the same `FOR UPDATE` the request path
+uses), refunds exactly the GROSS amount the request deducted (GH₵ 5.00, not
+the GH₵ 4.90 net of the fee), stamps `updated_at`, refuses a missing or
+over-length (240-char) rejection reason up front with a 400 instead of dying
+inside the money transaction, and the admin UI surfaces the API's safe error
+text ("Only pending requests can be modified", the log ref, …) instead of a
+blanket "Failed to process action.".
+
+Verifying the whole action path against a real database + app:
+
+```bash
+cd flexiData
+DATABASE_URL='postgresql://…' npx tsx scripts/verify-admin-withdrawal-action.ts              # catalog probe
+DATABASE_URL='postgresql://…' BASE_URL='http://127.0.0.1:3000' npx tsx scripts/verify-admin-withdrawal-action.ts
+```
+
+Phase B drives the real API end to end: deposit → withdrawal request (gross
+deduction) → reject (single gross refund, `rejected` status, one audit row,
+ledger `failed`) → replayed reject refused with 409 and no second refund →
+concurrent-reject safety → approve still works → rejecting an approved
+withdrawal refused → non-admin gets the identical 404 → invalid/unknown ids
+and reason validation answered with 400/404. It creates only `fd-awa-`-tagged
+throwaway rows, deletes them again (audit rows first — they RESTRICT), and
+re-checks the genuine Paystack deposit `DP-MTMZN2P8SSBR` before and after.
+
 ## Schema compatibility fallbacks
 
 The data gateway widened the schema (a `provider_float_balances` ledger, a

@@ -467,6 +467,122 @@ export function resetWithdrawalSchemaCache(): void {
 }
 
 /**
+ * Ensure `admin_audit_logs` accepts the admin withdrawal actions.
+ *
+ * Why this exists: the audit action CHECK constraint shipped narrow
+ * (`0003_support_workflow.sql`: suspend / activate / delivery_resolved /
+ * refund_review) and only `0006_massive_vertigo.sql` widened it to also allow
+ * `approve_withdrawal` / `reject_withdrawal`. A production database that never
+ * ran 0006 therefore fails the LAST statement of the admin reject flow —
+ *
+ *   SQLSTATE 23514 check_violation
+ *   new row for relation "admin_audit_logs" violates check constraint
+ *   "admin_audit_logs_action_check"  (action = 'reject_withdrawal')
+ *
+ * which rolls back the entire transaction (status update, wallet refund,
+ * ledger update and all) and the admin UI reports "Failed to process action".
+ * `drizzle-kit push` does not reliably re-diff an existing CHECK definition,
+ * so the drift is healed here, additively, exactly like
+ * `repairWithdrawalSchema()` heals a missing `withdrawal_requests`:
+ *
+ *   * the constraint is replaced ONLY when the catalog shows the live
+ *     definition is missing a withdrawal action (drop + re-add the widened
+ *     list `src/db/schema.ts` declares — never anything narrower);
+ *   * the replay-safe partial unique index is rebuilt ONLY when its predicate
+ *     still excludes the withdrawal actions, so "one audit row per
+ *     (target_ref, action)" finally covers withdrawals too;
+ *   * nothing is dropped that is not immediately re-created, no row is ever
+ *     inserted / updated / deleted, and the whole thing is a no-op on a
+ *     database that already has the current definitions.
+ *
+ * A database without the `admin_audit_logs` table (pre-0002) is left alone:
+ * the withdrawal action route will fail loudly on its own insert and the log
+ * will carry the real Postgres error.
+ */
+export async function repairAdminAuditActions(): Promise<void> {
+  // Nothing to widen when the table itself is not there yet.
+  const table = await db.execute<{ present: boolean }>(
+    sql`select to_regclass('admin_audit_logs') is not null as present`,
+  );
+  if (!(table.rows?.[0] as { present?: boolean } | undefined)?.present) return;
+
+  const REPLAY_ACTIONS = ["delivery_resolved", "refund_review", "approve_withdrawal", "reject_withdrawal"] as const;
+  const actionList = REPLAY_ACTIONS.map((a) => `'${a}'`).join(", ");
+
+  const check = await db.execute<{ def: string | null }>(sql`
+    select pg_get_constraintdef(c.oid) as def
+    from pg_constraint c
+    where c.conrelid = 'admin_audit_logs'::regclass
+      and c.conname = 'admin_audit_logs_action_check'
+      and c.contype = 'c'
+  `);
+  const checkDef = (check.rows?.[0] as { def?: string } | undefined)?.def ?? null;
+  const checkMissingAction =
+    checkDef === null || REPLAY_ACTIONS.some((action) => !checkDef.includes(action));
+  if (checkMissingAction) {
+    // Replace (or first-create) the CHECK with the exact widened definition
+    // from `src/db/schema.ts` / `drizzle/0006+`. Existing rows were written
+    // under the old, narrower list, so they satisfy it by construction.
+    await db.execute(
+      sql`alter table admin_audit_logs drop constraint if exists admin_audit_logs_action_check`,
+    );
+    await db.execute(sql`
+      alter table admin_audit_logs
+        add constraint admin_audit_logs_action_check
+        check (action in ('suspend', 'activate', 'delivery_resolved', 'refund_review', 'approve_withdrawal', 'reject_withdrawal'))
+    `);
+  }
+
+  const index = await db.execute<{ def: string | null }>(sql`
+    select indexdef as def
+    from pg_indexes
+    where indexname = 'admin_audit_logs_order_action_idx'
+  `);
+  const indexDef = (index.rows?.[0] as { def?: string } | undefined)?.def ?? null;
+  const indexMissingAction =
+    indexDef === null || REPLAY_ACTIONS.some((action) => !indexDef.includes(action));
+  if (indexMissingAction) {
+    // Rebuild the partial unique index with the widened predicate. Dropping it
+    // costs replay-safety only for the microseconds between the two statements,
+    // and the real double-refund guard is the `status = 'pending'` check under
+    // `SELECT … FOR UPDATE` inside the action route's transaction.
+    await db.execute(sql`drop index if exists admin_audit_logs_order_action_idx`);
+    await db.execute(sql`
+      create unique index admin_audit_logs_order_action_idx
+        on admin_audit_logs (target_ref, action)
+        where target_ref is not null and action in (${sql.raw(actionList)})
+    `);
+  }
+}
+
+/**
+ * One-shot guard for the admin withdrawal action path, mirroring
+ * `ensureWithdrawalSchema()`. Resolves immediately once the repair has been
+ * attempted in this process, and retries after a failure so a transient
+ * connection error cannot disable the heal for the instance's lifetime.
+ */
+let adminAuditActionsPromise: Promise<void> | null = null;
+
+export function ensureAdminAuditActions(): Promise<void> {
+  if (!adminAuditActionsPromise) {
+    adminAuditActionsPromise = repairAdminAuditActions().catch((error) => {
+      adminAuditActionsPromise = null;
+      console.warn(
+        "[flexidata] could not widen admin_audit_logs_action_check — admin approve/reject of withdrawals will fail with a check-constraint violation (SQLSTATE 23514) until the constraint is widened:",
+        (error as Error)?.message ?? error,
+        "\n  Fix: run `npx drizzle-kit push` (or `npx drizzle-kit migrate`) against this database, see drizzle/0007_widen_admin_audit_log_actions.sql.",
+      );
+    });
+  }
+  return adminAuditActionsPromise;
+}
+
+/** Test seam: forget that the audit action repair was already attempted. */
+export function resetAdminAuditActionsCache(): void {
+  adminAuditActionsPromise = null;
+}
+
+/**
  * Ensure performance-critical indexes exist for fast navigation and history.
  * These indexes make `getRecentTransactions`, `getActiveDeliveries` and
  * `getAllTransactions` (the queries behind Home and History) avoid sequential
@@ -583,6 +699,11 @@ async function runSeed(): Promise<void> {
       // request that lands mid-seed can never race a second copy of the DDL.
       // `ensureWithdrawalSchema` logs and swallows its own failures.
       await ensureWithdrawalSchema();
+    })(),
+    (async () => {
+      // Same memoized promise the admin withdrawal action route awaits.
+      // `ensureAdminAuditActions` logs and swallows its own failures.
+      await ensureAdminAuditActions();
     })(),
     (async () => {
       try {

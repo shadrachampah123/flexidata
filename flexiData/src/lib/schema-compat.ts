@@ -1146,3 +1146,99 @@ export async function describeWithdrawalCompatibility(): Promise<WithdrawalSchem
     return { status: "unknown", table: false, missing: [] };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Admin audit-log withdrawal actions
+// ---------------------------------------------------------------------------
+
+/** Actions `admin_audit_logs` must accept for the withdrawal lifecycle. */
+export const ADMIN_AUDIT_WITHDRAWAL_ACTIONS = [
+  "approve_withdrawal",
+  "reject_withdrawal",
+] as const;
+
+export type AdminAuditSchemaReport = {
+  /**
+   * `legacy` when the action CHECK (or replay-safe partial index) still
+   * predates the withdrawal actions — the exact state that made every admin
+   * approve/reject roll back with SQLSTATE 23514.
+   */
+  status: "current" | "missing" | "legacy" | "unknown";
+  table: boolean;
+  missing: string[];
+  hint?: string;
+};
+
+/**
+ * Drift report for the admin audit trail's withdrawal actions, surfaced on
+ * `/api/health`.
+ *
+ * `admin_audit_logs_action_check` shipped narrow (0002/0003: suspend /
+ * activate / delivery_resolved / refund_review) and only
+ * `drizzle/0006`+`0007` widen it with `approve_withdrawal` /
+ * `reject_withdrawal`. A production database that never ran those migrations
+ * accepts the whole reject transaction right up to the final audit INSERT —
+ * which dies with `23514 check_violation`, rolls back the refund and answers
+ * 500 ("Failed to process action"). Every OTHER probe can read "current"
+ * while this is broken, so the catalog is read explicitly here, the same way
+ * the withdrawal probe does it.
+ */
+export async function describeAdminAuditCompatibility(): Promise<AdminAuditSchemaReport> {
+  try {
+    const tableRows = asRows<{ present: boolean }>(
+      await db.execute(sql`select to_regclass('admin_audit_logs') is not null as present`),
+    );
+    if (!tableRows[0]?.present) {
+      return {
+        status: "missing",
+        table: false,
+        missing: ["admin_audit_logs"],
+        hint:
+          "The admin audit trail table is absent; every admin support action will fail. " +
+          "Run `npx drizzle-kit push` against this database (see drizzle/0002_customer_management.sql).",
+      };
+    }
+
+    const checkRows = asRows<{ def: string | null }>(
+      await db.execute(sql`
+        select pg_get_constraintdef(c.oid) as def
+        from pg_constraint c
+        where c.conrelid = 'admin_audit_logs'::regclass
+          and c.conname = 'admin_audit_logs_action_check'
+          and c.contype = 'c'
+      `),
+    );
+    const indexRows = asRows<{ def: string | null }>(
+      await db.execute(sql`
+        select indexdef as def from pg_indexes where indexname = 'admin_audit_logs_order_action_idx'
+      `),
+    );
+
+    const checkDef = checkRows[0]?.def ?? null;
+    const indexDef = indexRows[0]?.def ?? null;
+    const missing: string[] = [];
+    if (checkDef === null) missing.push("admin_audit_logs_action_check");
+    else
+      for (const action of ADMIN_AUDIT_WITHDRAWAL_ACTIONS)
+        if (!checkDef.includes(action)) missing.push(`admin_audit_logs_action_check:${action}`);
+    if (indexDef === null) missing.push("admin_audit_logs_order_action_idx");
+    else
+      for (const action of ADMIN_AUDIT_WITHDRAWAL_ACTIONS)
+        if (!indexDef.includes(action)) missing.push(`admin_audit_logs_order_action_idx:${action}`);
+
+    if (missing.length === 0) return { status: "current", table: true, missing: [] };
+
+    return {
+      status: "legacy",
+      table: true,
+      missing,
+      hint:
+        "The admin audit trail still predates the withdrawal actions — admin approve/reject of a " +
+        "withdrawal fails on its audit INSERT (SQLSTATE 23514) and rolls back the whole action. " +
+        "Run `npx drizzle-kit push` against this database (see drizzle/0007_widen_admin_audit_log_actions.sql).",
+    };
+  } catch (error) {
+    console.warn("[flexidata] admin audit schema probe failed", error);
+    return { status: "unknown", table: false, missing: [] };
+  }
+}

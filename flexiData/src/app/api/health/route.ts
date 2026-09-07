@@ -6,6 +6,7 @@ import { paymentsProvider } from "@/lib/payments";
 import { paystackMode } from "@/lib/paystack";
 import { repairCheckoutOrdersSchema, ensureWithdrawalSchema } from "@/lib/seed";
 import {
+  describeAdminAuditCompatibility,
   describeAuthCompatibility,
   describeCheckoutCompatibility,
   describeSchemaCompatibility,
@@ -53,6 +54,7 @@ export async function GET() {
   const signup = await describeSignupCompatibility();
   const auth = await describeAuthCompatibility();
   const withdrawal = await describeWithdrawalCompatibility();
+  const adminAudit = await describeAdminAuditCompatibility();
   const degraded = schema.status === "legacy";
   // Sign-up drift is reported separately because it is the one thing the
   // runtime cannot silently work around: missing *required* columns there block
@@ -102,6 +104,17 @@ export async function GET() {
       table: withdrawal.table,
       missing: withdrawal.missing,
       ...(withdrawal.hint ? { hint: withdrawal.hint } : {}),
+    },
+    // The admin withdrawal actions can fail on an object NO other probe
+    // covers: the audit action CHECK predating `approve_withdrawal` /
+    // `reject_withdrawal` rolls back every approve/reject (SQLSTATE 23514)
+    // while the withdrawal schema above still reads "current".
+    adminAuditSchema: {
+      status: adminAudit.status,
+      blocked: adminAudit.status === "legacy" || adminAudit.status === "missing",
+      table: adminAudit.table,
+      missing: adminAudit.missing,
+      ...(adminAudit.hint ? { hint: adminAudit.hint } : {}),
     },
     auth: {
       // The two operational causes of the orphaned-account incident: a missing
@@ -168,6 +181,14 @@ export async function GET() {
           withdrawalWarning:
             "Withdrawals are blocked: the withdrawal schema is not in this database. " +
             "Run `npx drizzle-kit push` against it (drizzle/0005_lively_hiroim.sql).",
+        }
+      : {}),
+    ...(adminAudit.status === "legacy" || adminAudit.status === "missing"
+      ? {
+          adminAuditWarning:
+            "Admin approve/reject of withdrawals is blocked: the audit action constraint predates the " +
+            "withdrawal actions and every admin withdrawal action rolls back (SQLSTATE 23514). " +
+            "Run `npx drizzle-kit push` against it (drizzle/0007_widen_admin_audit_log_actions.sql).",
         }
       : {}),
     ...(authBlocked
