@@ -187,8 +187,10 @@ export async function GET() {
       ? {
           adminAuditWarning:
             "Admin approve/reject of withdrawals is blocked: the audit action constraint predates the " +
-            "withdrawal actions and every admin withdrawal action rolls back (SQLSTATE 23514). " +
-            "Run `npx drizzle-kit push` against it (drizzle/0007_widen_admin_audit_log_actions.sql).",
+            "withdrawal actions and every admin withdrawal action rolls back (SQLSTATE 23514). Apply " +
+            "drizzle/0007 with `npm run migrate:admin-audit-actions` (targeted, non-destructive) — " +
+            "prefer it over `npx drizzle-kit push`, which diffs the whole schema and would also request " +
+            "removal of any tables that exist in the database but not in src/db/schema.ts.",
         }
       : {}),
     ...(authBlocked

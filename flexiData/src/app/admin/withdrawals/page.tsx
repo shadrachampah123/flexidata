@@ -107,8 +107,10 @@ export default async function AdminWithdrawalsPage({
         <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-[13px] font-semibold text-amber-700 dark:text-amber-300">
           Approve / reject is BLOCKED on this database: the admin audit trail still predates the
           withdrawal actions, so every action would roll back without moving any money (SQLSTATE
-          23514). An operator must run <code>npx drizzle-kit push</code> against this database
-          (drizzle/0007_widen_admin_audit_log_actions.sql). No request below has been changed.
+          23514). An operator must apply drizzle/0007 against this database with the targeted,
+          non-destructive migration — <code>npm run migrate:admin-audit-actions</code> (do NOT use
+          <code>npx drizzle-kit push</code> here: it diffs the whole schema and would request
+          DROPs of any production-only tables). No request below has been changed.
         </div>
       )}
       <WithdrawalsExplorer

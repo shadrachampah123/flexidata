@@ -358,6 +358,17 @@ DATABASE_URL='postgresql://…?sslmode=require' npx drizzle-kit push
 Then check `/api/health`: `gatewaySchema`, `signupSchema` and
 `withdrawalSchema` should all read `"current"`.
 
+> **A production database carrying drift `schema.ts` does not own — do not
+> push.** `drizzle-kit push` syncs the whole schema **in both directions**: any
+> table that exists in the live database but not in `src/db/schema.ts` (a
+> leftover from an old hotfix, another tool's bookkeeping table, …) is reported
+> as a **table removal** and push will only continue if you accept dropping it.
+> That is exactly how the PR #38 migration ended up aborted on production. When
+> a change needs only a couple of named objects (the admin-audit widening is
+> the canonical example), apply an **explicit, guarded SQL migration** instead
+> — see
+> [Applying the PR #38 audit migration to production](#applying-the-pr-38-audit-migration-to-production-non-destructive).
+
 > **A migration file can be missing while its snapshot is committed.**
 > `drizzle/meta/_journal.json` lists a tag for every migration, and
 > `drizzle-kit` refuses to run at all when the matching `.sql` is absent
@@ -628,7 +639,10 @@ The fix (both paths covered, nothing dropped, no row rewritten):
    "one audit row per (target_ref, action)" finally covers withdrawals.
    Additive and idempotent: on a database that already ran 0006 it re-creates
    identical objects; existing rows were written under the narrower list, so
-   they satisfy the wider one by construction.
+   they satisfy the wider one by construction. On production it is applied
+   with the targeted runner — `npm run migrate:admin-audit-actions` — not
+   `drizzle-kit push`; see
+   [Applying the PR #38 audit migration to production](#applying-the-pr-38-audit-migration-to-production-non-destructive).
 2. **Runtime self-heal** — `ensureAdminAuditActions()` in `src/lib/seed.ts`
    probes the catalog (constraint + index definitions) and performs the same
    widening only when a withdrawal action is actually missing, so a deployment
@@ -712,9 +726,49 @@ predates the withdrawal actions), the action route now **refuses up front with
 `503 schema_maintenance_required`** instead of failing deep in the money
 transaction. It still returns the correct answer — the withdrawal stays
 `pending`, nothing is refunded, nothing is committed — but it tells the operator
-*exactly* what to run (`npx drizzle-kit push`) and never leaves a half-applied
+*exactly* what to run (the targeted migration below) and never leaves a half-applied
 refund behind. `/api/health` surfaces this as `adminAuditSchema.status: "legacy"`,
 so it is visible before anyone clicks. See [Admin reject/approve](#admin-rejectapprove-of-withdrawals-failed-to-process-action).
+
+#### Applying the PR #38 audit migration to production (non-destructive)
+
+`drizzle-kit push` syncs `src/db/schema.ts` against the live database in **both
+directions**, so on a database that carries tables outside the repo schema it
+requests **table removals** (a destructive `DROP TABLE` prompt) — the PR #38
+push was aborted for exactly this reason, and no amount of "yes" makes that
+safe on real money data. Do not truncate, delete, or repair anything by hand:
+the only schema change `reject_withdrawal` needs is widening the audit
+constraint + its replay-safety index, and `drizzle/0007` does precisely that.
+
+Run the **targeted** migration instead — it applies the `drizzle/0007` objects
+with an explicit, single-transaction, additive SQL file and a static safety
+audit (it refuses to run if the SQL ever references `DROP TABLE`/`TRUNCATE`/
+`DELETE`/`UPDATE` or touches any table other than `admin_audit_logs`):
+
+```bash
+cd flexiData
+# 1. Read-only preview: catalog state + the exact plan, nothing executed.
+DATABASE_URL='postgresql://…?sslmode=require' npm run migrate:admin-audit-actions -- --dry-run
+# 2. Apply + verify in one transaction, then re-read the catalog and drive
+#    the exact reject/approve audit INSERTs inside a ROLLED-BACK probe.
+DATABASE_URL='postgresql://…?sslmode=require' npm run migrate:admin-audit-actions
+```
+
+The runner (`scripts/apply-pr38-admin-audit-migration.ts`) only ever widens
+`admin_audit_logs_action_check` and rebuilds `admin_audit_logs_order_action_idx`
+(plus an `IF NOT EXISTS` repair of `admin_audit_logs.target_ref` for pre-0003
+baselines). It **drops no table, deletes/rewrites no row, and touches no
+wallet, withdrawal, ledger or deposit** — it snapshots the genuine Paystack
+deposit `DP-MTMZN2P8SSBR` (full row) before and after and fails loudly if it
+changed, and it lists any production-only tables so you can see it left them
+alone. It is idempotent: on a database that already ran 0006/0007 every step
+is a `no-op` and it reports `already-current`.
+
+Afterwards confirm `/api/health` shows `adminAuditSchema.status: "current"`,
+then re-reject the stuck withdrawal through the normal admin flow — the route
+now restores the wallet exactly once. No manual refund is ever needed or
+correct. `npm run verify:withdrawal-refund` (with `BASE_URL` set) proves the
+whole refund path against the migrated database.
 
 #### Diagnosing a failed refund against production (read-only)
 
