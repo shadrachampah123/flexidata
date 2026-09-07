@@ -8,6 +8,7 @@ import {
 } from "@/lib/data";
 import { requireSession } from "@/lib/session";
 import { WalletCard } from "@/components/wallet-card";
+import { WalletFreshness } from "@/components/wallet-freshness";
 import { ServiceGrid } from "@/components/service-grid";
 import { TxList } from "@/components/tx-list";
 import { ActiveDeliveries } from "@/components/active-deliveries";
@@ -89,6 +90,9 @@ export default async function Home() {
       {/* Wallet */}
       <div className="mt-5">
         <WalletCard wallet={wallet} />
+        {/* Money surface: same freshness guard as /wallet — the balance card
+            must reflect out-of-band changes (refund, webhook, transfer). */}
+        <WalletFreshness serverBalance={wallet.balance} />
       </div>
 
       {/* Quick services */}

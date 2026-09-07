@@ -1,4 +1,5 @@
 import { WalletTools } from "@/components/wallet-tools";
+import { WalletFreshness } from "@/components/wallet-freshness";
 import { PageHeader } from "@/components/page-header";
 import { paymentsProvider, PaystackConfigError } from "@/lib/payments";
 import { getRecentWithdrawals } from "@/lib/data";
@@ -42,6 +43,11 @@ export default async function WalletPage({
   }
   return (
     <div>
+      {/* Money surface: revalidate against the live balance when the page
+          (re)appears, so out-of-band mutations (admin rejection refunds,
+          webhook deposit settlements, incoming transfers) are reflected
+          without a reload. Renders nothing. */}
+      <WalletFreshness serverBalance={wallet.balance} />
       <PageHeader
         title="Wallet"
         subtitle="Fund, transfer & manage your money"
