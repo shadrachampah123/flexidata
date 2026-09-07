@@ -37,6 +37,7 @@ export function SideNav() {
     <aside className="fixed inset-y-0 left-0 z-40 hidden w-[84px] flex-col items-center border-r border-black/5 bg-white/80 py-6 backdrop-blur-xl dark:border-line dark:bg-night/80 md:flex">
       <Link
         href="/"
+        prefetch
         className="mb-8 flex flex-col items-center gap-2 active:scale-95"
         aria-label={APP_NAME}
       >
@@ -54,6 +55,7 @@ export function SideNav() {
             <Link
               key={href}
               href={href}
+              prefetch
               className={cn(
                 "group flex w-[64px] flex-col items-center gap-1 rounded-2xl py-2 transition-all active:scale-90",
                 active ? "bg-brand/15" : "hover:bg-black/[0.04] dark:hover:bg-white/[0.04]",

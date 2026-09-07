@@ -29,6 +29,13 @@
       "when": 1788652303948,
       "tag": "0003_support_workflow",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788743557855,
+      "tag": "0004_performance-indexes",
+      "breakpoints": true
     }
   ]
 }

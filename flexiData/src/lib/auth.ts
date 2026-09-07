@@ -3,7 +3,7 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from "crypto";
 import { eq, desc, and, gt, isNull, ne, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { users, sessions, passwordResets, wallets } from "@/db/schema";
-import { ensureSeeded } from "@/lib/seed";
+import { ensureSeededBackground } from "@/lib/seed";
 import {
   AUTH_WRITE_INSERT_FIELDS,
   AUTH_WRITE_REQUIRED_COLUMNS,
@@ -197,7 +197,7 @@ function assertAuthTableWritable(table: AuthWriteTable, requiredMissing: string[
 }
 
 export async function createSession(userId: number): Promise<void> {
-  await ensureSeeded();
+  ensureSeededBackground();
   // Never write a session row when the cookies it pairs with cannot be signed.
   assertAuthSecretConfigured();
 
@@ -329,28 +329,32 @@ export async function getAuthUserById(userId: number): Promise<AuthUser | null> 
   const caps = await getSchemaCapabilities();
   const hasStatus = missingTableColumns(caps, "users", ["status"]).length === 0;
 
-  const rows = await db
-    .select({
-      id: users.id,
-      name: users.name,
-      email: users.email,
-      phone: users.phone,
-      referralCode: users.referralCode,
-      referredBy: users.referredBy,
-      notifyPromos: users.notifyPromos,
-      notifyTx: users.notifyTx,
-      ...(hasStatus ? { status: users.status } : {}),
-    })
-    .from(users)
-    .where(eq(users.id, userId))
-    .limit(1);
+  // Parallelize independent lookups — was sequential (users then wallets),
+  // costing an extra Neon round-trip per authenticated request.
+  const [rows, walletRows] = await Promise.all([
+    db
+      .select({
+        id: users.id,
+        name: users.name,
+        email: users.email,
+        phone: users.phone,
+        referralCode: users.referralCode,
+        referredBy: users.referredBy,
+        notifyPromos: users.notifyPromos,
+        notifyTx: users.notifyTx,
+        ...(hasStatus ? { status: users.status } : {}),
+      })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1),
+    db
+      .select({ isAgent: wallets.isAgent })
+      .from(wallets)
+      .where(eq(wallets.userId, userId))
+      .limit(1),
+  ]);
   const row = rows[0] as (typeof rows)[number] & { status?: string | null };
   if (!row) return null;
-  const walletRows = await db
-    .select({ isAgent: wallets.isAgent })
-    .from(wallets)
-    .where(eq(wallets.userId, userId))
-    .limit(1);
   return {
     ...row,
     isAgent: walletRows[0]?.isAgent ?? false,
@@ -464,7 +468,7 @@ export async function deleteSessionById(userId: number, sessionId: number): Prom
 export type ResetRecord = { token: string; expiresAt: Date };
 
 export async function createPasswordReset(email: string): Promise<ResetRecord | null> {
-  await ensureSeeded();
+  ensureSeededBackground();
   const rows = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
   const user = rows[0];
   // Always return null silently for unknown emails (no account enumeration).

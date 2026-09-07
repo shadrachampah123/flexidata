@@ -117,7 +117,10 @@ export const sessions = pgTable("sessions", {
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-});
+}, (table) => [
+  index("sessions_user_id_idx").on(table.userId),
+  index("sessions_expires_at_idx").on(table.expiresAt),
+]);
 
 /** Single-use password reset tokens (hashed at rest, 1 hour expiry). */
 export const passwordResets = pgTable("password_resets", {
@@ -142,7 +145,9 @@ export const wallets = pgTable("wallets", {
   agentTier: varchar("agent_tier", { length: 40 }),
   referralCode: varchar("referral_code", { length: 20 }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("wallets_user_id_idx").on(table.userId),
+]);
 
 export const bundlePlans = pgTable("bundle_plans", {
   id: serial("id").primaryKey(),
@@ -184,7 +189,12 @@ export const transactions = pgTable("transactions", {
   providerPayload: jsonb("provider_payload"),
   providerResponse: jsonb("provider_response"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("transactions_wallet_id_idx").on(table.walletId),
+  index("transactions_wallet_created_idx").on(table.walletId, table.createdAt),
+  index("transactions_wallet_status_idx").on(table.walletId, table.status),
+  index("transactions_wallet_ref_idx").on(table.walletId, table.ref),
+]);
 
 export const providerFloatBalances = pgTable(
   "provider_float_balances",
@@ -337,7 +347,9 @@ export const scheduledTopups = pgTable("scheduled_topups", {
   dayOfMonth: integer("day_of_month").notNull(),
   active: boolean("active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("scheduled_topups_wallet_id_idx").on(table.walletId),
+]);
 
 export const priceAlerts = pgTable("price_alerts", {
   id: serial("id").primaryKey(),
@@ -347,7 +359,9 @@ export const priceAlerts = pgTable("price_alerts", {
   tag: varchar("tag", { length: 20 }).notNull(),
   active: boolean("active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("price_alerts_active_idx").on(table.active),
+]);
 
 export const agentProfiles = pgTable("agent_profiles", {
   id: serial("id").primaryKey(),

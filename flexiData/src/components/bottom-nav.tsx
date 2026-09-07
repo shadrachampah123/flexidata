@@ -19,6 +19,7 @@ function Item({
   return (
     <Link
       href={href}
+      prefetch
       className={cn(
         "group relative flex flex-1 flex-col items-center gap-1 py-2.5 transition-all active:scale-90",
       )}
@@ -56,6 +57,7 @@ export function BottomNav() {
         <div className="relative flex flex-1 flex-col items-center">
           <Link
             href="/convert"
+            prefetch
             aria-label="Airtime to Cash"
             className={cn(
               "absolute -top-9 flex h-[54px] w-[54px] items-center justify-center rounded-full bg-brand text-ink shadow-[0_10px_24px_rgba(255,203,5,0.45)] ring-4 ring-white transition-all hover:scale-105 active:scale-95 dark:ring-night",

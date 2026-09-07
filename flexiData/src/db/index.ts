@@ -19,16 +19,24 @@ export const pool =
   globalForDb.__flexidataPgPool ??
   new Pool({
     connectionString: databaseUrl,
-    // Keep the pool small and give up quickly on serverless so a dead DB
-    // fails fast with a readable error instead of hanging the request.
-    max: 5,
-    connectionTimeoutMillis: 10_000,
-    idleTimeoutMillis: 30_000,
+    // Optimized for Vercel serverless + Neon: small warm pool, fast failure,
+    // keep-alive to avoid TLS handshake on every request.
+    max: 10,
+    min: 0,
+    connectionTimeoutMillis: 4000,
+    idleTimeoutMillis: 20_000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
+    // Neon requires SSL; `pg` sets it from the connection string.
+    // Fail fast on slow queries (prevents 3s hangs from queuing).
+    statement_timeout: 8000,
+    query_timeout: 8500,
+    allowExitOnIdle: true,
   });
 
-// Cache the pool across hot reloads in development (and warm invocations).
-if (process.env.NODE_ENV !== "production") {
-  globalForDb.__flexidataPgPool = pool;
-}
+// Cache the pool across hot reloads and warm serverless invocations.
+// Previously only cached in development — production reuse is equally critical
+// on Vercel where the same container serves multiple requests.
+globalForDb.__flexidataPgPool = pool;
 
 export const db = drizzle(pool);
