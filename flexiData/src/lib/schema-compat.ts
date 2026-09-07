@@ -1194,8 +1194,9 @@ export async function describeAdminAuditCompatibility(): Promise<AdminAuditSchem
         table: false,
         missing: ["admin_audit_logs"],
         hint:
-          "The admin audit trail table is absent; every admin support action will fail. " +
-          "Run `npx drizzle-kit push` against this database (see drizzle/0002_customer_management.sql).",
+          "The admin audit trail table is absent; every admin support action will fail. This is " +
+          "beyond the targeted PR #38 delta — bring the database up with the full drizzle/ " +
+          "migration set (0000..0007, see drizzle/0002_customer_management.sql).",
       };
     }
 
@@ -1235,7 +1236,9 @@ export async function describeAdminAuditCompatibility(): Promise<AdminAuditSchem
       hint:
         "The admin audit trail still predates the withdrawal actions — admin approve/reject of a " +
         "withdrawal fails on its audit INSERT (SQLSTATE 23514) and rolls back the whole action. " +
-        "Run `npx drizzle-kit push` against this database (see drizzle/0007_widen_admin_audit_log_actions.sql).",
+        "Apply drizzle/0007 with `npm run migrate:admin-audit-actions` (targeted + non-destructive); " +
+        "avoid `npx drizzle-kit push` on a database carrying unrelated drift. See " +
+        "scripts/sql/pr38-widen-admin-audit-log-actions.sql.",
     };
   } catch (error) {
     console.warn("[flexidata] admin audit schema probe failed", error);

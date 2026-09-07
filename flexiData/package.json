@@ -26,6 +26,7 @@
     "verify:admin-withdrawal-action": "tsx scripts/verify-admin-withdrawal-action.ts",
     "verify:wallet-freshness": "tsx scripts/verify-wallet-freshness.ts",
     "verify:withdrawal-refund": "tsx scripts/verify-withdrawal-refund.ts",
+    "migrate:admin-audit-actions": "tsx scripts/apply-pr38-admin-audit-migration.ts",
     "diagnose:withdrawal-refund": "tsx scripts/diagnose-withdrawal-refund.ts",
     "cleanup:demo-deposits": "tsx scripts/cleanup-demo-deposits.ts",
     "report:paystack-transactions": "tsx scripts/report-paystack-transactions.ts",

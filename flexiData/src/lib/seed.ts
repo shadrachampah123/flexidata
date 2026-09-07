@@ -570,7 +570,9 @@ export function ensureAdminAuditActions(): Promise<void> {
       console.warn(
         "[flexidata] could not widen admin_audit_logs_action_check — admin approve/reject of withdrawals will fail with a check-constraint violation (SQLSTATE 23514) until the constraint is widened:",
         (error as Error)?.message ?? error,
-        "\n  Fix: run `npx drizzle-kit push` (or `npx drizzle-kit migrate`) against this database, see drizzle/0007_widen_admin_audit_log_actions.sql.",
+        "\n  Fix (non-destructive, targeted): `cd flexiData && DATABASE_URL='…' npm run migrate:admin-audit-actions`" +
+          " — applies drizzle/0007's objects only. Do NOT `npx drizzle-kit push` a database carrying" +
+          " unrelated drift: it diffs the whole schema and requests DROPs of tables outside the repo.",
       );
     });
   }

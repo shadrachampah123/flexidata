@@ -105,8 +105,10 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
             "Withdrawals cannot be approved or rejected yet: this database still predates the " +
             "audit-log upgrade (drizzle/0007_widen_admin_audit_log_actions.sql) and this server " +
             "cannot apply it automatically. NOTHING was changed — the request is still " +
-            "`pending` and no wallet moved. An operator must run `npx drizzle-kit push` against " +
-            "this database, then retry.",
+            "`pending` and no wallet moved. An operator must apply the targeted migration " +
+            "`cd flexiData && DATABASE_URL='…' npm run migrate:admin-audit-actions` (non-destructive; " +
+            "do NOT use `npx drizzle-kit push` on a database carrying unrelated drift — it will " +
+            "request table removals), then retry.",
         },
         { status: 503, headers: { "Cache-Control": "no-store, max-age=0" } },
       );
