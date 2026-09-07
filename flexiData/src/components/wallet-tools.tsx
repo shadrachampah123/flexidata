@@ -72,6 +72,22 @@ export function WalletTools({
   const [method, setMethod] = useState("momo_mtn");
   const [balance, setBalance] = useState(wallet.balance);
 
+  // `balance` drives the insufficient-funds guards below. `useState` only
+  // takes the prop's value at MOUNT, so without re-syncing, a
+  // `router.refresh()` that re-renders this component with fresh server data
+  // (a refund after an admin rejection, a webhook-settled deposit, an
+  // incoming transfer — see WalletFreshness) would leave the client-side
+  // guard stuck on the stale figure even though the displayed
+  // server-rendered balances updated. Adjust state during render when the
+  // server figure changes (the React-documented pattern — no effect needed);
+  // optimistic `setBalance` calls from a successful submit still apply
+  // immediately.
+  const [seenServerBalance, setSeenServerBalance] = useState(wallet.balance);
+  if (wallet.balance !== seenServerBalance) {
+    setSeenServerBalance(wallet.balance);
+    setBalance(wallet.balance);
+  }
+
   const [fundChip, setFundChip] = useState<number | null>(50);
   const [fundCustom, setFundCustom] = useState("");
   const [source, setSource] = useState(wallet.number);

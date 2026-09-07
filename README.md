@@ -662,6 +662,47 @@ and reason validation answered with 400/404. It creates only `fd-awa-`-tagged
 throwaway rows, deletes them again (audit rows first — they RESTRICT), and
 re-checks the genuine Paystack deposit `DP-MTMZN2P8SSBR` before and after.
 
+### Wallet freshness (stale-balance regression)
+
+The server never caches wallet balances (every page/route reads the database,
+`force-dynamic` + `no-store`), but the browser's client-side Router Cache can
+serve a previously-rendered payload for a short window after a page was last
+visited — and money can move OUT OF BAND (admin rejection refund, Paystack
+webhook settlement, incoming transfer), which no server invalidation can reach
+in someone else's browser. Three guards keep the user's display converging on
+the database:
+
+1. Nav links use the default viewport prefetch (instant `loading.tsx` shells)
+   instead of full `prefetch` — a fully-prefetched payload is trusted for the
+   *static* stale time (5 minutes), which is exactly what used to pin a stale
+   balance. Navigations now always revalidate page data.
+2. `/wallet` and `/` mount `<WalletFreshness />` (`src/components/wallet-freshness.tsx`):
+   on mount, window focus, tab re-visibility and back/forward-cache restore it
+   compares the server-rendered balance with the live `GET /api/wallet`
+   (`no-store`, owner-scoped) balance and calls `router.refresh()` when they
+   differ — the server stays the single source of truth.
+3. `WalletTools` re-syncs its client-side balance state whenever the server
+   prop changes (the insufficient-balance guards used to freeze at the mount
+   value across refreshes).
+
+Verifying the whole scenario against a real database + app (dev server with
+`PAYMENTS_PROVIDER=mock`):
+
+```bash
+cd flexiData
+DATABASE_URL='postgresql://…' npx tsx scripts/verify-wallet-freshness.ts              # catalog probe
+DATABASE_URL='postgresql://…' BASE_URL='http://127.0.0.1:3000' npx tsx scripts/verify-wallet-freshness.ts
+```
+
+Phase B replays the reported incident: deposit GH₵5 → Wallet page renders
+GH₵5.00 → withdrawal request → database + page GH₵0.00 → admin rejects →
+database back to GH₵5.00 → **the user-facing Wallet page renders GH₵5.00** →
+replayed reject refused (409, no duplicate refund, still `rejected`, ledger
+`failed`, one audit row) → admin sees the same GH₵5.00 → deposits still work →
+transfers move money and the page reflects them. It creates only
+`fd-wf-`-tagged throwaway rows, deletes them again, and re-checks the genuine
+Paystack deposit `DP-MTMZN2P8SSBR` before and after.
+
 ## Schema compatibility fallbacks
 
 The data gateway widened the schema (a `provider_float_balances` ledger, a

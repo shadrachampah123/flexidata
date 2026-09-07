@@ -1,3 +1,7 @@
+// Same prefetch rule as bottom-nav/side-nav: default viewport prefetch only
+// (loading shells), so every navigation revalidates live wallet data instead
+// of serving a fully-prefetched — possibly stale — RSC payload.
+
 import Link from "next/link";
 import {
   ArrowLeftRight,
@@ -26,7 +30,6 @@ export function ServiceGrid() {
         <Link
           key={s.href}
           href={s.href}
-          prefetch
           style={{ animationDelay: `${120 + i * 60}ms` }}
           className={cn(
             "animate-fade-up group flex flex-col items-start gap-2.5 rounded-[1.4rem] border border-black/[0.05] bg-paper p-3.5 shadow-[0_2px_10px_rgba(24,25,31,0.04)] transition-all hover:-translate-y-1 hover:shadow-[0_10px_24px_rgba(24,25,31,0.08)] active:scale-95 dark:border-line dark:bg-card",

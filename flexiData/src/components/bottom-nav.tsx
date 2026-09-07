@@ -1,5 +1,16 @@
 "use client";
 
+// NOTE on prefetch: nav links deliberately do NOT opt into full prefetch
+// (`prefetch` / `prefetch={true}`). A fully-prefetched dynamic route's RSC
+// payload is trusted by the client Router Cache for the *static* stale time
+// (5 minutes by default), so a Wallet/Home entry captured before an
+// out-of-band money change (admin rejection refund, webhook deposit
+// settlement, incoming transfer) would keep serving a stale balance on every
+// in-app navigation. With the default viewport prefetch only the
+// `loading.tsx` shell is fetched — taps stay instant — while the page data
+// itself is revalidated on every navigation. Freshness of money data is then
+// completed by <WalletFreshness /> on the money surfaces.
+
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ArrowLeftRight, Gift, House, LayoutGrid, Wifi } from "lucide-react";
@@ -19,7 +30,6 @@ function Item({
   return (
     <Link
       href={href}
-      prefetch
       className={cn(
         "group relative flex flex-1 flex-col items-center gap-1 py-2.5 transition-all active:scale-90",
       )}
@@ -57,7 +67,6 @@ export function BottomNav() {
         <div className="relative flex flex-1 flex-col items-center">
           <Link
             href="/convert"
-            prefetch
             aria-label="Airtime to Cash"
             className={cn(
               "absolute -top-9 flex h-[54px] w-[54px] items-center justify-center rounded-full bg-brand text-ink shadow-[0_10px_24px_rgba(255,203,5,0.45)] ring-4 ring-white transition-all hover:scale-105 active:scale-95 dark:ring-night",
