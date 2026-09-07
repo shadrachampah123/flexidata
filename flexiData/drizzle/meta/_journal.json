@@ -36,6 +36,20 @@
       "when": 1788743557855,
       "tag": "0004_performance-indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788745327302,
+      "tag": "0005_lively_hiroim",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788745524022,
+      "tag": "0006_massive_vertigo",
+      "breakpoints": true
     }
   ]
 }

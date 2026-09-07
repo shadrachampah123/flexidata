@@ -46,6 +46,7 @@ const LINKS: {
   { href: "/admin/data", label: "Data operations", icon: PackageSearch },
   { href: "/admin/transactions", label: "Transactions", icon: ArrowLeftRight },
   { href: "/admin/payments", label: "Payments", icon: Wallet },
+  { href: "/admin/withdrawals", label: "Withdrawals", icon: ReceiptText },
   { href: "/admin/wallets", label: "Wallets", icon: PieChart },
   { href: "/admin/reconciliation", label: "Reconciliation", icon: AlertTriangle },
   { href: "/admin/users", label: "Customers", icon: Users },

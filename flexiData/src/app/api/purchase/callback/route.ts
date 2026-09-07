@@ -61,7 +61,8 @@ type CallbackTx = {
     | "deposit"
     | "transfer"
     | "redemption"
-    | "referral";
+    | "referral"
+    | "withdrawal";
   status: "successful" | "pending" | "failed" | "reversed";
   network: string | null;
   recipient: string | null;
