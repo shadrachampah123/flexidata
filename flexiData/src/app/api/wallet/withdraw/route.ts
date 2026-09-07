@@ -4,6 +4,7 @@ import { db } from "@/db";
 import { users, wallets, withdrawalRequests, transactions } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
+import { normalizePhoneDigits, isValidPhone } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,17 @@ export async function POST(req: Request) {
     const MIN_WITHDRAW = 5;
     if (numAmount < MIN_WITHDRAW) {
       return NextResponse.json({ ok: false, error: `Minimum withdrawal is GH₵${MIN_WITHDRAW}` }, { status: 400 });
+    }
+
+    // A withdrawal must go to a real mobile-money number. Normalise once and
+    // validate against the same rule the UI uses; the client-side guard is a
+    // convenience — this is the authoritative rejection.
+    const destination = normalizePhoneDigits(String(dest ?? ""));
+    if (!isValidPhone(destination)) {
+      return NextResponse.json(
+        { ok: false, error: "Enter a valid destination mobile money number" },
+        { status: 400 },
+      );
     }
 
     // Fee calculation logic
@@ -54,7 +66,7 @@ export async function POST(req: Request) {
         fee: fee.toFixed(2),
         netAmount: netAmount.toFixed(2),
         destinationMethod: method,
-        destinationDetails: { account: dest },
+        destinationDetails: { account: destination },
         status: "pending",
       }).returning();
 

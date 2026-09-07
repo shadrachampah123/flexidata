@@ -7,8 +7,9 @@ import {
   transactions,
   users,
   wallets,
+  withdrawalRequests,
 } from "@/db/schema";
-import { and, desc, eq, asc, inArray } from "drizzle-orm";
+import { and, desc, eq, asc, inArray, sql } from "drizzle-orm";
 import { ensureSeeded, ensureSeededBackground } from "@/lib/seed";
 import {
   TRANSACTION_INSERT_FIELDS,
@@ -73,6 +74,19 @@ export type TxDTO = {
 
 /** Order types that are delivered to a phone and get a live tracker. */
 const TRACKABLE_TX_TYPES = new Set(["data", "airtime"]);
+
+export type WithdrawalDTO = {
+  id: number;
+  ref: string;
+  amount: number;
+  fee: number;
+  netAmount: number;
+  method: string;
+  /** The destination mobile-money number the user requested the payout to. */
+  destination: string;
+  status: string;
+  createdAt: string;
+};
 
 export type AlertDTO = {
   id: number;
@@ -317,6 +331,45 @@ export async function getTrackableTx(
       lastProviderSyncAt: null,
     } satisfies TrackableTx;
   }, "trackable transaction lookup");
+}
+
+/**
+ * A wallet owner's recent withdrawal requests, most recent first. Read
+ * directly from the `withdrawal_requests` table (PR #33) so the UI can show
+ * the reference, fee, net amount, destination and status without leaking any
+ * admin-only fields. Scoped to the caller's wallet — a user can never see
+ * another account's requests.
+ */
+export async function getRecentWithdrawals(walletId: number, limit = 20): Promise<WithdrawalDTO[]> {
+  ensureSeededBackground();
+  const rows = await db
+    .select({
+      id: withdrawalRequests.id,
+      ref: withdrawalRequests.ref,
+      amount: withdrawalRequests.amount,
+      fee: withdrawalRequests.fee,
+      netAmount: withdrawalRequests.netAmount,
+      method: withdrawalRequests.destinationMethod,
+      destination: sql<string>`${withdrawalRequests.destinationDetails}->>'account'`,
+      status: withdrawalRequests.status,
+      createdAt: withdrawalRequests.createdAt,
+    })
+    .from(withdrawalRequests)
+    .where(eq(withdrawalRequests.walletId, walletId))
+    .orderBy(desc(withdrawalRequests.createdAt))
+    .limit(limit);
+
+  return rows.map((r) => ({
+    id: r.id,
+    ref: r.ref,
+    amount: Number(r.amount),
+    fee: Number(r.fee),
+    netAmount: Number(r.netAmount),
+    method: r.method,
+    destination: r.destination ?? "",
+    status: r.status,
+    createdAt: r.createdAt.toISOString(),
+  }));
 }
 
 export async function getAllTransactions(walletId: number): Promise<TxDTO[]> {

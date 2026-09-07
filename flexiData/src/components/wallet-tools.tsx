@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  Banknote,
   CreditCard,
   Phone,
   ShieldCheck,
@@ -11,12 +12,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
-import type { WalletDTO } from "@/lib/data";
-import { Segmented, FieldLabel } from "@/components/ui";
+import type { WalletDTO, WithdrawalDTO } from "@/lib/data";
+import { Card, Segmented, FieldLabel, StatusBadge } from "@/components/ui";
 import { PhoneInput } from "@/components/phone-input";
 import { FlowSheet, type FlowResult } from "@/components/flow-sheet";
 import { DEPOSIT_MAX_GHS, DEPOSIT_MIN_GHS } from "@/lib/constants";
-import { cn, groupPhone, isValidPhone, money } from "@/lib/format";
+import { cn, groupPhone, isValidPhone, money, timeAgo } from "@/lib/format";
 
 type Method = { id: string; label: string; sub: string; dot: string; icon: LucideIcon };
 
@@ -34,10 +35,17 @@ export function WalletTools({
   initialTab,
   pendingFundingRef,
   fundingProvider = "paystack",
+  withdrawals = [],
 }: {
   wallet: WalletDTO;
   initialTab: "fund" | "transfer" | "withdraw";
   pendingFundingRef?: string | null;
+  /**
+   * The signed-in user's recent withdrawal requests (from `withdrawal_requests`),
+   * resolved server-side and shown under the Withdraw tab so the user can see
+   * the status/history of every request they submitted.
+   */
+  withdrawals?: WithdrawalDTO[];
   /**
    * Which gateway the SERVER will use for deposits, resolved in
    * `src/app/wallet/page.tsx` via `paymentsProvider()`. It defaults to
@@ -90,6 +98,8 @@ export function WalletTools({
   const [result, setResult] = useState<FlowResult | null>(null);
   /** Bumped whenever a new fund/transfer flow starts (see the poll below). */
   const flowSeq = useRef(0);
+  /** Serialises the submit path so a double-tap can never submit twice. */
+  const submittingRef = useRef(false);
 
   const fundAmount = fundChip ?? (Number(fundCustom.replace(/\D/g, "")) || 0);
   const trAmount = trChip ?? (Number(trCustom.replace(/\D/g, "")) || 0);
@@ -254,7 +264,10 @@ export function WalletTools({
   }, [pendingFundingRef, router]);
 
   const submit = async () => {
-    flowSeq.current += 1;
+    // Prevent a double-tap of the confirm CTA from submitting the same request
+    // twice. The backend's own atomic/idempotent protections stay intact; this
+    // is the client-side guard the UI needs for a good mobile feel.
+    if (submittingRef.current) return;
     // Hard client-side guard to match the server's production lock: a
     // production build never asks the server to fund the wallet through a
     // non-Paystack gateway, so the demo "Approve deposit" flow is unreachable
@@ -268,6 +281,8 @@ export function WalletTools({
       setPhase("result");
       return;
     }
+    submittingRef.current = true;
+    flowSeq.current += 1;
     setStage("init");
     setPhase("processing");
     try {
@@ -292,6 +307,9 @@ export function WalletTools({
         provider?: string;
         status?: string;
         authorizationUrl?: string;
+        newBalance?: number;
+        fee?: number;
+        netAmount?: number;
       };
       if (res.status === 401 || data.code === "unauthenticated") {
         router.push("/login?next=/wallet");
@@ -309,8 +327,15 @@ export function WalletTools({
         window.location.assign(data.authorizationUrl);
         return;
       }
-      if (data.error === "insufficient_funds") {
-        setResult({ status: "failed", headline: "Insufficient balance", message: "Top up your wallet and try again." });
+      if (data.error === "insufficient_funds" || (tab === "withdraw" && data.error === "Insufficient balance")) {
+        setResult({
+          status: "failed",
+          headline: "Insufficient balance",
+          message:
+            tab === "withdraw"
+              ? "Your wallet balance is too low for this withdrawal. Top up your wallet and try again."
+              : "Top up your wallet and try again.",
+        });
         setPhase("result");
         return;
       }
@@ -347,7 +372,7 @@ export function WalletTools({
             { label: "Credited", value: money(fundAmount) },
           ],
         });
-      } else {
+      } else if (tab === "transfer") {
         setResult({
           status: "successful",
           ref: data.ref,
@@ -360,16 +385,40 @@ export function WalletTools({
             { label: "Fee", value: money(0) },
           ],
         });
+      } else {
+        // Withdrawal. The server is the final authority for the fee, net amount
+        // and the new balance — the UI never computes its own accounting for the
+        // receipt. If the server didn't hand back a balance (defensive), keep
+        // the optimistic value the route just returned.
+        const newBalance = typeof data.newBalance === "number" ? data.newBalance : undefined;
+        if (typeof newBalance === "number") setBalance(newBalance);
+        setResult({
+          status: "successful",
+          ref: data.ref,
+          headline: `${money(data.netAmount ?? wdNet)} on its way!`,
+          message: "Your withdrawal request has been submitted and is pending approval.",
+          balance: newBalance,
+          lines: [
+            { label: "Reference", value: data.ref ?? "—" },
+            { label: "Destination", value: groupPhone(wdDest) },
+            { label: "Method", value: METHODS.find((m) => m.id === wdMethod)?.label ?? wdMethod },
+            { label: "Amount", value: money(wdAmount) },
+            { label: "Fee (2%)", value: money(wdFee) },
+            { label: "You receive", value: money(data.netAmount ?? wdNet) },
+          ],
+        });
       }
       setPhase("result");
       router.refresh();
     } catch (e) {
       setResult({
         status: "failed",
-        headline: tab === "fund" ? "Deposit failed" : "Transfer failed",
+        headline: tab === "fund" ? "Deposit failed" : tab === "transfer" ? "Transfer failed" : "Withdrawal failed",
         message: e instanceof Error ? e.message : "Something went wrong. Try again.",
       });
       setPhase("result");
+    } finally {
+      submittingRef.current = false;
     }
   };
 
@@ -383,9 +432,10 @@ export function WalletTools({
           options={[
             { id: "fund", label: "Fund wallet" },
             { id: "transfer", label: "Transfer" },
+            { id: "withdraw", label: "Withdraw" },
           ]}
           value={tab}
-          onChange={(id) => setTab(id as "fund" | "transfer")}
+          onChange={(id) => setTab(id as "fund" | "transfer" | "withdraw")}
         />
       </div>
 
@@ -554,6 +604,38 @@ export function WalletTools({
                Insufficient balance
              </div>
           )}
+          {withdrawals.length > 0 && (
+            <div className="animate-fade-up mt-5" style={{ animationDelay: "160ms" }}>
+              <p className="mb-2 px-1 text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">
+                Withdrawal requests
+              </p>
+              <Card className="overflow-hidden">
+                <ul className="divide-y divide-black/[0.05] dark:divide-line">
+                  {withdrawals.map((w) => (
+                    <li key={w.id} className="flex items-center gap-3 px-4 py-3.5">
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-rose-500/15 text-rose-500">
+                        <Banknote className="h-[18px] w-[18px]" strokeWidth={2.2} />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13px] font-bold">
+                          {money(w.amount)} to {groupPhone(w.destination)}
+                        </p>
+                        <p className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                          {w.ref} • {timeAgo(w.createdAt)}
+                        </p>
+                        <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                          Fee {money(w.fee)} • You receive {money(w.netAmount)}
+                        </p>
+                      </div>
+                      <div className="shrink-0">
+                        <StatusBadge status={w.status} />
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </Card>
+            </div>
+          )}
         </>
       )}
 
@@ -573,7 +655,9 @@ export function WalletTools({
           ? demoFundingDisabled
             ? "Deposits unavailable"
             : `Deposit ${fundAmount > 0 ? money(fundAmount) : ""}`
-          : `Send ${trAmount > 0 ? money(trAmount) : ""}`}
+          : tab === "transfer"
+            ? `Send ${trAmount > 0 ? money(trAmount) : ""}`
+            : `Withdraw ${wdAmount > 0 ? money(wdAmount) : ""}`}
       </button>
 
       <FlowSheet
@@ -606,7 +690,8 @@ export function WalletTools({
             : [
                 { label: "Destination", value: groupPhone(wdDest) },
                 { label: "Method", value: METHODS.find(m => m.id === wdMethod)?.label ?? wdMethod },
-                { label: "Fee", value: money(wdFee) },
+                { label: "Fee (2%)", value: money(wdFee) },
+                { label: "You receive", value: money(wdNet) },
               ]
         }
         total={
