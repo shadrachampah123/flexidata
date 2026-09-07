@@ -54,10 +54,14 @@ export function WithdrawalsExplorer({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, reason }),
       });
+      const body = await res.json().catch(() => null);
       if (res.ok) {
         router.refresh();
       } else {
-        alert("Failed to process action.");
+        // The API's messages are deliberately operator-safe (no SQL, no
+        // driver internals) — surface them instead of hiding the actual
+        // answer ("Only pending requests can be modified", the log ref, …).
+        alert(body?.error || "Failed to process action.");
       }
     } catch (e) {
       alert("Error occurred.");

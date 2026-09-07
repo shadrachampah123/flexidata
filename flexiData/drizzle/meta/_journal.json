@@ -50,6 +50,13 @@
       "when": 1788745524022,
       "tag": "0006_massive_vertigo",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788752932673,
+      "tag": "0007_widen_admin_audit_log_actions",
+      "breakpoints": true
     }
   ]
 }
