@@ -1011,3 +1011,138 @@ export async function describeSchemaCompatibility(): Promise<SchemaCompatibility
         : undefined,
   };
 }
+
+/**
+ * Columns `POST /api/wallet/withdraw` and the admin approve/reject route write
+ * to `withdrawal_requests`. Listed here (rather than re-derived from the Drizzle
+ * table) so the drift report and the insert can never disagree about what a
+ * current schema looks like.
+ */
+export const WITHDRAWAL_REQUESTS_COLUMNS = [
+  "id",
+  "ref",
+  "user_id",
+  "wallet_id",
+  "amount",
+  "fee",
+  "net_amount",
+  "destination_method",
+  "destination_details",
+  "status",
+  "admin_user_id",
+  "admin_rejection_reason",
+  "provider_fields",
+  "created_at",
+  "updated_at",
+] as const;
+
+/** Values `withdrawal_status` must hold for the request lifecycle to work. */
+export const WITHDRAWAL_STATUS_VALUES = [
+  "pending",
+  "processing",
+  "successful",
+  "failed",
+  "rejected",
+  "cancelled",
+] as const;
+
+export type WithdrawalSchemaReport = {
+  /** `missing` when the table itself is absent — withdrawals 500 in that case. */
+  status: "current" | "missing" | "drifted" | "unknown";
+  table: boolean;
+  missing: string[];
+  hint?: string;
+};
+
+/**
+ * Drift report for the withdrawal objects, surfaced on `/api/health`.
+ *
+ * The withdrawal feature shipped its table in `src/db/schema.ts` and in
+ * `drizzle/meta/0005_snapshot.json`, but the SQL file that migration journal
+ * entry points at was never committed — so a deployed database could be missing
+ * `withdrawal_requests` while every other health probe still read "current".
+ * That is exactly the state that turned `POST /api/wallet/withdraw` into a bare
+ * 500 with nothing on `/api/health` to explain it. This probe is its own query
+ * rather than part of `resolveCapabilities()` on purpose: the shared capability
+ * cache drives write-path fallbacks, and a health check must report what the
+ * catalog says right now.
+ */
+export async function describeWithdrawalCompatibility(): Promise<WithdrawalSchemaReport> {
+  try {
+    const rows = asRows<{
+      columns: string[] | string | null;
+      status_values: string[] | string | null;
+      tx_types: string[] | string | null;
+    }>(
+      await db.execute(sql`
+        select
+          coalesce(
+            array_agg(distinct c.column_name) filter (where c.column_name is not null),
+            '{}'::text[]
+          ) as columns,
+          coalesce((
+            select array_agg(e.enumlabel)
+            from pg_enum e
+            join pg_type ty on ty.oid = e.enumtypid
+            where ty.typname = 'withdrawal_status'
+          ), '{}'::text[]) as status_values,
+          coalesce((
+            select array_agg(e.enumlabel)
+            from pg_enum e
+            join pg_type ty on ty.oid = e.enumtypid
+            where ty.typname = 'tx_type'
+          ), '{}'::text[]) as tx_types
+        from information_schema.columns c
+        where c.table_schema = current_schema()
+          and c.table_name = 'withdrawal_requests'
+      `),
+    );
+
+    const columns = new Set(parsePgArray(rows[0]?.columns));
+    const statusValues = new Set(parsePgArray(rows[0]?.status_values));
+    const txTypes = new Set(parsePgArray(rows[0]?.tx_types));
+    const table = columns.size > 0;
+
+    const missing = [
+      ...(table ? [] : ["withdrawal_requests"]),
+      ...(table
+        ? WITHDRAWAL_REQUESTS_COLUMNS.filter((column) => !columns.has(column)).map(
+            (column) => `withdrawal_requests.${column}`,
+          )
+        : []),
+      ...WITHDRAWAL_STATUS_VALUES.filter(
+        (value) => statusValues.size > 0 && !statusValues.has(value),
+      ).map((value) => `withdrawal_status:${value}`),
+      // An empty set means the catalog could not be read for that enum, not
+      // that the value is missing — the ledger insert is what would prove it.
+      ...(txTypes.size > 0 && !txTypes.has("withdrawal") ? ["tx_type:withdrawal"] : []),
+      ...(statusValues.size === 0 ? ["withdrawal_status"] : []),
+    ];
+
+    if (!table) {
+      return {
+        status: "missing",
+        table: false,
+        missing,
+        hint:
+          "Run `npx drizzle-kit push` against this database to create withdrawal_requests " +
+          "(see drizzle/0005_lively_hiroim.sql). Withdrawals fail with 500 until it exists.",
+      };
+    }
+
+    return {
+      status: missing.length > 0 ? "drifted" : "current",
+      table: true,
+      missing,
+      hint:
+        missing.length > 0
+          ? "Run `npx drizzle-kit push` against this database to bring the withdrawal schema up to date."
+          : undefined,
+    };
+  } catch (error) {
+    // Never let the probe turn a healthy deployment red, and never hide that it
+    // could not run.
+    console.warn("[flexidata] withdrawal schema probe failed", error);
+    return { status: "unknown", table: false, missing: [] };
+  }
+}

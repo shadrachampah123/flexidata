@@ -4,12 +4,13 @@ import { hasAuthSecret } from "@/lib/auth";
 import { getPasswordResetEmailDeliveryStatus } from "@/lib/notifications";
 import { paymentsProvider } from "@/lib/payments";
 import { paystackMode } from "@/lib/paystack";
-import { repairCheckoutOrdersSchema } from "@/lib/seed";
+import { repairCheckoutOrdersSchema, ensureWithdrawalSchema } from "@/lib/seed";
 import {
   describeAuthCompatibility,
   describeCheckoutCompatibility,
   describeSchemaCompatibility,
   describeSignupCompatibility,
+  describeWithdrawalCompatibility,
   resetSchemaCapabilitiesCache,
 } from "@/lib/schema-compat";
 
@@ -39,12 +40,19 @@ export async function GET() {
     console.warn("[flexidata] checkout schema repair failed", error);
   }
 
+  // Same additive self-heal for the withdrawal objects. `withdrawal_requests`
+  // arrived without its migration SQL, so a database deployed from this
+  // repository could be missing it while every other probe below still reads
+  // "current" — which is what turned POST /api/wallet/withdraw into a bare 500.
+  await ensureWithdrawalSchema();
+
   // A pre-gateway schema is survivable (the app degrades), but it must be
   // visible here so a stuck deployment is diagnosable at a glance.
   const schema = await describeSchemaCompatibility();
   const checkout = await describeCheckoutCompatibility();
   const signup = await describeSignupCompatibility();
   const auth = await describeAuthCompatibility();
+  const withdrawal = await describeWithdrawalCompatibility();
   const degraded = schema.status === "legacy";
   // Sign-up drift is reported separately because it is the one thing the
   // runtime cannot silently work around: missing *required* columns there block
@@ -83,6 +91,17 @@ export async function GET() {
       missing: signup.missing,
       requiredMissing: signup.requiredMissing,
       ...(signup.hint ? { hint: signup.hint } : {}),
+    },
+    // Withdrawals have no runtime fallback: without `withdrawal_requests` the
+    // route cannot record a request at all. Reported separately for the same
+    // reason sign-up drift is — it is the one schema gap the app cannot work
+    // around, so it must never be invisible.
+    withdrawalSchema: {
+      status: withdrawal.status,
+      blocked: withdrawal.status === "missing",
+      table: withdrawal.table,
+      missing: withdrawal.missing,
+      ...(withdrawal.hint ? { hint: withdrawal.hint } : {}),
     },
     auth: {
       // The two operational causes of the orphaned-account incident: a missing
@@ -142,6 +161,13 @@ export async function GET() {
       ? {
           signupWarning:
             "Sign-up is blocked: the database is missing required columns. Run `npx drizzle-kit push` against it.",
+        }
+      : {}),
+    ...(withdrawal.status === "missing" || withdrawal.status === "drifted"
+      ? {
+          withdrawalWarning:
+            "Withdrawals are blocked: the withdrawal schema is not in this database. " +
+            "Run `npx drizzle-kit push` against it (drizzle/0005_lively_hiroim.sql).",
         }
       : {}),
     ...(authBlocked

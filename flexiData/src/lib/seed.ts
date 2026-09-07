@@ -303,6 +303,170 @@ export async function repairDepositRequestsSchema(): Promise<void> {
 }
 
 /**
+ * Self-healing: create the withdrawal objects if a production database never
+ * received the withdrawal migration.
+ *
+ * `withdrawal_requests` was declared in `src/db/schema.ts` (and in
+ * `drizzle/meta/0005_snapshot.json`) but the SQL file the migration journal
+ * points at — `drizzle/0005_lively_hiroim.sql` — was never committed, so no
+ * database provisioned from this repository ever got the table. Every
+ * `POST /api/wallet/withdraw` then died inside its transaction with
+ * `relation "withdrawal_requests" does not exist` (SQLSTATE 42P01) and the
+ * caller only saw a bare 500.
+ *
+ * This does the same additive work `npx drizzle-kit push` would: create the
+ * missing enum, add the `withdrawal` ledger type, create the table, backfill
+ * any missing column, add the foreign keys and indexes. It never drops a
+ * table, never truncates and never rewrites a row — balances, the ledger and
+ * existing withdrawal requests are untouched, and every statement is guarded
+ * so re-running it against an up-to-date database is a no-op.
+ *
+ * Idempotent and safe to run on every boot.
+ */
+export async function repairWithdrawalSchema(): Promise<void> {
+  // `CREATE TYPE` has no `IF NOT EXISTS`, so the guard is a catalog lookup —
+  // the same approach the checkout and deposit repairs use.
+  await db.execute(sql`
+    do $repair$
+    begin
+      if not exists (select 1 from pg_type where typname = 'withdrawal_status') then
+        create type withdrawal_status as enum (
+          'pending',
+          'processing',
+          'successful',
+          'failed',
+          'rejected',
+          'cancelled'
+        );
+      end if;
+    end
+    $repair$;
+  `);
+
+  // The ledger row for a withdrawal is written with `transactions.type =
+  // 'withdrawal'`, a value the original `tx_type` enum does not contain.
+  // `ADD VALUE IF NOT EXISTS` needs PostgreSQL 12+ (Neon is 14+). It runs as
+  // its own statement rather than inside the withdrawal transaction: Postgres
+  // forbids *using* a freshly added enum value in the same transaction that
+  // created it.
+  const txType = await db.execute(sql`select 1 as ok from pg_type where typname = 'tx_type'`);
+  if ((txType.rows?.length ?? 0) > 0) {
+    await db.execute(sql`alter type tx_type add value if not exists 'withdrawal'`);
+  }
+
+  await db.execute(sql`
+    create table if not exists withdrawal_requests (
+      id serial primary key,
+      ref varchar(40) not null,
+      user_id integer not null,
+      wallet_id integer not null,
+      amount numeric(12, 2) not null,
+      fee numeric(12, 2) not null,
+      net_amount numeric(12, 2) not null,
+      destination_method varchar(40) not null,
+      destination_details jsonb not null,
+      status withdrawal_status not null default 'pending',
+      admin_user_id integer,
+      admin_rejection_reason varchar(240),
+      provider_fields jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      constraint withdrawal_requests_ref_unique unique (ref)
+    )
+  `);
+
+  // Additive column repair for a table that exists but is missing a later
+  // field. Columns are added nullable here: a NOT NULL column cannot be added
+  // to a table that already holds rows without a default to fill them with,
+  // and this path must never fail on a live database.
+  await db.execute(sql`
+    alter table withdrawal_requests
+      add column if not exists ref varchar(40),
+      add column if not exists user_id integer,
+      add column if not exists wallet_id integer,
+      add column if not exists amount numeric(12, 2),
+      add column if not exists fee numeric(12, 2),
+      add column if not exists net_amount numeric(12, 2),
+      add column if not exists destination_method varchar(40),
+      add column if not exists destination_details jsonb,
+      add column if not exists status withdrawal_status default 'pending',
+      add column if not exists admin_user_id integer,
+      add column if not exists admin_rejection_reason varchar(240),
+      add column if not exists provider_fields jsonb,
+      add column if not exists created_at timestamptz default now(),
+      add column if not exists updated_at timestamptz default now()
+  `);
+
+  // `ALTER TABLE … ADD CONSTRAINT` has no `IF NOT EXISTS`, so guard on the
+  // catalog by constraint name.
+  await db.execute(sql`
+    do $repair$
+    begin
+      if not exists (
+        select 1 from pg_constraint where conname = 'withdrawal_requests_user_id_users_id_fk'
+      ) then
+        alter table withdrawal_requests
+          add constraint withdrawal_requests_user_id_users_id_fk
+          foreign key (user_id) references users (id) on delete cascade;
+      end if;
+      if not exists (
+        select 1 from pg_constraint where conname = 'withdrawal_requests_wallet_id_wallets_id_fk'
+      ) then
+        alter table withdrawal_requests
+          add constraint withdrawal_requests_wallet_id_wallets_id_fk
+          foreign key (wallet_id) references wallets (id) on delete cascade;
+      end if;
+    end
+    $repair$;
+  `);
+
+  await db.execute(sql`create index if not exists withdrawal_requests_user_idx on withdrawal_requests (user_id)`);
+  await db.execute(sql`create index if not exists withdrawal_requests_wallet_idx on withdrawal_requests (wallet_id)`);
+  await db.execute(sql`create index if not exists withdrawal_requests_status_idx on withdrawal_requests (status)`);
+  await db.execute(
+    sql`create index if not exists withdrawal_requests_created_at_idx on withdrawal_requests (created_at)`,
+  );
+}
+
+/**
+ * One-shot guard for the withdrawal write path.
+ *
+ * `runSeed()` already attempts the repair on boot, but seeding is kicked off in
+ * the background (`ensureSeededBackground`) from read paths, so a cold instance
+ * can still receive `POST /api/wallet/withdraw` before it finishes — and that
+ * request would fail with the very error this repair exists to prevent. The
+ * withdrawal route therefore awaits this first: it resolves immediately once
+ * the repair has been attempted in this process, so the hot path pays nothing.
+ *
+ * A failed repair is logged and swallowed on purpose. Money must not move on a
+ * database the app could not prepare, but the decision belongs to the route's
+ * own transaction (which then fails loudly, with the real Postgres error in the
+ * server log) — not to a schema probe that may simply lack DDL rights.
+ */
+let withdrawalSchemaPromise: Promise<void> | null = null;
+
+export function ensureWithdrawalSchema(): Promise<void> {
+  if (!withdrawalSchemaPromise) {
+    withdrawalSchemaPromise = repairWithdrawalSchema().catch((error) => {
+      // Reset so the next request retries (a transient connection failure must
+      // not disable the repair for the lifetime of the instance).
+      withdrawalSchemaPromise = null;
+      console.warn(
+        "[flexidata] could not ensure withdrawal_requests exists — withdrawals stay unavailable until the table is created:",
+        (error as Error)?.message ?? error,
+        "\n  Fix: run `npx drizzle-kit push` against this database.",
+      );
+    });
+  }
+  return withdrawalSchemaPromise;
+}
+
+/** Test seam: forget that the withdrawal schema was already prepared. */
+export function resetWithdrawalSchemaCache(): void {
+  withdrawalSchemaPromise = null;
+}
+
+/**
  * Ensure performance-critical indexes exist for fast navigation and history.
  * These indexes make `getRecentTransactions`, `getActiveDeliveries` and
  * `getAllTransactions` (the queries behind Home and History) avoid sequential
@@ -413,6 +577,12 @@ async function runSeed(): Promise<void> {
           "\n  Fix: run `npx drizzle-kit push` against this database.",
         );
       }
+    })(),
+    (async () => {
+      // Shares the same memoized promise the withdrawal route awaits, so a
+      // request that lands mid-seed can never race a second copy of the DDL.
+      // `ensureWithdrawalSchema` logs and swallows its own failures.
+      await ensureWithdrawalSchema();
     })(),
     (async () => {
       try {

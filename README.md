@@ -88,6 +88,7 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run verify:seed-resilience` | Check the shared catalog seed can't take sign-up down on a lagging schema |
 | `npm run verify:signup` | Sign-up regression checks against a real database (needs `DATABASE_URL`) |
 | `npm run verify:demo-deposit-cleanup` | Prove the demo-deposit cleanup tool reverses only mock credits (in-memory, no database needed) |
+| `npm run verify:withdrawal` | Prove a database can accept a withdrawal (`--write-probe` adds INSERTs that are rolled back; needs `DATABASE_URL`) |
 | `npm run cleanup:demo-deposits` | Review-first reversal of demo/mock wallet deposit credits (`--apply` to run) |
 
 ## Wallet deposits (Paystack)
@@ -350,8 +351,18 @@ cd flexiData
 DATABASE_URL='postgresql://…?sslmode=require' npx drizzle-kit push
 ```
 
-Then check `/api/health`: `gatewaySchema` and `signupSchema` should both read
-`"current"`.
+Then check `/api/health`: `gatewaySchema`, `signupSchema` and
+`withdrawalSchema` should all read `"current"`.
+
+> **A migration file can be missing while its snapshot is committed.**
+> `drizzle/meta/_journal.json` lists a tag for every migration, and
+> `drizzle-kit` refuses to run at all when the matching `.sql` is absent
+> (`No file drizzle/0005_lively_hiroim.sql found in drizzle folder`). That is
+> exactly what happened to the withdrawal schema — see
+> [Withdrawal fixes](#withdrawal-fixes). If `drizzle-kit migrate` reports a
+> missing file, the journal entry is real and the SQL has to be restored, not
+> deleted from the journal: the snapshot next to it still describes the objects
+> the migration was supposed to create.
 
 ## Deploying to Vercel (with Neon)
 
@@ -402,6 +413,7 @@ Common causes and fixes:
 | `password authentication failed` | Wrong password in the URL — re-copy from Neon |
 | `connect ECONNREFUSED` / `timeout` | Neon is blocking Vercel's IPs — in Neon, make sure your project allows connections (disable IP allowlist, or add Vercel's ranges) |
 | `relation "wallets" does not exist` | Run `npx drizzle-kit push` against Neon |
+| Withdraw says "Unable to process withdrawal. Please try again. (ref …)" | The database is missing `withdrawal_requests`. `/api/health` reports it under `withdrawalSchema`; the `ref` is logged next to the real Postgres error — search your Vercel logs for `[flexidata] withdraw failed ref=…`. Run `npx drizzle-kit push`, or confirm with `npm run verify:withdrawal`. See [Withdrawal fixes](#withdrawal-fixes) |
 | `column "fulfillment_status" does not exist` / `relation "provider_float_balances" does not exist` | The data gateway columns have not been pushed. The app keeps running with [compatibility fallbacks](#schema-compatibility-fallbacks) (provider tracking is skipped); run `npx drizzle-kit push` to switch it on |
 | `too many connections` | Use the **pooled** Neon URL (contains `-pooler`) |
 | Sign-up says "Something went wrong. Please try again. (ref AB12CD)" | The `ref` is logged next to the real error — search your Vercel logs for `[flexidata] register failed ref=AB12CD`. The usual cause is drift on the sign-up tables **or** the shared catalog seed (`price_alerts` / `bundle_plans`); see [Sign-up fixes](#sign-up-fixes) |
@@ -499,6 +511,82 @@ The check talks to a real database on purpose: the simulated Postgres behind
 `verify:schema-compat` does not model unique constraints, which is exactly how
 defect 1 shipped. It now also drops the optional sign-up columns, signs up, and
 puts them back — the regression test for defect 4.
+
+## Withdrawal fixes
+
+Withdrawing GH₵ 5.00 from a real wallet answered **500 Internal Server Error**.
+The cause was not in the route: the route was correct, and its transaction
+rolled back cleanly, leaving the balance and the ledger untouched.
+
+**The withdrawal migration was never in the repository.**
+`drizzle/meta/_journal.json` and `drizzle/meta/0005_snapshot.json` both describe
+a migration tagged `0005_lively_hiroim` — the one that creates
+`withdrawal_requests`, the `withdrawal_status` enum and the `withdrawal` value of
+`tx_type` — but `drizzle/0005_lively_hiroim.sql` itself was never committed. Two
+consequences:
+
+1. `drizzle-kit migrate` aborted outright with
+   `No file drizzle/0005_lively_hiroim.sql found in drizzle folder`, creating
+   nothing at all.
+2. A database provisioned any other way simply never got the table, so
+   `POST /api/wallet/withdraw` died on its first insert with
+   `relation "withdrawal_requests" does not exist` (SQLSTATE `42P01`). The route
+   caught that and answered a bare 500, and `/api/health` still read `"current"`
+   for every schema it knew how to check — the withdrawal objects were not on
+   its list.
+
+Four changes fix it:
+
+1. **`drizzle/0005_lively_hiroim.sql` restored** — the exact 0004 → 0005 delta
+   described by the committed snapshot, in the order `drizzle-kit` emits it.
+   Purely additive: no `DROP`, no column removal, no row rewrite, so it is safe
+   against a database holding real wallets. Applying the whole `drizzle/` folder
+   with drizzle's own migrator now produces a schema that matches
+   `meta/0006_snapshot.json` object for object.
+2. **Additive self-heal** — `repairWithdrawalSchema()` in `src/lib/seed.ts`,
+   registered with the other boot repairs and awaited once per instance by the
+   withdrawal route (`ensureWithdrawalSchema()`). Every statement is guarded
+   (`create table if not exists`, `add column if not exists`, `add value if not
+   exists`, catalog lookups for `CREATE TYPE` and `ADD CONSTRAINT`), so a
+   deployment recovers on its first request even if nobody runs a migration by
+   hand. It never drops or rewrites anything.
+3. **Real diagnostics** — the route now logs
+   `[flexidata] withdraw failed ref=AB12CD user=… wallet=… code=42P01 — relation
+   "withdrawal_requests" does not exist` and answers
+   `Unable to process withdrawal. Please try again. (ref AB12CD)`. The client
+   response carries no SQL, no column names and no driver internals; the ref is
+   what you search the Vercel logs for.
+4. **`/api/health` reports it** — a `withdrawalSchema` block (`status`,
+   `blocked`, `table`, `missing`, `hint`) plus a `withdrawalWarning` when the
+   schema is absent, so this class of drift is visible without reading logs.
+
+Two more defects on the same path were fixed while verifying:
+
+- **`POST /api/admin/withdrawals/[id]/action` used the wrong admin gate.** It
+  called `requireAdmin()` — the *page* gate, which throws `notFound()` — inside a
+  `try` whose `catch` converted the throw into a 500. Every denied caller got
+  "Internal Server Error" instead of the identical 404 every other `/api/admin/**`
+  route returns, which both logged a false alarm and defeated the "no oracle"
+  rule in `src/lib/admin/auth.ts`. It now uses `requireAdminApi()`.
+- The same handler echoed `err.message` (the driver's own text) to the client on
+  failure. Operational refusals now answer 404 / 409, and anything unexpected is
+  logged with a ref behind a generic message.
+
+### Verifying a withdrawal path without moving money
+
+```bash
+cd flexiData
+DATABASE_URL='postgresql://…' npm run verify:withdrawal -- --write-probe
+```
+
+Phase A is a read-only catalog probe. `--write-probe` additionally runs the exact
+INSERTs the route performs against throwaway rows inside a transaction that is
+**rolled back**, then asserts nothing was left behind — so it proves the columns,
+both enum values and both foreign keys accept the write without creating a
+payout, a request, or a ledger row. The genuine live Paystack deposit
+(`DP-MTMZN2P8SSBR`) is re-read before and after and the script fails loudly if it
+changed. No money moves: the withdrawal feature records a request and holds the
+balance, and payout is still manual admin approval.
 
 ## Schema compatibility fallbacks
 
