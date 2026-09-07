@@ -89,6 +89,10 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run verify:signup` | Sign-up regression checks against a real database (needs `DATABASE_URL`) |
 | `npm run verify:demo-deposit-cleanup` | Prove the demo-deposit cleanup tool reverses only mock credits (in-memory, no database needed) |
 | `npm run verify:withdrawal` | Prove a database can accept a withdrawal (`--write-probe` adds INSERTs that are rolled back; needs `DATABASE_URL`) |
+| `npm run verify:admin-withdrawal-action` | Drive the real admin approve/reject withdrawal action end to end (needs `DATABASE_URL` + a running dev app at `BASE_URL`) |
+| `npm run verify:wallet-freshness` | Prove the Wallet page converges on the database after out-of-band money movement (needs `DATABASE_URL` + a running dev app at `BASE_URL`) |
+| `npm run verify:withdrawal-refund` | Prove withdraw → reject restores the wallet exactly once, idempotently, atomically, and the user sees it (needs `DATABASE_URL` + a running dev app at `BASE_URL`) |
+| `npm run diagnose:withdrawal-refund` | **Read-only** forensics for a failed refund against a real database — identifies the affected withdrawal and which case occurred (needs `DATABASE_URL`) |
 | `npm run cleanup:demo-deposits` | Review-first reversal of demo/mock wallet deposit credits (`--apply` to run) |
 
 ## Wallet deposits (Paystack)
@@ -662,6 +666,90 @@ and reason validation answered with 400/404. It creates only `fd-awa-`-tagged
 throwaway rows, deletes them again (audit rows first — they RESTRICT), and
 re-checks the genuine Paystack deposit `DP-MTMZN2P8SSBR` before and after.
 
+### A rejection restores the wallet exactly once (atomic + idempotent)
+
+This is the load-bearing guarantee of the whole withdrawal feature. One admin
+rejection must move money **exactly one time**: restore the exact amount the
+request deducted, flip the refund ledger entry exactly once, and write exactly
+one audit row — and a replay, double-click, timeout-after-commit or a second
+admin must never move it a second time.
+
+`POST /api/admin/withdrawals/[id]/action` (`reject`) does this inside a single
+Postgres transaction in `src/app/api/admin/withdrawals/[id]/action/route.ts`:
+
+```
+BEGIN
+  1.  SELECT … withdrawal_requests … WHERE id=$1 FOR UPDATE     -- row lock
+  2.  require status = 'pending'                                 -- else 409/404, no money
+  3.  the refund wallet is the WITHDRAWAL's wallet_id (server-side,
+      derived from the request row) — never a client/admin-supplied id
+  4.  SELECT … wallets … WHERE id=$1 FOR UPDATE                  -- wallet lock
+  5.  UPDATE wallets SET balance = balance + <gross amount>      -- SQL arithmetic,
+      WHERE id=$1 AND balance + amount < <overflow guard>          exact numeric, no float
+  6.  UPDATE transactions SET status='failed', provider_message=<reason>
+      WHERE id=<the withdrawal's ledger row> AND status='pending' -- flip, once
+  7.  INSERT admin_audit_logs (target_ref, action='reject_withdrawal', reason)
+  COMMIT   ← all seven, or none
+```
+
+The **idempotency** is structural, not advisory. Step 2 fails the whole
+transaction on any request that is no longer `pending` (a second reject sees
+`rejected`), and step 7's `INSERT` is guarded by the partial unique index
+`admin_audit_logs_order_action_idx` — so even two admins racing, a double-click,
+a client retry, or a webhook overlap cannot commit two refunds: the loser of the
+race hits the row lock, re-reads the now-`rejected` status, and answers **409**
+`withdrawal_already_processed` with zero money moved. There is no
+"already handled" branch that re-runs the refund, and the wallet is never
+credited by a client-supplied number — it is the wallet the request row points
+at. `npm run verify:withdrawal-refund` proves every one of these branches,
+including five concurrent rejects producing exactly one 200 and four 409s with a
+single refund.
+
+#### When the audit schema is behind: `503 schema_maintenance_required`
+
+On a database that never ran `drizzle/0007` (the audit CHECK/index still
+predates the withdrawal actions), the action route now **refuses up front with
+`503 schema_maintenance_required`** instead of failing deep in the money
+transaction. It still returns the correct answer — the withdrawal stays
+`pending`, nothing is refunded, nothing is committed — but it tells the operator
+*exactly* what to run (`npx drizzle-kit push`) and never leaves a half-applied
+refund behind. `/api/health` surfaces this as `adminAuditSchema.status: "legacy"`,
+so it is visible before anyone clicks. See [Admin reject/approve](#admin-rejectapprove-of-withdrawals-failed-to-process-action).
+
+#### Diagnosing a failed refund against production (read-only)
+
+When a user reports "I rejected my withdrawal but the money never came back,"
+run the forensics script against the real database. It opens
+`SET TRANSACTION READ ONLY`, so it cannot modify a single byte, and it
+snapshots the genuine live deposit `DP-MTMZN2P8SSBR` (full row) before and
+after to prove it never touched it:
+
+```bash
+cd flexiData
+DATABASE_URL='postgresql://…' npx tsx scripts/diagnose-withdrawal-refund.ts                # 10 most recent
+DATABASE_URL='postgresql://…' npx tsx scripts/diagnose-withdrawal-refund.ts --ref WDL-XXXX
+DATABASE_URL='postgresql://…' npx tsx scripts/diagnose-withdrawal-refund.ts --id 42
+DATABASE_URL='postgresql://…' npx tsx scripts/diagnose-withdrawal-refund.ts --since 2026-09-07T12:00:00Z --json
+```
+
+For each matching withdrawal it prints the user, wallet, amount, fee, net,
+status, admin + reason, created/updated timestamps, the wallet balance **now**
+and the **ledger-derived** balance (with their delta), every ledger row
+(type/status/direction/amount/note), every audit row, and a **verdict** mapping
+the state onto the incident matrix:
+
+- **CASE A** — request still `pending` → the rejection never committed (the
+  wallet was never restored). Usually the `503 schema_maintenance_required`
+  path above, or a rolled-back 500 on a legacy audit CHECK.
+- **CASE B/C** — `rejected` but the ledger row was never flipped → the refund
+  did not apply; reconcile the wallet before trusting the balance.
+- **CASE G** — more than one `reject_withdrawal` audit row → a possible double
+  refund; reconcile immediately.
+- **CONSISTENT** — `rejected` + one `failed` ledger row + one audit row +
+  balance == ledger-derived → the refund *is* in the database, so any stale
+  number the user is seeing is the [Wallet freshness](#wallet-freshness-stale-balance-regression)
+  layer, not accounting.
+
 ### Wallet freshness (stale-balance regression)
 
 The server never caches wallet balances (every page/route reads the database,
@@ -702,6 +790,31 @@ replayed reject refused (409, no duplicate refund, still `rejected`, ledger
 transfers move money and the page reflects them. It creates only
 `fd-wf-`-tagged throwaway rows, deletes them again, and re-checks the genuine
 Paystack deposit `DP-MTMZN2P8SSBR` before and after.
+
+The dedicated end-to-end refund test is `npm run verify:withdrawal-refund`
+(`scripts/verify-withdrawal-refund.ts`). It is the single script that covers the
+whole reported incident in one run — **withdraw → reject → wallet restored
+exactly once → user's `GET /api/wallet` → the user's Wallet page and home
+WalletCard** — plus the invariants a refund must hold: the balance is the exact
+gross amount the request deducted, the refund ledger entry is flipped to
+`failed` exactly once, there is exactly one audit row, `GET /api/wallet` is
+`no-store` and reads the current database balance, the home page's WalletCard
+reconciles to the same figure, a replayed reject is refused with 409 and a
+second identical request cannot refund again, and five concurrent rejects
+produce exactly one refund. It also asserts the [Wallet freshness](#wallet-freshness-stale-balance-regression)
+mounts are present on `/wallet` and `/`, and proves the
+`503 schema_maintenance_required` contract on a drifted (legacy audit) database
+instead of moving money into a broken state. Like its siblings it uses only
+`fd-wr-`-tagged throwaway rows, deletes them again (audit rows first), and
+re-checks `DP-MTMZN2P8SSBR` before and after.
+
+> **Note for a real deployment:** this sandbox has no access to the production
+> database, so the *specific* refund that was lost is identified and its
+> restoration is confirmed by running
+> [`diagnose:withdrawal-refund`](#diagnosing-a-failed-refund-against-production-read-only)
+> against production with the operator's `DATABASE_URL`. The code fix, the
+> exactly-once guarantee, and the full regression matrix above are what make the
+> next rejection restore the wallet reliably on the first click.
 
 ## Schema compatibility fallbacks
 

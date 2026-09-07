@@ -25,10 +25,28 @@ import { useRouter } from "next/navigation";
  * (header chip, WalletCard, withdrawal list) converges on the truth without a
  * log-out/log-in or a hard reload.
  *
+ * On top of those event triggers, a VISIBLE tab re-checks on a bounded
+ * 15-second interval (`REFRESH_INTERVAL_MS`). Why: a tab that stays focused
+ * and visible for minutes fires NO focus/visibility/pageshow events at all,
+ * so an out-of-band refund (admin rejecting a withdrawal while the user
+ * sits on this page) would otherwise stay invisible until the next
+ * interaction — the "the money never appeared" window the event triggers
+ * alone leave open. The interval is deliberately:
+ *   * bounded (15s — a money figure on screen is stale for at most 15s,
+ *     never indefinitely),
+ *   * visibility-gated (a hidden tab makes zero extra requests),
+ *   * one `no-store` GET of four fields, answered from the live database row
+ *     — negligible cost even when the balances match,
+ *   * self-terminating (cleared on unmount, re-created on re-render).
+ *
  * Deliberately does NOT mutate any displayed value client-side: the server
  * stays the single source of truth for money. When the balances match (the
  * overwhelmingly common case) it does nothing at all.
  */
+
+/** Upper bound on how long a visible money surface can stay stale. */
+const REFRESH_INTERVAL_MS = 15_000;
+
 export function WalletFreshness({ serverBalance }: { serverBalance: number }) {
   const router = useRouter();
   /**
@@ -79,12 +97,22 @@ export function WalletFreshness({ serverBalance }: { serverBalance: number }) {
       if ((event as PageTransitionEvent).persisted) void check();
     };
 
+    // A focused, visible tab fires none of the events above while it just
+    // sits on screen, so an out-of-band refund would stay invisible until the
+    // next interaction. Re-check on a bounded interval while the tab is
+    // visible; hidden tabs make no extra requests at all.
+    const onInterval = () => {
+      if (document.visibilityState === "visible") void check();
+    };
+    const intervalId = window.setInterval(onInterval, REFRESH_INTERVAL_MS);
+
     void check();
     window.addEventListener("focus", onGainAttention);
     document.addEventListener("visibilitychange", onGainAttention);
     window.addEventListener("pageshow", onPageShow);
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
       window.removeEventListener("focus", onGainAttention);
       document.removeEventListener("visibilitychange", onGainAttention);
       window.removeEventListener("pageshow", onPageShow);
