@@ -1,6 +1,7 @@
 import { WalletTools } from "@/components/wallet-tools";
 import { PageHeader } from "@/components/page-header";
 import { paymentsProvider, PaystackConfigError } from "@/lib/payments";
+import { getRecentWithdrawals } from "@/lib/data";
 import { requireSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -12,8 +13,18 @@ export default async function WalletPage({
 }) {
   const { wallet } = await requireSession();
   const sp = await searchParams;
-  const initialTab = sp.tab === "transfer" ? "transfer" : "fund";
+  const initialTab = sp.tab === "transfer" ? "transfer" : sp.tab === "withdraw" ? "withdraw" : "fund";
   const funding = sp.funding === "success" ? sp.ref ?? null : null;
+  // The withdrawal history is read from the `withdrawal_requests` table. Follow
+  // the app's degrade-around-a-lagging-schema rule: if that table isn't in the
+  // database yet, the wallet page still renders (with the Withdraw tab) rather
+  // than taking funding/transfers/history down with it.
+  let withdrawals: Awaited<ReturnType<typeof getRecentWithdrawals>> = [];
+  try {
+    withdrawals = await getRecentWithdrawals(wallet.id);
+  } catch {
+    withdrawals = [];
+  }
   // Resolved server-side so the funding UI describes the gateway that will
   // really be used (Paystack checkout vs the opt-in local simulator). The
   // client never decides this, and no key material is involved.
@@ -41,6 +52,7 @@ export default async function WalletPage({
         initialTab={initialTab}
         pendingFundingRef={funding}
         fundingProvider={fundingProvider}
+        withdrawals={withdrawals}
       />
     </div>
   );

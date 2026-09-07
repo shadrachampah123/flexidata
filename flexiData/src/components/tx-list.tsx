@@ -2,6 +2,7 @@ import Link from "next/link";
 import {
   ArrowDownLeft,
   ArrowLeftRight,
+  Banknote,
   ChevronRight,
   Gift,
   Radar,
@@ -21,6 +22,7 @@ const ICONS: Record<string, { icon: LucideIcon; cls: string }> = {
   deposit: { icon: ArrowDownLeft, cls: "bg-sky-500/15 text-sky-500" },
   transfer: { icon: Send, cls: "bg-indigo-500/15 text-indigo-400" },
   redemption: { icon: Gift, cls: "bg-rose-500/15 text-rose-500" },
+  withdrawal: { icon: Banknote, cls: "bg-rose-500/15 text-rose-500" },
 };
 
 export function TxItem({ t, showDate }: { t: TxDTO; showDate?: boolean }) {

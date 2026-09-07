@@ -14,6 +14,7 @@ const FILTERS = [
   { id: "conversion", label: "Conversions" },
   { id: "deposit", label: "Deposits" },
   { id: "transfer", label: "Transfers" },
+  { id: "withdrawal", label: "Withdrawals" },
   { id: "redemption", label: "Rewards" },
 ];
 
