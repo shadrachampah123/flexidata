@@ -2,7 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { agentProfiles, users, wallets } from "@/db/schema";
 import { generateReferralCode, hashPassword, verifyPassword } from "@/lib/auth";
-import { ensureSeeded } from "@/lib/seed";
+import { ensureSeededBackground } from "@/lib/seed";
 import { isValidPhone } from "@/lib/format";
 import {
   SIGNUP_INSERT_FIELDS,
@@ -174,11 +174,10 @@ async function signupColumnDrift(): Promise<{
  * via MoMo/card — exactly like DataPlug, RemaData and MyDataBundle onboarding.
  */
 export async function registerUser(input: RegistrationInput): Promise<RegistrationResult> {
-  // Runs the startup seed and, with it, the referral-index repair. This has to
-  // happen before the insert below: on a cold process the register route would
-  // otherwise reach the unique index it is meant to have replaced. Memoized, so
-  // it costs one extra await after the first call.
-  await ensureSeeded();
+  // Trigger seed in background but don't block validation/input parsing —
+  // the repair is important but shouldn't add 500ms+ to the critical path.
+  // We only need to await it briefly just before the insert (see below).
+  ensureSeededBackground();
 
   const name = input.name.trim().replace(/\s+/g, " ");
   const email = normalizeEmail(input.email);

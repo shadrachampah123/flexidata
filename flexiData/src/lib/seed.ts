@@ -18,15 +18,46 @@ import {
  * schedules — is created when a visitor registers an account, never faked.
  */
 let seedPromise: Promise<void> | null = null;
+let seedStartedAt = 0;
+// After a successful seed, don't re-probe for at least this long (catalog rarely changes).
+const SEED_CACHE_MS = 5 * 60_000;
 
 export function ensureSeeded(): Promise<void> {
+  // If we've seeded successfully within the cache window, return immediately
+  // without hitting the DB at all — this is the hot-path optimization that
+  // removes the ~3s block from every page navigation.
+  if (seedPromise && Date.now() - seedStartedAt < SEED_CACHE_MS) {
+    return seedPromise;
+  }
   if (!seedPromise) {
     seedPromise = runSeed().catch((e) => {
       seedPromise = null;
       throw e;
     });
+    seedStartedAt = Date.now();
   }
   return seedPromise;
+}
+
+/**
+ * Trigger seeding in the background without blocking the caller.
+ * Use this from hot paths (wallet/transaction queries) where the catalog
+ * data is not needed to render the current response — the seed will complete
+ * in the background and be ready for the next request that does need it.
+ */
+export function ensureSeededBackground(): void {
+  if (seedPromise) return;
+  ensureSeeded().catch(() => {
+    // Best-effort: catalog seeding failure is non-fatal for the current request
+  });
+}
+
+/**
+ * Whether the catalog seed has completed successfully in this process.
+ * Lets catalog-dependent queries decide whether they can skip awaiting.
+ */
+export function isSeeded(): boolean {
+  return seedPromise !== null;
 }
 
 /**
@@ -271,6 +302,29 @@ export async function repairDepositRequestsSchema(): Promise<void> {
   await db.execute(sql`create index if not exists deposit_requests_status_idx on deposit_requests (status)`);
 }
 
+/**
+ * Ensure performance-critical indexes exist for fast navigation and history.
+ * These indexes make `getRecentTransactions`, `getActiveDeliveries` and
+ * `getAllTransactions` (the queries behind Home and History) avoid sequential
+ * scans on growing `transactions` tables. Safe to run concurrently with the
+ * other repairs — `IF NOT EXISTS` is idempotent.
+ */
+export async function repairPerformanceIndexes(): Promise<void> {
+  // Run all index creations in parallel; they are independent and each is
+  // CONCURRENTLY-safe via IF NOT EXISTS (no lock escalation beyond share).
+  await Promise.allSettled([
+    db.execute(sql`create index if not exists transactions_wallet_id_idx on transactions (wallet_id)`),
+    db.execute(sql`create index if not exists transactions_wallet_created_idx on transactions (wallet_id, created_at desc)`),
+    db.execute(sql`create index if not exists transactions_wallet_status_idx on transactions (wallet_id, status)`),
+    db.execute(sql`create index if not exists transactions_wallet_ref_idx on transactions (wallet_id, ref)`),
+    db.execute(sql`create index if not exists wallets_user_id_idx on wallets (user_id)`),
+    db.execute(sql`create index if not exists sessions_user_id_idx on sessions (user_id)`),
+    db.execute(sql`create index if not exists sessions_expires_at_idx on sessions (expires_at)`),
+    db.execute(sql`create index if not exists scheduled_topups_wallet_id_idx on scheduled_topups (wallet_id)`),
+    db.execute(sql`create index if not exists price_alerts_active_idx on price_alerts (active)`),
+  ]);
+}
+
 export async function repairReferrerIndex(): Promise<void> {
   // Look the uniqueness up in the catalog rather than by name. A database that
   // has been pushed, reverted and hand-patched over time may enforce it as a
@@ -334,41 +388,61 @@ export async function repairReferrerIndex(): Promise<void> {
 }
 
 async function runSeed(): Promise<void> {
-  // Repair blocking schema drift before anything writes per-user rows. A failure
-  // here must not take the app down: the rest of the seed is still useful, and
-  // a deployment without DDL rights should degrade, not crash.
-  try {
-    await repairCheckoutOrdersSchema();
-  } catch (error) {
-    console.warn(
-      "[flexidata] could not ensure checkout_orders exists — Paystack checkout will stay unavailable until the table is created:",
-      (error as Error)?.message ?? error,
-      "\n  Fix: run `npx drizzle-kit push` against this database.",
-    );
-  }
-
-  try {
-    await repairDepositRequestsSchema();
-  } catch (error) {
-    console.warn(
-      "[flexidata] could not ensure deposit_requests exists — wallet funding will stay unavailable until the table is created:",
-      (error as Error)?.message ?? error,
-      "\n  Fix: run `npx drizzle-kit push` against this database.",
-    );
-  }
-
-  try {
-    await repairReferrerIndex();
-  } catch (error) {
-    // Sign-up with a referral code will keep failing while the UNIQUE
-    // constraint is in place, so say so plainly rather than burying it.
-    console.warn(
-      "[flexidata] could not remove the UNIQUE constraint on users.referred_by — " +
-        "sign-ups that use a referral code will fail until it is gone:",
-      (error as Error)?.message ?? error,
-      "\n  Fix: run `npx drizzle-kit push` against this database, or, if the role " +
-        "cannot run DDL, drop the constraint manually.",
-    );
+  // Repair blocking schema drift — these are independent DDL checks that can
+  // run in parallel (was sequential before, adding ~400-800ms on cold start
+  // with Neon). Use allSettled so one failure doesn't block the others.
+  const repairs = await Promise.allSettled([
+    (async () => {
+      try {
+        await repairCheckoutOrdersSchema();
+      } catch (error) {
+        console.warn(
+          "[flexidata] could not ensure checkout_orders exists — Paystack checkout will stay unavailable until the table is created:",
+          (error as Error)?.message ?? error,
+          "\n  Fix: run `npx drizzle-kit push` against this database.",
+        );
+      }
+    })(),
+    (async () => {
+      try {
+        await repairDepositRequestsSchema();
+      } catch (error) {
+        console.warn(
+          "[flexidata] could not ensure deposit_requests exists — wallet funding will stay unavailable until the table is created:",
+          (error as Error)?.message ?? error,
+          "\n  Fix: run `npx drizzle-kit push` against this database.",
+        );
+      }
+    })(),
+    (async () => {
+      try {
+        await repairReferrerIndex();
+      } catch (error) {
+        console.warn(
+          "[flexidata] could not remove the UNIQUE constraint on users.referred_by — " +
+            "sign-ups that use a referral code will fail until it is gone:",
+          (error as Error)?.message ?? error,
+          "\n  Fix: run `npx drizzle-kit push` against this database, or, if the role " +
+            "cannot run DDL, drop the constraint manually.",
+        );
+      }
+    })(),
+    (async () => {
+      try {
+        await repairPerformanceIndexes();
+      } catch (error) {
+        console.warn(
+          "[flexidata] could not ensure performance indexes — history and home queries may stay slow until indexes are created:",
+          (error as Error)?.message ?? error,
+        );
+      }
+    })(),
+  ]);
+  // Log if any repair settled as rejected without being caught above (defense-in-depth)
+  for (const r of repairs) {
+    if (r.status === "rejected") {
+      console.warn("[flexidata] seed repair unhandled rejection", r.reason);
+    }
   }
 
   // Bundle plans are the catalog the whole shop is built on.

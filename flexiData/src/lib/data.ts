@@ -8,8 +8,8 @@ import {
   users,
   wallets,
 } from "@/db/schema";
-import { and, desc, eq, asc } from "drizzle-orm";
-import { ensureSeeded } from "@/lib/seed";
+import { and, desc, eq, asc, inArray } from "drizzle-orm";
+import { ensureSeeded, ensureSeededBackground } from "@/lib/seed";
 import {
   TRANSACTION_INSERT_FIELDS,
   buildCompatInsert,
@@ -18,6 +18,18 @@ import {
   withSchemaFallback,
 } from "@/lib/schema-compat";
 import type { TrackableTx } from "@/lib/fulfillment";
+
+// ---------------------------------------------------------------------------
+// Catalog cache — bundle plans & price alerts change rarely. Cache in process
+// memory for 60s so navigating between /data → / → /more doesn't refetch the
+// same 35-row catalog via Neon on every tap.
+// ---------------------------------------------------------------------------
+const CATALOG_TTL_MS = 60_000;
+let plansCache: { data: PlanDTO[]; ts: number } | null = null;
+let alertsCache: { data: AlertDTO[]; ts: number } | null = null;
+function isCatalogFresh(ts: number): boolean {
+  return Date.now() - ts < CATALOG_TTL_MS;
+}
 
 export type WalletDTO = {
   id: number;
@@ -137,9 +149,13 @@ export class WalletNotFoundError extends Error {
  * Fetch the wallet row for a signed-in user. Every authenticated flow goes
  * through here instead of a hard-coded `id = 1`, so users only ever see and
  * move their own money, points and ledger.
+ *
+ * NOTE: intentionally does NOT await ensureSeeded() — wallet lookups don't
+ * need the shared catalog and were previously blocked by 10+ sequential DDL
+ * probes on every cold start. Catalog seeding runs in background.
  */
 export async function getWalletRowForUser(userId: number): Promise<WalletRow> {
-  await ensureSeeded();
+  ensureSeededBackground();
   const row = await db
     .select()
     .from(wallets)
@@ -182,7 +198,7 @@ function toTxDTO(t: TxRecord): TxDTO {
 }
 
 export async function getRecentTransactions(walletId: number, limit = 6): Promise<TxDTO[]> {
-  await ensureSeeded();
+  ensureSeededBackground();
   const rows = await db
     .select(TX_SELECT)
     .from(transactions)
@@ -237,7 +253,7 @@ export async function getTrackableTx(
   walletId: number,
   ref: string,
 ): Promise<TrackableTx | null> {
-  await ensureSeeded();
+  ensureSeededBackground();
 
   return withSchemaFallback(async (compat) => {
     const hasGateway = hasAllTransactionColumns(compat, [...TRACK_GATEWAY_FIELDS]);
@@ -304,7 +320,7 @@ export async function getTrackableTx(
 }
 
 export async function getAllTransactions(walletId: number): Promise<TxDTO[]> {
-  await ensureSeeded();
+  ensureSeededBackground();
   const rows = await db
     .select(TX_SELECT)
     .from(transactions)
@@ -320,7 +336,10 @@ export async function getAllTransactions(walletId: number): Promise<TxDTO[]> {
  * a customer sees at a glance what they're still waiting on.
  */
 export async function getActiveDeliveries(walletId: number, limit = 4): Promise<TxDTO[]> {
-  await ensureSeeded();
+  ensureSeededBackground();
+  // Push trackable filter into DB (type in data/airtime) so we don't over-fetch
+  // 20 rows then slice — with the new composite index this is a single indexed
+  // lookup limited to `limit` directly.
   const rows = await db
     .select(TX_SELECT)
     .from(transactions)
@@ -328,20 +347,19 @@ export async function getActiveDeliveries(walletId: number, limit = 4): Promise<
       and(
         eq(transactions.walletId, walletId),
         eq(transactions.status, "pending"),
+        inArray(transactions.type, ["data", "airtime"]),
       ),
     )
     .orderBy(desc(transactions.createdAt))
-    .limit(20);
-  return rows
-    .map(toTxDTO)
-    .filter((t) => t.trackable)
-    .slice(0, limit);
+    .limit(limit);
+  return rows.map(toTxDTO);
 }
 
 export async function getPlans(): Promise<PlanDTO[]> {
+  if (plansCache && isCatalogFresh(plansCache.ts)) return plansCache.data;
   await ensureSeeded();
   const rows = await db.select(PLAN_SELECT).from(bundlePlans).orderBy(asc(bundlePlans.sortOrder));
-  return rows.map((p) => ({
+  const data = rows.map((p) => ({
     id: p.id,
     network: p.network,
     category: p.category,
@@ -351,20 +369,26 @@ export async function getPlans(): Promise<PlanDTO[]> {
     retail: Number(p.retailPrice),
     badge: p.badge,
   }));
+  plansCache = { data, ts: Date.now() };
+  return data;
 }
 
 export async function getActiveAlerts(): Promise<AlertDTO[]> {
+  if (alertsCache && isCatalogFresh(alertsCache.ts)) return alertsCache.data;
+  // Alerts are seeded data; ensure it exists but allow fast path if recently seeded
   await ensureSeeded();
   const rows = await db
     .select()
     .from(priceAlerts)
     .where(eq(priceAlerts.active, true))
     .orderBy(desc(priceAlerts.createdAt));
-  return rows.map((a) => ({ id: a.id, network: a.network, title: a.title, body: a.body, tag: a.tag }));
+  const data = rows.map((a) => ({ id: a.id, network: a.network, title: a.title, body: a.body, tag: a.tag }));
+  alertsCache = { data, ts: Date.now() };
+  return data;
 }
 
 export async function getSchedules(walletId: number): Promise<ScheduleDTO[]> {
-  await ensureSeeded();
+  ensureSeededBackground();
   const rows = await db
     .select()
     .from(scheduledTopups)
@@ -382,7 +406,7 @@ export async function getSchedules(walletId: number): Promise<ScheduleDTO[]> {
 }
 
 export async function getAgentProfile(walletId: number): Promise<AgentDTO | null> {
-  await ensureSeeded();
+  ensureSeededBackground();
   const rows = await db
     .select()
     .from(agentProfiles)
