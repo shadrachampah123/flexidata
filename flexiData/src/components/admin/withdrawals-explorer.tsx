@@ -12,6 +12,7 @@ export function WithdrawalsExplorer({
   initialPage,
   pageSize,
   initialFilters,
+  actionsBlocked = false,
 }: any) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -146,10 +147,20 @@ export function WithdrawalsExplorer({
                 <td className="px-4 py-3 text-right">
                   {row.status === "pending" && (
                     <div className="flex items-center justify-end gap-2">
-                      <button onClick={() => handleAction(row.id, 'approve')} className="rounded hover:bg-emerald-100 p-1 text-emerald-600 transition-colors">
+                      <button
+                        onClick={() => handleAction(row.id, 'approve')}
+                        disabled={actionsBlocked}
+                        title={actionsBlocked ? "Blocked: the audit-log upgrade (drizzle/0007) is missing from this database. See the banner above." : "Approve"}
+                        className="rounded p-1 text-emerald-600 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
                         <CheckCircle2 className="h-5 w-5" />
                       </button>
-                      <button onClick={() => handleAction(row.id, 'reject')} className="rounded hover:bg-rose-100 p-1 text-rose-600 transition-colors">
+                      <button
+                        onClick={() => handleAction(row.id, 'reject')}
+                        disabled={actionsBlocked}
+                        title={actionsBlocked ? "Blocked: the audit-log upgrade (drizzle/0007) is missing from this database. See the banner above." : "Reject"}
+                        className="rounded p-1 text-rose-600 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
                         <XCircle className="h-5 w-5" />
                       </button>
                     </div>

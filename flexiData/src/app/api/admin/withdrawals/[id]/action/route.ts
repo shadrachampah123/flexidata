@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import { requireAdminApi } from "@/lib/admin/auth";
 import { db } from "@/db";
 import { wallets, withdrawalRequests, adminAuditLogs, transactions } from "@/db/schema";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { ensureWithdrawalSchema, ensureAdminAuditActions } from "@/lib/seed";
+import { describeAdminAuditCompatibility } from "@/lib/schema-compat";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,7 @@ class WithdrawalActionError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly code?: string,
   ) {
     super(message);
     this.name = "WithdrawalActionError";
@@ -79,6 +81,37 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
     await ensureWithdrawalSchema();
     await ensureAdminAuditActions();
 
+    // PRE-FLIGHT GATE (read-only, no DDL needed): re-read the audit catalog
+    // after the self-heal attempt. If the drift is still present — the repair
+    // can only fail when the database role lacks DDL rights (or the table is
+    // absent entirely) — the audit INSERT below would throw SQLSTATE 23514 and
+    // roll back the WHOLE money transaction: no status change, no refund, no
+    // ledger update, and the admin would get a generic "please try again"
+    // that can never succeed. That is precisely the failure that looked like
+    // "rejected, waiting for the money that never comes". So: fail FIRST,
+    // before any money statement is opened, with an answer that names the
+    // exact operator action. No balance is touched on this path.
+    const auditSchema = await describeAdminAuditCompatibility();
+    if (auditSchema.status === "legacy" || auditSchema.status === "missing") {
+      console.error(
+        `[flexidata] withdrawal action refused before money: audit schema blocked ref=${ref} ${actor} ` +
+          `status=${auditSchema.status} missing=${auditSchema.missing.join(",") || "-"}`,
+      );
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "schema_maintenance_required",
+          error:
+            "Withdrawals cannot be approved or rejected yet: this database still predates the " +
+            "audit-log upgrade (drizzle/0007_widen_admin_audit_log_actions.sql) and this server " +
+            "cannot apply it automatically. NOTHING was changed — the request is still " +
+            "`pending` and no wallet moved. An operator must run `npx drizzle-kit push` against " +
+            "this database, then retry.",
+        },
+        { status: 503, headers: { "Cache-Control": "no-store, max-age=0" } },
+      );
+    }
+
     const result = await db.transaction(async (tx) => {
       // 1. Lock the withdrawal request row and re-read its status under that
       //    lock: this is what makes a repeated action (double-click, two
@@ -90,10 +123,29 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
         .for("update");
       if (!withdrawal) throw new WithdrawalActionError("Withdrawal request not found", 404);
       if (withdrawal.status !== "pending") {
-        throw new WithdrawalActionError("Only pending requests can be modified", 409);
+        // Idempotent answer for a replayed action: an explicit conflict that
+        // states no money will move a second time, so a client (or an admin)
+        // can never mistake this for "processed, refund pending".
+        throw new WithdrawalActionError(
+          `This withdrawal is already ${withdrawal.status} — it cannot be processed again, and no refund will be applied a second time.`,
+          409,
+          "withdrawal_already_processed",
+        );
       }
 
       if (action === "approve") {
+        // CLAIM FIRST: the partial unique index
+        // `admin_audit_logs_order_action_idx` on (target_ref, action) makes a
+        // duplicate `approve_withdrawal` for this ref impossible at the
+        // database level, even if the status guard above were ever bypassed.
+        // If anything below fails, the claim rolls back with the rest.
+        await tx.insert(adminAuditLogs).values({
+          adminUserId: admin.userId,
+          targetUserId: withdrawal.userId,
+          action: "approve_withdrawal",
+          targetRef: withdrawal.ref,
+        });
+
         // Move to processing (ready for payout). For now, as per phase 3, we
         // don't send real money. We set status to processing, meaning it's
         // approved and waiting for provider integration. The gross amount was
@@ -108,18 +160,13 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
           .update(transactions)
           .set({ status: "successful" })
           .where(eq(transactions.ref, withdrawal.ref));
-
-        await tx.insert(adminAuditLogs).values({
-          adminUserId: admin.userId,
-          targetUserId: withdrawal.userId,
-          action: "approve_withdrawal",
-          targetRef: withdrawal.ref,
-        });
       } else {
-        // 2. Lock the user's wallet row before refunding, so concurrent money
-        //    operations on the same wallet serialize behind this transaction.
+        // 2. The refund destination is DERIVED ON THE SERVER from the
+        //    withdrawal row (which records the wallet the money was actually
+        //    deducted from at request time) — never from the admin's
+        //    identity, never from any client-supplied wallet id.
         const [lockedWallet] = await tx
-          .select({ id: wallets.id })
+          .select({ id: wallets.id, userId: wallets.userId })
           .from(wallets)
           .where(eq(wallets.id, withdrawal.walletId))
           .for("update");
@@ -128,27 +175,95 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
           // withdrawal); if it ever does, this is a fault — roll back.
           throw new Error(`wallet ${withdrawal.walletId} not found for withdrawal ${withdrawal.ref}`);
         }
+        // Ownership assertion: the wallet must belong to the user who made
+        // this withdrawal. A mismatch is data corruption, not a business
+        // condition — refuse loudly rather than refund into the wrong wallet.
+        if (lockedWallet.userId !== withdrawal.userId) {
+          throw new Error(
+            `withdrawal ${withdrawal.ref}: wallet ${withdrawal.walletId} (user ${lockedWallet.userId}) ` +
+              `does not belong to withdrawal user ${withdrawal.userId} — refusing to refund`,
+          );
+        }
 
-        // 3. Refund EXACTLY what the request deducted. `POST /api/wallet/withdraw`
+        // 3. Proof of the deduction: the withdrawal's own ledger row, locked
+        //    in the same transaction. It is created atomically with the
+        //    request by POST /api/wallet/withdraw, so its absence means the
+        //    database is in a state the app never writes — there would be no
+        //    deduction to reverse, and refunding would invent money.
+        const [ledger] = await tx
+          .select()
+          .from(transactions)
+          .where(
+            and(eq(transactions.ref, withdrawal.ref), eq(transactions.walletId, withdrawal.walletId)),
+          )
+          .for("update");
+        if (!ledger || ledger.type !== "withdrawal") {
+          throw new Error(
+            `no 'withdrawal' ledger row for ${withdrawal.ref} (wallet ${withdrawal.walletId}) — ` +
+              "refusing to refund without the deduction record",
+          );
+        }
+        if (ledger.status === "failed") {
+          // This request was already rejected and refunded (a bypassed guard
+          // or a hand-edited status is the only way to get here under the row
+          // lock). The answer must be a conflict, never a second refund.
+          throw new WithdrawalActionError(
+            "This withdrawal was already rejected and refunded — no second refund will be applied.",
+            409,
+            "withdrawal_already_processed",
+          );
+        }
+        if (ledger.status !== "pending") {
+          throw new WithdrawalActionError(
+            `This withdrawal's ledger entry is ${ledger.status} — it cannot be rejected.`,
+            409,
+            "withdrawal_already_processed",
+          );
+        }
+
+        // 4. CLAIM the rejection: exactly one `reject_withdrawal` audit row
+        //    per ref is database-enforced by the partial unique index, so a
+        //    replayed or concurrent rejection can never refund twice even if
+        //    every in-memory guard above were bypassed. The row also carries
+        //    the operator's reason.
+        await tx.insert(adminAuditLogs).values({
+          adminUserId: admin.userId,
+          targetUserId: withdrawal.userId,
+          action: "reject_withdrawal",
+          reason: reason,
+          targetRef: withdrawal.ref,
+        });
+
+        // 5. Refund EXACTLY what the request deducted. `POST /api/wallet/withdraw`
         //    deducts the GROSS amount (`withdrawal_requests.amount`, e.g.
         //    GH₵ 5.00 — not the GH₵ 4.90 net of the fee), so the reversal adds
-        //    the same gross figure back. No new calculation is invented here.
+        //    the same gross figure back. `withdrawal.amount` is read from the
+        //    row under lock and used verbatim — Postgres numeric arithmetic,
+        //    no re-computation, no floating point, nothing invented here.
         await tx
           .update(wallets)
           .set({ balance: sql`${wallets.balance} + ${withdrawal.amount}` })
           .where(eq(wallets.id, withdrawal.walletId));
 
-        // 4. Ledger/accounting entry: the `withdrawal` ledger row that was
+        // 6. Ledger/accounting entry: the `withdrawal` ledger row that was
         //    created as `pending` when the request was made becomes `failed`,
-        //    carrying the operator's reason.
-        await tx
-          .update(transactions)
-          .set({ status: "failed", providerMessage: reason })
-          .where(eq(transactions.ref, withdrawal.ref));
+        //    carrying the operator's reason. The `status = 'pending'` clause
+        //    is a backstop on top of the row lock: if a concurrent mutation
+        //    somehow changed it, zero rows update and the WHOLE transaction
+        //    rolls back instead of double-refunding.
+        const ledgerRes = await tx.execute(
+          sql`update transactions
+                set status = 'failed', provider_message = ${reason}
+              where ref = ${withdrawal.ref} and wallet_id = ${withdrawal.walletId} and status = 'pending'`,
+        );
+        if ((ledgerRes as { rowCount?: number }).rowCount === 0) {
+          throw new Error(`ledger update for ${withdrawal.ref} matched no rows — rolling back`);
+        }
 
-        // 5. Only now mark the withdrawal itself rejected. Still inside the
-        //    same transaction: if anything below fails, the refund, the ledger
-        //    row and this status change all roll back together.
+        // 7. Only now mark the withdrawal itself rejected. Still inside the
+        //    same transaction: if anything above or below fails, the claim,
+        //    the refund, the ledger row and this status change all roll back
+        //    together.
         await tx
           .update(withdrawalRequests)
           .set({
@@ -158,29 +273,20 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
             updatedAt: new Date(),
           })
           .where(eq(withdrawalRequests.id, withdrawalId));
-
-        // 6. Admin audit trail. The widened `admin_audit_logs_action_check`
-        //    (drizzle/0006 + 0007 / `ensureAdminAuditActions`) admits
-        //    `reject_withdrawal`; the partial unique index on
-        //    (target_ref, action) additionally makes a replayed audit insert
-        //    impossible even if the status guard above were ever bypassed.
-        await tx.insert(adminAuditLogs).values({
-          adminUserId: admin.userId,
-          targetUserId: withdrawal.userId,
-          action: "reject_withdrawal",
-          reason: reason,
-          targetRef: withdrawal.ref,
-        });
       }
-      // 7. COMMIT — db.transaction commits here; any throw above rolled back
-      //    every step (no partial refund, no partial rejection).
+      // 8. COMMIT — db.transaction commits here and only then resolves, so the
+      //    API response below can never be sent before the atomic restoration
+      //    has actually committed; any throw above rolled back every step (no
+      //    partial refund, no partial rejection, no double refund).
       return { ok: true };
     });
 
     return NextResponse.json(result);
   } catch (err: unknown) {
     if (err instanceof WithdrawalActionError) {
-      return NextResponse.json({ ok: false, error: err.message }, { status: err.status });
+      const payload: { ok: false; error: string; code?: string } = { ok: false, error: err.message };
+      if (err.code) payload.code = err.code;
+      return NextResponse.json(payload, { status: err.status });
     }
     // Never echo `err.message` back: it is the driver's text (SQL fragments,
     // constraint and column names). Log the real cause with a correlation id

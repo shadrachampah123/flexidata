@@ -14,6 +14,53 @@ export function money(amount: number, opts?: { sign?: boolean }): string {
   return `GH₵ ${str}`;
 }
 
+// ---------------------------------------------------------------------------
+// Exact cedi/pesewa arithmetic for the money paths.
+//
+// Wallet accounting is integer pesewa-in + Postgres numeric: these helpers
+// convert cedi strings/amounts to and from integer pesewas WITHOUT floating
+// point, so fee and net calculations (and the amounts handed to the database)
+// can never carry binary float error. `numeric(12,2)` holds at most ten
+// digits before the point, which is the ceiling enforced here.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a cedi amount (JSON number or string, e.g. `5`, `"5"`, `"5.5"`,
+ * `"1234567.89"`) into integer pesewas. Returns `null` for anything that is
+ * not a finite non-negative cedi amount with at most two decimal places —
+ * `0.30000000000000004` (float residue), `"5.999"`, exponent notation and
+ * oversized values are all refused rather than rounded.
+ */
+export function cedisToPesewas(value: unknown): number | null {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) return null;
+    // Accept only values whose decimal expansion has ≤2 places. The
+    // round-trip is safe up to the numeric(12,2) ceiling (10^12 pesewas <
+    // Number.MAX_SAFE_INTEGER), so no float error can slip through.
+    if (Math.round(value * 100) / 100 !== value) return null;
+    return cedisStringToPesewas(value.toFixed(2));
+  }
+  if (typeof value === "string") {
+    return cedisStringToPesewas(value.trim());
+  }
+  return null;
+}
+
+function cedisStringToPesewas(s: string): number | null {
+  if (!/^\d{1,10}(\.\d{1,2})?$/.test(s)) return null;
+  const [whole, frac = ""] = s.split(".");
+  const pesewas = Number(whole) * 100 + Number(frac.padEnd(2, "0"));
+  return Number.isSafeInteger(pesewas) ? pesewas : null;
+}
+
+/** Exact inverse of the parsing above: integer pesewas → "123.45" string. */
+export function pesewasToCedisString(pesewas: number): string {
+  if (!Number.isSafeInteger(pesewas)) return "0.00";
+  const sign = pesewas < 0 ? "-" : "";
+  const p = Math.abs(pesewas);
+  return `${sign}${Math.floor(p / 100)}.${(p % 100).toString().padStart(2, "0")}`;
+}
+
 export function groupPhone(digits: string): string {
   const d = digits.replace(/\D/g, "").slice(0, 12);
   // International spelling (233 XX XXX XXXX). Keep all 12 digits the user typed
