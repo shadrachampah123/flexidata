@@ -22,6 +22,7 @@
     "verify:admin-ops": "tsx scripts/verify-admin-phase2-step3.ts",
     "admin:grant": "tsx scripts/grant-admin.ts",
     "verify:demo-deposit-cleanup": "tsx scripts/verify-demo-deposit-cleanup.ts",
+    "verify:withdrawal": "tsx scripts/verify-withdrawal-schema.ts",
     "cleanup:demo-deposits": "tsx scripts/cleanup-demo-deposits.ts",
     "report:paystack-transactions": "tsx scripts/report-paystack-transactions.ts",
     "report:wallet-audit": "tsx scripts/report-wallet-audit.ts"
