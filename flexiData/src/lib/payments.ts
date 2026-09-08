@@ -173,21 +173,33 @@ function depositChannels(method: PaymentMethod): string[] {
  */
 export async function initPayment(params: {
   ref: string;
-  amountGhs: number;
+  /**
+   * Exact integer pesewas the charge is for (parsed by the deposit service —
+   * never a float, and always the same integer that verification is later
+   * required to match exactly).
+   */
+  amountSubunits: number;
   email: string;
   method: PaymentMethod;
   phone: string;
   /**
-   * Mobile-money number the customer typed in the funding form. It is a HINT
-   * recorded in the Paystack metadata only — Paystack's hosted checkout is what
-   * actually collects and debits a mobile-money wallet, and the wallet that gets
-   * credited is always the signed-in user's own (resolved server-side).
+   * Mobile-money number the customer typed in the funding form.
+   *
+   * PROVIDER HINT ONLY: recorded in the Paystack metadata and nothing else.
+   * Paystack's hosted checkout is what actually collects and debits a
+   * mobile-money wallet, and the wallet that gets credited is always the
+   * signed-in user's own (resolved server-side). This hint is never an
+   * authoritative payout identity and must never be reused as one.
    */
   momoNumber?: string | null;
   /** Origin of the API request — the callback-URL fallback (see depositCallbackUrl). */
   requestOrigin?: string | null;
 }): Promise<InitPaymentResult> {
   const provider = paymentsProvider();
+
+  if (!Number.isInteger(params.amountSubunits) || params.amountSubunits <= 0) {
+    throw new PaystackConfigError("initPayment requires an exact positive integer pesewa amount.");
+  }
 
   if (provider === "mock") {
     // Simulated MoMo/card settlement: instant success, deterministic ref.
@@ -199,9 +211,7 @@ export async function initPayment(params: {
   // --- Paystack (shared server-only client: secret key never leaves it) ---
   const init = await paystackInitializeTransaction({
     reference: params.ref,
-    // Integer minor units (pesewas) — never a float, and always the same
-    // integer that verification is later required to match exactly.
-    amountSubunits: Math.round(params.amountGhs * 100),
+    amountSubunits: params.amountSubunits,
     email: params.email,
     callbackUrl: depositCallbackUrl(params.ref, params.requestOrigin),
     channels: depositChannels(params.method),

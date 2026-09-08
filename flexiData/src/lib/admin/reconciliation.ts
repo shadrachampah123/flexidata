@@ -69,8 +69,10 @@ export function reconciliationRule(caps: ReconciliationCapabilities): Reconcilia
       exact: true,
       note:
         "Sums every ledger row that actually moved wallet cash: successful rows, and pending or " +
-        "failed rows that were charged, provided no refund is recorded against them. Paystack " +
-        "checkout orders are excluded because they never touch the wallet.",
+        "failed rows that were charged, provided no refund is recorded against them. Withdrawals " +
+        "count as debits while pending or successful (the wallet is debited at request time) and " +
+        "as zero once rejected/failed (the gross amount is refunded). Paystack checkout orders " +
+        "are excluded because they never touch the wallet.",
     };
   }
   return {
@@ -97,14 +99,6 @@ function col(alias: string, column: string): SQL {
 export function moneyMovedSql(alias: string, caps: ReconciliationCapabilities): SQL {
   const t = (column: string) => col(alias, column);
 
-  // Payment taken, payment taken and still settling (pending), or payment taken
-  // and the order then failed without a recorded refund. That last case is
-  // exactly the "wallet charged, bundle never sent, no refund" situation the
-  // support queue also flags, so the two screens cannot disagree.
-  const settled = caps.chargedAt
-    ? sql`(${t("status")} = 'successful' or (${t("status")} in ('pending', 'failed') and ${t("charged_at")} is not null))`
-    : sql`(${t("status")} = 'successful')`;
-
   // A reversed/refunded row records money that came back: net effect zero.
   const notRefunded = caps.refundedAt ? sql`${t("refunded_at")} is null` : null;
 
@@ -115,6 +109,36 @@ export function moneyMovedSql(alias: string, caps: ReconciliationCapabilities): 
     ? sql`not exists (select 1 from "checkout_orders" "co" where "co"."ref" = ${t("ref")})`
     : null;
 
+  // Withdrawals (F4): the wallet is debited the GROSS amount at request time,
+  // inside the same transaction that writes the ledger row — so the ledger row
+  // is a debit for the whole time the deduction stands:
+  //   pending    -> debit (requested, or admin-approved and awaiting payout)
+  //   successful -> debit (a future payout-provider completion; no current API
+  //                 writes this, but if one ever does it must still reconcile)
+  //   failed     -> zero  (rejected: the gross amount was refunded atomically)
+  //   reversed   -> zero  (a reversal contra, if one is ever recorded)
+  // Withdrawal rows never set `charged_at`, so they cannot share the
+  // charged-flag rule below — they get their own disjunct from ledger
+  // semantics alone. The `direction = 'out'` guard fails closed on a row the
+  // app never writes (an `in` withdrawal would otherwise reconcile as credit).
+  const withdrawalParts = [
+    sql`${t("type")} = 'withdrawal'`,
+    sql`${t("direction")} = 'out'`,
+    sql`${t("status")} in ('pending', 'successful')`,
+    notRefunded,
+    notCheckoutFunded,
+  ].filter((part): part is SQL => part !== null);
+  const withdrawalMoved = sql`(${sql.join(withdrawalParts, sql` and `)})`;
+
+  // Payment taken, payment taken and still settling (pending), or payment taken
+  // and the order then failed without a recorded refund. That last case is
+  // exactly the "wallet charged, bundle never sent, no refund" situation the
+  // support queue also flags, so the two screens cannot disagree.
+  // (Every non-withdrawal type: withdrawals are classified above, never here.)
+  const settled = caps.chargedAt
+    ? sql`(${t("status")} = 'successful' or (${t("status")} in ('pending', 'failed') and ${t("charged_at")} is not null))`
+    : sql`(${t("status")} = 'successful')`;
+
   // Cash types that never set charged_at.
   const charged = caps.chargedAt
     ? sql`(${t("charged_at")} is not null or ${t("type")} in (${sql.raw(
@@ -122,11 +146,16 @@ export function moneyMovedSql(alias: string, caps: ReconciliationCapabilities): 
       )}))`
     : null;
 
-  const parts = [settled, notRefunded, notCheckoutFunded, charged].filter(
-    (part): part is SQL => part !== null,
-  );
+  const standardParts = [
+    settled,
+    notRefunded,
+    notCheckoutFunded,
+    charged,
+    sql`${t("type")} != 'withdrawal'`,
+  ].filter((part): part is SQL => part !== null);
+  const standardMoved = sql`(${sql.join(standardParts, sql` and `)})`;
 
-  return sql`(${sql.join(parts, sql` and `)})`;
+  return sql`(${withdrawalMoved} or ${standardMoved})`;
 }
 
 /** Signed cash effect of one ledger row, as a SQL expression. */

@@ -5,7 +5,18 @@ import { CheckCircle2, ContactRound, Search, X } from "lucide-react";
 import { Sheet } from "@/components/sheet";
 import { FieldLabel } from "@/components/ui";
 import { CONTACTS } from "@/lib/constants";
-import { cn, groupPhone, isValidPhone, phoneDigits } from "@/lib/format";
+import { cn, groupPhone } from "@/lib/format";
+import { normalizeGhanaMobileStrict } from "@/lib/ghana-mobile";
+
+/**
+ * The validity indicator mirrors the SERVER's strict rule (any Ghana network):
+ * it is a typing convenience only — the API re-validates from scratch and is
+ * the sole authority (withdrawals additionally require the method's network).
+ */
+function isCompleteNumber(value: string): boolean {
+  if (!value) return false;
+  return normalizeGhanaMobileStrict(value).ok;
+}
 
 export function PhoneInput({
   value,
@@ -31,7 +42,7 @@ export function PhoneInput({
       <div
         className={cn(
           "flex items-center gap-2 rounded-2xl border bg-paper px-4 py-[13px] transition-all focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/30 dark:bg-card",
-          value && !isValidPhone(value)
+          value && !isCompleteNumber(value)
             ? "border-rose-400/60"
             : "border-black/[0.08] dark:border-line",
         )}
@@ -40,12 +51,15 @@ export function PhoneInput({
           inputMode="numeric"
           autoComplete="tel"
           value={groupPhone(value)}
-          onChange={(e) => onChange(phoneDigits(e.target.value))}
+          // Keep every digit typed (up to the longest valid spelling) — never
+          // truncate: silently slicing a pasted +233 number into 10 digits
+          // used to corrupt payout destinations client-side (W2).
+          onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(0, 14))}
           placeholder={placeholder}
           className="w-full min-w-0 flex-1 bg-transparent font-display text-[15px] font-bold tracking-wide outline-none placeholder:font-sans placeholder:font-semibold placeholder:text-zinc-400"
         />
-        {isValidPhone(value) && <CheckCircle2 className="h-[18px] w-[18px] shrink-0 text-emerald-500" />}
-        {value && !isValidPhone(value) && (
+        {isCompleteNumber(value) && <CheckCircle2 className="h-[18px] w-[18px] shrink-0 text-emerald-500" />}
+        {value && !isCompleteNumber(value) && (
           <button
             aria-label="Clear"
             onClick={() => onChange("")}

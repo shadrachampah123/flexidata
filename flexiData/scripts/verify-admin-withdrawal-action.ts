@@ -280,7 +280,11 @@ async function phaseB(pool: Pool, base: string): Promise<void> {
   const withdraw = async (amount: number): Promise<{ ok: boolean; ref?: string; error?: string }> => {
     const res = await userJar.req(base, "/api/wallet/withdraw", {
       method: "POST",
-      body: JSON.stringify({ amount, method: "momo", dest: userPhone }),
+      // NOTE (payout-readiness F1): withdrawal methods are strictly whitelisted
+      // (`momo_mtn` / `telecel_cash`) — the legacy free-form `"momo"` value is
+      // rejected by the API, so this driver uses a whitelisted method. The test
+      // phone is 024… (MTN), matching `momo_mtn`.
+      body: JSON.stringify({ amount, method: "momo_mtn", dest: userPhone }),
     });
     return (await res.json().catch(() => ({ ok: false, error: `status ${res.status}` }))) as { ok: boolean; ref?: string; error?: string };
   };
@@ -417,10 +421,13 @@ async function phaseB(pool: Pool, base: string): Promise<void> {
         [wd2.ref, wd2Row.id],
       )
     ).rows[0];
-    if (approveState.status === "processing" && Number(approveState.audit_rows) === 1 && approveState.ledger_status === "successful") {
-      ok("approved withdrawal is processing with audit + ledger");
+    // NOTE (payout-readiness F5): approval authorizes a payout (`processing`) but
+    // never completes one — the ledger row deliberately STAYS `pending` (no
+    // money has moved). `successful` is reserved for a future provider webhook.
+    if (approveState.status === "processing" && Number(approveState.audit_rows) === 1 && approveState.ledger_status === "pending") {
+      ok("approved withdrawal is processing with audit + ledger (ledger stays pending, not successful)");
     } else {
-      bad("approved withdrawal is processing with audit + ledger", JSON.stringify(approveState));
+      bad("approved withdrawal is processing with audit + ledger (ledger stays pending, not successful)", JSON.stringify(approveState));
     }
 
     const rejectApproved = await adminJar.req(base, `/api/admin/withdrawals/${wd2Row.id}/action`, {

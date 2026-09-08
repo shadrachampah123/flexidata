@@ -62,10 +62,18 @@ export function pesewasToCedisString(pesewas: number): string {
 }
 
 export function groupPhone(digits: string): string {
-  const d = digits.replace(/\D/g, "").slice(0, 12);
-  // International spelling (233 XX XXX XXXX). Keep all 12 digits the user typed
-  // so the server can normalize them — capping at 10 here made +233 numbers
-  // impossible to enter (they were truncated into an invalid 10-digit string).
+  // Display grouping only — NEVER truncate: the server strictly validates the
+  // underlying digits and rejects anything invalid, so dropping characters here
+  // would only turn a typable number into a wrong one. (Cap at 15 digits, the
+  // longest valid spelling `00233XXXXXXXXX` is 14.)
+  const d = digits.replace(/\D/g, "").slice(0, 15);
+  // International spellings (233 XX XXX XXXX / 00233 XX XXX XXXX). Keep every
+  // digit the user typed so the server can normalize them — capping here made
+  // +233 numbers impossible to enter (they were truncated into an invalid string).
+  if (d.startsWith("00233") && d.length > 10) {
+    const rest = d.slice(5);
+    return ["00233", rest.slice(0, 2), rest.slice(2, 5), rest.slice(5)].filter(Boolean).join(" ");
+  }
   if (d.startsWith("233") && d.length > 10) {
     const rest = d.slice(3);
     return ["233", rest.slice(0, 2), rest.slice(2, 5), rest.slice(5)].filter(Boolean).join(" ");

@@ -426,6 +426,107 @@ export async function repairWithdrawalSchema(): Promise<void> {
   await db.execute(
     sql`create index if not exists withdrawal_requests_created_at_idx on withdrawal_requests (created_at)`,
   );
+
+  // F2/F6 convergence with drizzle/0008_withdrawal_integrity.sql: the
+  // idempotency column + partial unique index and the four CHECK constraints.
+  // Same production-safety contract as the migration — report-first, never
+  // rewrite: constraints are added NOT VALID, existing violators are NAMED in
+  // the log (never mutated), and each constraint is VALIDATEd only when clean.
+  await repairWithdrawalIntegrity();
+}
+
+/**
+ * Converge `withdrawal_requests` with migration 0008 (idempotency + CHECKs).
+ *
+ * Runs as part of `repairWithdrawalSchema()` (and therefore before the first
+ * withdrawal on every boot), so a database that never received the migration
+ * file still gets the same protection. Every step is catalog-guarded and
+ * idempotent; every statement is additive; no row is ever inserted, updated or
+ * deleted here — including rows that violate a new constraint, which are
+ * REPORTED (by ref) and left for a human to resolve.
+ */
+async function repairWithdrawalIntegrity(): Promise<void> {
+  await db.execute(sql`alter table withdrawal_requests add column if not exists idempotency_key varchar(64)`);
+
+  // Partial unique index (F2). A duplicate (wallet_id, idempotency_key) pair is
+  // only possible via hand-edited data — the withdrawal route serializes on
+  // the wallet row lock and re-checks inside its transaction, so it cannot
+  // write one even before this index exists. Duplicates are reported and the
+  // index is left for the operator (creating it would fail anyway); the
+  // application-level guards above still hold until then.
+  const dupes = await db.execute<{ refs: string | null }>(sql`
+    select string_agg(w.ref, ', ' order by w.ref) as refs
+    from (
+      select ref, count(*) over (partition by wallet_id, idempotency_key) as n
+      from withdrawal_requests
+      where idempotency_key is not null
+    ) w
+    where w.n > 1
+  `);
+  const dupeRefs = (dupes.rows?.[0] as { refs?: string | null } | undefined)?.refs ?? null;
+  if (dupeRefs) {
+    console.warn(
+      `[flexidata] NOT creating withdrawal_requests_wallet_idempotency_idx: duplicate (wallet_id, idempotency_key) pairs exist (${dupeRefs}). ` +
+        "Resolve them manually (no row was touched) and re-run; idempotency currently rests on the route's wallet-lock re-check alone.",
+    );
+  } else {
+    await db.execute(sql`
+      create unique index if not exists withdrawal_requests_wallet_idempotency_idx
+        on withdrawal_requests (wallet_id, idempotency_key)
+        where idempotency_key is not null
+    `);
+  }
+
+  // The four CHECK constraints (F6): amount > 0, fee within amount,
+  // amount = fee + net, method whitelist. Each is added NOT VALID (future
+  // writes enforced immediately, existing rows untouched), then VALIDATEd only
+  // when zero existing rows violate it — otherwise the violators are reported
+  // by ref and the constraint stays NOT VALID.
+  const checks: { name: string; predicate: string; violators: string }[] = [
+    {
+      name: "withdrawal_requests_amount_positive_check",
+      predicate: `"withdrawal_requests"."amount" > 0`,
+      violators: `not (amount > 0)`,
+    },
+    {
+      name: "withdrawal_requests_fee_within_amount_check",
+      predicate: `"withdrawal_requests"."fee" >= 0 and "withdrawal_requests"."fee" <= "withdrawal_requests"."amount"`,
+      violators: `not (fee >= 0 and fee <= amount)`,
+    },
+    {
+      name: "withdrawal_requests_amount_split_check",
+      predicate: `"withdrawal_requests"."amount" = "withdrawal_requests"."fee" + "withdrawal_requests"."net_amount"`,
+      violators: `not (amount = fee + net_amount)`,
+    },
+    {
+      name: "withdrawal_requests_method_check",
+      predicate: `"withdrawal_requests"."destination_method" in ('momo_mtn', 'telecel_cash')`,
+      violators: `not (destination_method in ('momo_mtn', 'telecel_cash'))`,
+    },
+  ];
+  for (const check of checks) {
+    const present = await db.execute<{ n: number }>(sql`
+      select count(*)::int as n from pg_constraint where conname = ${check.name}
+    `);
+    if (((present.rows?.[0] as { n?: number } | undefined)?.n ?? 0) === 0) {
+      await db.execute(sql.raw(
+        `alter table "withdrawal_requests" add constraint "${check.name}" check (${check.predicate}) not valid`,
+      ));
+    }
+    const bad = await db.execute<{ refs: string | null }>(sql.raw(
+      `select string_agg(ref, ', ' order by ref) as refs from withdrawal_requests where ${check.violators}`,
+    ));
+    const badRefs = (bad.rows?.[0] as { refs?: string | null } | undefined)?.refs ?? null;
+    if (badRefs) {
+      console.warn(
+        `[flexidata] NOT validating ${check.name}: existing row(s) violate it (${badRefs}). ` +
+          "Rows preserved untouched; new writes are still enforced. Resolve the data, then run " +
+          `ALTER TABLE withdrawal_requests VALIDATE CONSTRAINT ${check.name}; manually.`,
+      );
+    } else {
+      await db.execute(sql.raw(`alter table "withdrawal_requests" validate constraint "${check.name}"`));
+    }
+  }
 }
 
 /**
