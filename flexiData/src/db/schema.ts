@@ -452,12 +452,20 @@ export const withdrawalRequests = pgTable("withdrawal_requests", {
   amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
   fee: numeric("fee", { precision: 12, scale: 2 }).notNull(),
   netAmount: numeric("net_amount", { precision: 12, scale: 2 }).notNull(),
-  destinationMethod: varchar("destination_method", { length: 40 }).notNull(), // e.g., 'momo'
+  destinationMethod: varchar("destination_method", { length: 40 }).notNull(), // e.g., 'momo_mtn'
   destinationDetails: jsonb("destination_details").notNull(),
   status: withdrawalStatusEnum("status").notNull().default("pending"),
   adminUserId: integer("admin_user_id"),
   adminRejectionReason: varchar("admin_rejection_reason", { length: 240 }),
   providerFields: jsonb("provider_fields"),
+  /**
+   * Client-supplied idempotency key (NULL for legacy clients that did not send
+   * one — the route mints a fresh UUID for those). The partial unique index
+   * below makes "one withdrawal per (wallet, key)" database-enforced, so a
+   * retried or concurrently-duplicated request can never deduct twice even if
+   * every application-level guard were bypassed.
+   */
+  idempotencyKey: varchar("idempotency_key", { length: 64 }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
@@ -465,4 +473,17 @@ export const withdrawalRequests = pgTable("withdrawal_requests", {
   index("withdrawal_requests_wallet_idx").on(table.walletId),
   index("withdrawal_requests_status_idx").on(table.status),
   index("withdrawal_requests_created_at_idx").on(table.createdAt),
+  // F2: idempotency is database-enforced (NULL keys are legacy rows and are
+  // excluded — Postgres treats NULLs as distinct, so this only binds keyed rows).
+  uniqueIndex("withdrawal_requests_wallet_idempotency_idx")
+    .on(table.walletId, table.idempotencyKey)
+    .where(sql`${table.idempotencyKey} is not null`),
+  // F6: stored-data integrity — impossible withdrawal states are unrepresentable.
+  check("withdrawal_requests_amount_positive_check", sql`${table.amount} > 0`),
+  check("withdrawal_requests_fee_within_amount_check", sql`${table.fee} >= 0 and ${table.fee} <= ${table.amount}`),
+  check("withdrawal_requests_amount_split_check", sql`${table.amount} = ${table.fee} + ${table.netAmount}`),
+  check(
+    "withdrawal_requests_method_check",
+    sql`${table.destinationMethod} in ('momo_mtn', 'telecel_cash')`,
+  ),
 ]);

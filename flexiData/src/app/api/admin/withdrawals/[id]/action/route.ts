@@ -6,6 +6,12 @@ import { and, eq, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { ensureWithdrawalSchema, ensureAdminAuditActions } from "@/lib/seed";
 import { describeAdminAuditCompatibility } from "@/lib/schema-compat";
+import {
+  ADMIN_WITHDRAWAL_ACTIONS,
+  assertWithdrawalTransition,
+  WithdrawalTransitionError,
+  type AdminWithdrawalAction,
+} from "@/lib/withdrawals";
 
 export const dynamic = "force-dynamic";
 
@@ -43,13 +49,31 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
     const { admin } = gate.context;
     actor = `admin=${admin.userId}`;
     const { id } = await context.params;
-    const body = (await req.json().catch(() => ({}))) as { action?: string; reason?: string };
-    const { action } = body;
+    const rawBody: unknown = await req.json().catch(() => ({}));
+    // Strict body shape: only `action` + `reason` are accepted. A smuggled
+    // `status` (or any other field) is refused outright — this API must not
+    // expose a path that falsely completes a payout, and the target status is
+    // derived from the action, never from client input.
+    if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+      return NextResponse.json({ ok: false, error: "Invalid request" }, { status: 400 });
+    }
+    const body = rawBody as Record<string, unknown>;
+    for (const key of Object.keys(body)) {
+      if (key !== "action" && key !== "reason") {
+        return NextResponse.json({ ok: false, error: "Invalid request" }, { status: 400 });
+      }
+    }
+    const action = body.action as string | undefined;
     const reason = typeof body.reason === "string" ? body.reason.trim() : "";
 
-    if (!["approve", "reject"].includes(action ?? "")) {
+    if (action !== "approve" && action !== "reject") {
       return NextResponse.json({ ok: false, error: "Invalid action" }, { status: 400 });
     }
+    const adminAction = action as AdminWithdrawalAction;
+    // The lifecycle edge this action expresses (`approve` -> `processing`,
+    // `reject` -> `rejected`). `successful` is deliberately inexpressible:
+    // payout completion belongs to a future provider webhook, not to approval.
+    const targetStatus = ADMIN_WITHDRAWAL_ACTIONS[adminAction];
 
     // The admin UI refuses to send a rejection without a reason
     // (`window.prompt` must be filled), so the same rule is enforced here —
@@ -124,10 +148,15 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
         .where(eq(withdrawalRequests.id, withdrawalId))
         .for("update");
       if (!withdrawal) throw new WithdrawalActionError("Withdrawal request not found", 404);
-      if (withdrawal.status !== "pending") {
-        // Idempotent answer for a replayed action: an explicit conflict that
-        // states no money will move a second time, so a client (or an admin)
-        // can never mistake this for "processed, refund pending".
+      // Server-validated lifecycle transition (row already locked): only
+      // `pending` may move, and only to the status its action names. A
+      // replayed action (double-click, two admins, retried request) lands here
+      // as an explicit conflict — never a second state change, never a second
+      // refund.
+      try {
+        assertWithdrawalTransition(withdrawal.status, targetStatus);
+      } catch (error) {
+        if (!(error instanceof WithdrawalTransitionError)) throw error;
         throw new WithdrawalActionError(
           `This withdrawal is already ${withdrawal.status} — it cannot be processed again, and no refund will be applied a second time.`,
           409,
@@ -135,7 +164,34 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
         );
       }
 
-      if (action === "approve") {
+      if (adminAction === "approve") {
+        // Proof of the deduction, locked in the same transaction (mirrors the
+        // reject path): the withdrawal's own ledger row must exist and still be
+        // `pending`. Approval authorizes a payout; it never completes one, so
+        // the ledger row STAYS `pending` here — marking it `successful` would
+        // claim money moved that never did. Completion belongs to a future
+        // payout-provider webhook that does not exist in this release.
+        const [approveLedger] = await tx
+          .select()
+          .from(transactions)
+          .where(
+            and(eq(transactions.ref, withdrawal.ref), eq(transactions.walletId, withdrawal.walletId)),
+          )
+          .for("update");
+        if (!approveLedger || approveLedger.type !== "withdrawal") {
+          throw new Error(
+            `no 'withdrawal' ledger row for ${withdrawal.ref} (wallet ${withdrawal.walletId}) — ` +
+              "refusing to approve without the deduction record",
+          );
+        }
+        if (approveLedger.status !== "pending") {
+          throw new WithdrawalActionError(
+            `This withdrawal's ledger entry is ${approveLedger.status} — it cannot be approved.`,
+            409,
+            "withdrawal_already_processed",
+          );
+        }
+
         // CLAIM FIRST: the partial unique index
         // `admin_audit_logs_order_action_idx` on (target_ref, action) makes a
         // duplicate `approve_withdrawal` for this ref impossible at the
@@ -148,20 +204,15 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
           targetRef: withdrawal.ref,
         });
 
-        // Move to processing (ready for payout). For now, as per phase 3, we
-        // don't send real money. We set status to processing, meaning it's
-        // approved and waiting for provider integration. The gross amount was
-        // already deducted from the wallet when the request was created, so
-        // approve moves no money.
+        // Move to processing (authorized, awaiting a payout provider). No real
+        // money is sent — there is deliberately no payout integration in this
+        // release. The gross amount was already deducted from the wallet when
+        // the request was created, so approve moves no money and leaves the
+        // (non-successful) ledger row exactly as it was.
         await tx
           .update(withdrawalRequests)
           .set({ status: "processing", adminUserId: admin.userId, updatedAt: new Date() })
           .where(eq(withdrawalRequests.id, withdrawalId));
-
-        await tx
-          .update(transactions)
-          .set({ status: "successful" })
-          .where(eq(transactions.ref, withdrawal.ref));
       } else {
         // 2. The refund destination is DERIVED ON THE SERVER from the
         //    withdrawal row (which records the wallet the money was actually
@@ -280,10 +331,10 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       //    API response below can never be sent before the atomic restoration
       //    has actually committed; any throw above rolled back every step (no
       //    partial refund, no partial rejection, no double refund).
-      return { ok: true };
+      return { ok: true, status: targetStatus };
     });
 
-    return NextResponse.json(result);
+    return NextResponse.json(result, { headers: { "Cache-Control": "no-store, max-age=0" } });
   } catch (err: unknown) {
     if (err instanceof WithdrawalActionError) {
       const payload: { ok: false; error: string; code?: string } = { ok: false, error: err.message };

@@ -9,11 +9,18 @@ import {
   isGatewaySchemaComplete,
   TRANSACTION_INSERT_FIELDS,
 } from "@/lib/schema-compat";
-import { groupPhone, isValidPhone, makeRef, normalizePhoneDigits } from "@/lib/format";
+import { groupPhone, makeRef } from "@/lib/format";
+import { parseCedisAmount, pesewasToCedisString } from "@/lib/money";
+import { normalizeGhanaMobileStrict } from "@/lib/ghana-mobile";
 
 export const dynamic = "force-dynamic";
 
-type Body = { account?: string; amount?: number };
+/** The ONLY keys this route accepts — anything else is refused, never ignored. */
+const TRANSFER_REQUEST_KEYS = new Set(["account", "amount"]);
+
+/** Transfer limits in integer pesewas (GH₵1 – GH₵5,000). */
+const MIN_TRANSFER_PESEWAS = 100;
+const MAX_TRANSFER_PESEWAS = 500_000;
 
 class InsufficientFundsError extends Error {
   constructor(readonly balance: number) {
@@ -22,26 +29,46 @@ class InsufficientFundsError extends Error {
   }
 }
 
-/** Normalise a deposit/transfer amount to two decimal places once, server-side. */
-function normaliseAmount(input: number): number {
-  if (!Number.isFinite(input) || input < 1 || input > 5000) return NaN;
-  return Math.round(input * 100) / 100;
-}
-
 export async function POST(req: Request) {
   try {
     const auth = await requireAccount();
     if (!auth.ok) return auth.response;
     const { wallet } = auth;
 
-    const body = (await req.json()) as Body;
-    const account = normalizePhoneDigits(body.account ?? "");
-    const amount = normaliseAmount(Number(body.amount));
+    let rawBody: unknown;
+    try {
+      rawBody = await req.json();
+    } catch {
+      return Response.json({ ok: false, error: "Invalid request" }, { status: 400 });
+    }
+    if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+      return Response.json({ ok: false, error: "Invalid request" }, { status: 400 });
+    }
+    const body = rawBody as Record<string, unknown>;
+    for (const key of Object.keys(body)) {
+      // The sender is the signed-in account — never a client-supplied wallet
+      // id — and the recipient is resolved server-side from the account
+      // number. Smuggled identity/authorization fields are refused outright.
+      if (!TRANSFER_REQUEST_KEYS.has(key)) {
+        return Response.json({ ok: false, error: "Invalid request" }, { status: 400 });
+      }
+    }
 
-    if (!isValidPhone(account)) {
+    // Strict destination: no silent truncation, no guessing. Any valid Ghana
+    // mobile prefix is accepted here (the recipient only needs a registered
+    // wallet — unlike withdrawals, transfers are not network-restricted), and
+    // an unregistered number then fails closed with a 404 below.
+    const normalized = normalizeGhanaMobileStrict(body.account);
+    if (!normalized.ok) {
       return Response.json({ ok: false, error: "Enter a valid FlexiData wallet number" }, { status: 400 });
     }
-    if (Number.isNaN(amount) || amount < 1 || amount > 5000) {
+    const account = normalized.msisdn10;
+
+    // Exact amount: parsed strictly into integer pesewas (never float math),
+    // so `10.25` transfers exactly GH₵10.25 and `10.255` is refused rather
+    // than rounded.
+    const parsed = parseCedisAmount(body.amount);
+    if (!parsed.ok || parsed.pesewas < MIN_TRANSFER_PESEWAS || parsed.pesewas > MAX_TRANSFER_PESEWAS) {
       return Response.json({ ok: false, error: "Enter an amount between GH₵ 1 and GH₵ 5,000" }, { status: 400 });
     }
     if (account === wallet.number) {
@@ -64,7 +91,7 @@ export async function POST(req: Request) {
     const useCompatLedger = compat ? !isGatewaySchemaComplete(compat, "transactions") : false;
 
     const ref = makeRef("TR");
-    const amountValue = amount.toFixed(2);
+    const amountValue = pesewasToCedisString(parsed.pesewas);
 
     const result = await db.transaction(async (tx) => {
       // Debit must be conditional on the current balance so concurrent
@@ -161,7 +188,10 @@ export async function POST(req: Request) {
       return { balance: newBalance };
     });
 
-    return Response.json({ ok: true, status: "successful", ref, balance: result.balance });
+    return Response.json(
+      { ok: true, status: "successful", ref, balance: result.balance },
+      { headers: { "Cache-Control": "no-store, max-age=0" } },
+    );
   } catch (e) {
     if (e instanceof InsufficientFundsError) {
       return Response.json({ ok: false, error: "insufficient_funds", balance: e.balance }, { status: 402 });

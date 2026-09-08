@@ -5,6 +5,7 @@ import { depositRequests, transactions, wallets } from "@/db/schema";
 import { PAYMENT_METHODS, initPayment, paymentsProvider, type PaymentMethod } from "@/lib/payments";
 import { paystackVerifyTransaction, PAYSTACK_CURRENCY, PaystackConfigError } from "@/lib/paystack";
 import { makeRef } from "@/lib/format";
+import { parseCedisAmount } from "@/lib/money";
 import { DEPOSIT_MAX_GHS, DEPOSIT_MIN_GHS } from "@/lib/constants";
 import {
   buildCompatInsert,
@@ -120,8 +121,21 @@ export async function createDepositRequest(params: {
   walletNumber: string;
   email: string;
   method: string;
-  amountGhs: number;
-  /** Mobile-money number typed by the customer (Paystack metadata hint only). */
+  /**
+   * Raw requested amount (JSON number or exact decimal string). Parsed here,
+   * strictly, into integer pesewas — a client-provided parsed value is never
+   * trusted, and no floating-point arithmetic touches the money path.
+   */
+  amountGhs: unknown;
+  /**
+   * Mobile-money number typed by the customer.
+   *
+   * PROVIDER HINT ONLY (W2): this value is recorded in the Paystack
+   * initialization metadata and nothing else. Paystack's hosted checkout is
+   * what actually collects and debits a mobile-money wallet; this hint is never
+   * an authoritative payout identity, never resolves a wallet, and never moves
+   * money. In particular it must never be reused as a withdrawal destination.
+   */
   momoNumber?: string | null;
   /** Origin of the API request — used for the Paystack callback URL fallback. */
   requestOrigin?: string | null;
@@ -133,14 +147,18 @@ export async function createDepositRequest(params: {
   const conf = PAYMENT_METHODS[method];
   if (!conf) throw new DepositInputError("Choose a payment method.");
 
-  const amount = Number(params.amountGhs);
-  if (!Number.isFinite(amount) || amount < MIN_DEPOSIT_GHS || amount > MAX_DEPOSIT_GHS) {
-    throw new DepositInputError(`Amount must be between GH₵ ${MIN_DEPOSIT_GHS} and GH₵ ${MAX_DEPOSIT_GHS.toLocaleString()}`);
-  }
-  const amountSubunits = Math.round(amount * 100);
-  if (!Number.isInteger(amountSubunits) || amountSubunits <= 0) {
+  // Exact amount: strictly parsed into integer pesewas — `10.25` deposits
+  // exactly GH₵10.25 (never 1025, never a float-rounded neighbor), while zero,
+  // negatives, NaN/Infinity and over-precise values are refused, not rounded.
+  const parsed = parseCedisAmount(params.amountGhs);
+  if (!parsed.ok) {
     throw new DepositInputError("Enter a valid amount.");
   }
+  if (parsed.pesewas < MIN_DEPOSIT_GHS * 100 || parsed.pesewas > MAX_DEPOSIT_GHS * 100) {
+    throw new DepositInputError(`Amount must be between GH₵ ${MIN_DEPOSIT_GHS} and GH₵ ${MAX_DEPOSIT_GHS.toLocaleString()}`);
+  }
+  const amountCedis = parsed.cedis;
+  const amountSubunits = parsed.pesewas;
 
   const provider = paymentsProvider();
   const ref = makeRef("DP");
@@ -165,7 +183,7 @@ export async function createDepositRequest(params: {
     walletId: params.walletId,
     provider,
     method,
-    amount: amount.toFixed(2),
+    amount: amountCedis,
     amountSubunits,
     currency: PAYSTACK_CURRENCY,
     status: "pending",
@@ -188,7 +206,7 @@ export async function createDepositRequest(params: {
   try {
     const payment = await initPayment({
       ref,
-      amountGhs: amount,
+      amountSubunits,
       email: params.email,
       method,
       phone: params.walletNumber,

@@ -57,6 +57,13 @@
       "when": 1788752932673,
       "tag": "0007_widen_admin_audit_log_actions",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788904699099,
+      "tag": "0008_withdrawal_integrity",
+      "breakpoints": true
     }
   ]
 }

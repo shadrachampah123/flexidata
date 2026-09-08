@@ -10,7 +10,7 @@ import { isMissingRelationError } from "@/lib/schema-compat";
 
 export const dynamic = "force-dynamic";
 
-type Body = { method?: string; amount?: number; source?: string };
+type Body = { method?: string; amount?: unknown; source?: string };
 
 /**
  * Start a wallet deposit.
@@ -73,7 +73,11 @@ export async function POST(req: Request) {
     }
 
     const body = (await req.json().catch(() => ({}))) as Body;
-    const amount = Number(body.amount);
+    // The raw amount goes straight to the deposit service, which parses it
+    // strictly into integer pesewas itself — this route never coerces or
+    // pre-rounds it (a `Number()` coercion here would reintroduce float error
+    // before the exact parser ever sees the value).
+    const amount = body.amount;
 
     const accountRows = await db
       .select({ email: users.email })
@@ -93,8 +97,10 @@ export async function POST(req: Request) {
       email,
       method: body.method ?? "",
       amountGhs: amount,
-      // Metadata hint only — Paystack's hosted checkout collects (and debits)
-      // the mobile-money wallet itself; nothing here can move money.
+      // PROVIDER HINT ONLY (W2) — metadata for Paystack's hosted checkout,
+      // which collects (and debits) the mobile-money wallet itself. Nothing
+      // here can move money, and this value must never be treated as an
+      // authoritative payout identity (see `createDepositRequest`).
       momoNumber: typeof body.source === "string" ? body.source : null,
       requestOrigin: origin,
     });

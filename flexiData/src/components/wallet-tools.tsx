@@ -17,7 +17,46 @@ import { Card, Segmented, FieldLabel, StatusBadge } from "@/components/ui";
 import { PhoneInput } from "@/components/phone-input";
 import { FlowSheet, type FlowResult } from "@/components/flow-sheet";
 import { DEPOSIT_MAX_GHS, DEPOSIT_MIN_GHS } from "@/lib/constants";
-import { cn, groupPhone, isValidPhone, money, timeAgo } from "@/lib/format";
+import { cn, groupPhone, money, timeAgo } from "@/lib/format";
+import {
+  moneyFromPesewas,
+  parseCedisAmount,
+  withdrawalQuote,
+  WITHDRAW_MIN_PESEWAS,
+} from "@/lib/money";
+import { normalizeGhanaMobileStrict } from "@/lib/ghana-mobile";
+
+/** Client-side typing guard mirroring the server's strict phone rule (any network). */
+function isCompletePhone(value: string): boolean {
+  if (!value) return false;
+  return normalizeGhanaMobileStrict(value).ok;
+}
+
+/** Integer pesewas for the current amount selection (chip wins, else exact custom). */
+function selectionPesewas(chip: number | null, custom: string): number {
+  if (chip !== null) return chip * 100;
+  const parsed = parseCedisAmount(custom);
+  return parsed.ok ? parsed.pesewas : 0;
+}
+
+/** Exact decimal string to send for the current selection (never a float). */
+function selectionCedis(chip: number | null, custom: string): string {
+  if (chip !== null) return String(chip);
+  const parsed = parseCedisAmount(custom);
+  return parsed.ok ? parsed.cedis : "0";
+}
+
+/** Fresh idempotency key per withdrawal intent (UUID when available). */
+function newIdempotencyKey(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // fall through to the Math.random fallback below
+  }
+  return `wd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+}
 
 type Method = { id: string; label: string; sub: string; dot: string; icon: LucideIcon };
 
@@ -117,25 +156,50 @@ export function WalletTools({
   /** Serialises the submit path so a double-tap can never submit twice. */
   const submittingRef = useRef(false);
 
-  const fundAmount = fundChip ?? (Number(fundCustom.replace(/\D/g, "")) || 0);
-  const trAmount = trChip ?? (Number(trCustom.replace(/\D/g, "")) || 0);
-  const wdAmount = wdChip ?? (Number(wdCustom.replace(/\D/g, "")) || 0);
+  // All amounts as INTEGER PESEWAS from here on: the custom inputs keep their
+  // decimals (`5.50` stays 550 pesewas — an earlier `replace(/\D/g, "")` turned
+  // it into GH₵550), and parsing is the same strict function the server uses.
+  const fundPesewas = selectionPesewas(fundChip, fundCustom);
+  const trPesewas = selectionPesewas(trChip, trCustom);
+  const wdPesewas = selectionPesewas(wdChip, wdCustom);
   const methodConf = METHODS.find((m) => m.id === method)!;
   const isCard = method === "card";
+  const balancePesewas = Math.round(balance * 100);
 
   // Same limits the server enforces in src/lib/deposits.ts (single source of
   // truth in src/lib/constants.ts) — the button only mirrors that validation.
   const fundReady =
-    fundAmount >= DEPOSIT_MIN_GHS &&
-    fundAmount <= DEPOSIT_MAX_GHS &&
-    (isCard || isValidPhone(source));
-  const insufficient = trAmount > balance;
-  const transferReady = trAmount >= 1 && isValidPhone(dest) && !insufficient;
+    fundPesewas >= DEPOSIT_MIN_GHS * 100 &&
+    fundPesewas <= DEPOSIT_MAX_GHS * 100 &&
+    (isCard || isCompletePhone(source));
+  const insufficient = trPesewas > balancePesewas;
+  const transferReady =
+    trPesewas >= 100 && trPesewas <= 500_000 && isCompletePhone(dest) && !insufficient;
 
-  const wdInsufficient = wdAmount > balance;
-  const withdrawReady = wdAmount >= 5 && isValidPhone(wdDest) && !wdInsufficient;
-  const wdFee = wdAmount * 0.02;
-  const wdNet = wdAmount - wdFee;
+  const wdInsufficient = wdPesewas > balancePesewas;
+  const withdrawReady = wdPesewas >= WITHDRAW_MIN_PESEWAS && isCompletePhone(wdDest) && !wdInsufficient;
+  // The fee preview is the SAME integer-pesewa quote the server charges with
+  // (`withdrawalQuote`), so preview and charge can never disagree (W3).
+  const wdQuote = withdrawalQuote(wdPesewas);
+  const wdFeePesewas = wdQuote?.feePesewas ?? 0;
+  const wdNetPesewas = wdQuote?.netPesewas ?? 0;
+
+  // Withdrawal idempotency key (F2): stable for one intent (amount + method +
+  // dest) so a timeout retry reuses it and can never double-deduct, and
+  // rotated after every completed submission so two identical withdrawals in a
+  // row are NOT deduplicated into one. Adjusted during render (the same
+  // React-documented pattern as the balance sync above) so the key always
+  // matches the current intent before anything can submit it.
+  const [wdNonce, setWdNonce] = useState(0);
+  const [wdKeyState, setWdKeyState] = useState<{ sig: string; key: string } | null>(null);
+  const wdSig = `${wdPesewas}|${wdMethod}|${wdDest}|${wdNonce}`;
+  if (!wdKeyState || wdKeyState.sig !== wdSig) {
+    setWdKeyState({ sig: wdSig, key: newIdempotencyKey() });
+  }
+  // Transient render only (submit always reads the committed key): deliberately
+  // not a valid key shape, so a bug here would 400 loudly instead of submitting
+  // under a shared fallback.
+  const wdIdempotencyKey = wdKeyState && wdKeyState.sig === wdSig ? wdKeyState.key : "pending key rotation";
 
   // Returning from a Paystack redirect: open the processing sheet, nudge
   // settlement once (POST /api/payments/verify re-verifies with Paystack — the
@@ -208,7 +272,7 @@ export function WalletTools({
           // Everything shown here comes from the SERVER's settled deposit row:
           // the credited amount and the new balance are read back from the
           // database, never taken from the form or assumed locally.
-          const credited = typeof data.deposit?.amount === "number" ? data.deposit.amount : fundAmount;
+          const credited = typeof data.deposit?.amount === "number" ? data.deposit.amount : fundPesewas / 100;
           const provider = data.deposit?.provider;
           const providerLabel = provider === "mock" ? "Simulated (demo)" : "Paystack";
           finish(
@@ -305,12 +369,19 @@ export function WalletTools({
       const res = await fetch(tab === "fund" ? "/api/wallet/fund" : tab === "transfer" ? "/api/wallet/transfer" : "/api/wallet/withdraw", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // Amounts go out as EXACT decimal strings (never floats): the server
+        // parses them strictly itself and is the sole authority.
         body: JSON.stringify(
           tab === "fund"
-            ? { method, amount: fundAmount, source: isCard ? undefined : groupPhone(source) }
+            ? { method, amount: selectionCedis(fundChip, fundCustom), source: isCard ? undefined : groupPhone(source) }
             : tab === "transfer"
-            ? { account: dest, amount: trAmount }
-            : { amount: wdAmount, method: wdMethod, dest: groupPhone(wdDest) },
+            ? { account: dest, amount: selectionCedis(trChip, trCustom) }
+            : {
+                amount: selectionCedis(wdChip, wdCustom),
+                method: wdMethod,
+                dest: wdDest,
+                idempotencyKey: wdIdempotencyKey,
+              },
         ),
       });
       const data = (await res.json()) as {
@@ -375,7 +446,7 @@ export function WalletTools({
         setResult({
           status: "successful",
           ref: data.ref,
-          headline: `+${money(fundAmount)} added!`,
+          headline: `+${moneyFromPesewas(fundPesewas)} added!`,
           message: simulated
             ? `Demo deposit via ${viaLabel} — no real payment was taken. Your money is safe and ready.`
             : "Funded via Paystack. Your money is safe and ready.",
@@ -385,19 +456,19 @@ export function WalletTools({
             { label: "Method", value: data.method ?? methodConf.label },
             { label: "Status", value: "Successful" },
             { label: "Fee", value: money(0) },
-            { label: "Credited", value: money(fundAmount) },
+            { label: "Credited", value: moneyFromPesewas(fundPesewas) },
           ],
         });
       } else if (tab === "transfer") {
         setResult({
           status: "successful",
           ref: data.ref,
-          headline: `${money(trAmount)} sent!`,
+          headline: `${moneyFromPesewas(trPesewas)} sent!`,
           message: "The recipient has been notified. Transfers on FlexiData are always free.",
           balance: data.balance,
           lines: [
             { label: "Recipient wallet", value: groupPhone(dest) },
-            { label: "Amount", value: money(trAmount) },
+            { label: "Amount", value: moneyFromPesewas(trPesewas) },
             { label: "Fee", value: money(0) },
           ],
         });
@@ -408,19 +479,25 @@ export function WalletTools({
         // the optimistic value the route just returned.
         const newBalance = typeof data.newBalance === "number" ? data.newBalance : undefined;
         if (typeof newBalance === "number") setBalance(newBalance);
+        // Rotate the idempotency key: this intent is complete, so a later
+        // identical withdrawal must be a NEW request, not a replay. (A failed
+        // submit keeps its key, which is what makes a timeout retry safe.)
+        setWdNonce((n) => n + 1);
+        const serverFee = typeof data.fee === "number" ? money(data.fee) : moneyFromPesewas(wdFeePesewas);
+        const serverNet = typeof data.netAmount === "number" ? money(data.netAmount) : moneyFromPesewas(wdNetPesewas);
         setResult({
           status: "successful",
           ref: data.ref,
-          headline: `${money(data.netAmount ?? wdNet)} on its way!`,
+          headline: `${serverNet} on its way!`,
           message: "Your withdrawal request has been submitted and is pending approval.",
           balance: newBalance,
           lines: [
             { label: "Reference", value: data.ref ?? "—" },
             { label: "Destination", value: groupPhone(wdDest) },
             { label: "Method", value: METHODS.find((m) => m.id === wdMethod)?.label ?? wdMethod },
-            { label: "Amount", value: money(wdAmount) },
-            { label: "Fee (2%)", value: money(wdFee) },
-            { label: "You receive", value: money(data.netAmount ?? wdNet) },
+            { label: "Amount", value: moneyFromPesewas(wdPesewas) },
+            { label: "Fee (2%)", value: serverFee },
+            { label: "You receive", value: serverNet },
           ],
         });
       }
@@ -438,7 +515,6 @@ export function WalletTools({
     }
   };
 
-  const amount = tab === "fund" ? fundAmount : trAmount;
   const ready = tab === "fund" ? fundReady : tab === "transfer" ? transferReady : withdrawReady;
 
   return (
@@ -610,9 +686,9 @@ export function WalletTools({
             note="Minimum withdrawal is GH₵5."
           />
           <div className="animate-fade-up px-2 space-y-1 text-sm text-zinc-600 dark:text-zinc-400 mt-2" style={{ animationDelay: "140ms" }}>
-            <div className="flex justify-between"><span>Amount</span> <span>{money(wdAmount)}</span></div>
-            <div className="flex justify-between"><span>Fee (2%)</span> <span>{money(wdFee)}</span></div>
-            <div className="flex justify-between font-bold text-ink dark:text-white"><span>You receive</span> <span>{money(wdNet)}</span></div>
+            <div className="flex justify-between"><span>Amount</span> <span>{moneyFromPesewas(wdPesewas)}</span></div>
+            <div className="flex justify-between"><span>Fee (2%)</span> <span>{moneyFromPesewas(wdFeePesewas)}</span></div>
+            <div className="flex justify-between font-bold text-ink dark:text-white"><span>You receive</span> <span>{moneyFromPesewas(wdNetPesewas)}</span></div>
           </div>
           {wdInsufficient && (
              <div className="mt-4 flex items-center gap-2 rounded-2xl bg-amber-400/15 px-4 py-3 text-xs font-bold text-amber-600 dark:text-amber-400">
@@ -670,10 +746,10 @@ export function WalletTools({
         {tab === "fund"
           ? demoFundingDisabled
             ? "Deposits unavailable"
-            : `Deposit ${fundAmount > 0 ? money(fundAmount) : ""}`
+            : `Deposit ${fundPesewas > 0 ? moneyFromPesewas(fundPesewas) : ""}`
           : tab === "transfer"
-            ? `Send ${trAmount > 0 ? money(trAmount) : ""}`
-            : `Withdraw ${wdAmount > 0 ? money(wdAmount) : ""}`}
+            ? `Send ${trPesewas > 0 ? moneyFromPesewas(trPesewas) : ""}`
+            : `Withdraw ${wdPesewas > 0 ? moneyFromPesewas(wdPesewas) : ""}`}
       </button>
 
       <FlowSheet
@@ -706,16 +782,16 @@ export function WalletTools({
             : [
                 { label: "Destination", value: groupPhone(wdDest) },
                 { label: "Method", value: METHODS.find(m => m.id === wdMethod)?.label ?? wdMethod },
-                { label: "Fee (2%)", value: money(wdFee) },
-                { label: "You receive", value: money(wdNet) },
+                { label: "Fee (2%)", value: moneyFromPesewas(wdFeePesewas) },
+                { label: "You receive", value: moneyFromPesewas(wdNetPesewas) },
               ]
         }
         total={
           tab === "fund"
-            ? { label: "Top-up", value: money(fundAmount) }
+            ? { label: "Top-up", value: moneyFromPesewas(fundPesewas) }
             : tab === "transfer"
-            ? { label: "You send", value: money(trAmount) }
-            : { label: "Total deducted", value: money(wdAmount) }
+            ? { label: "You send", value: moneyFromPesewas(trPesewas) }
+            : { label: "Total deducted", value: moneyFromPesewas(wdPesewas) }
         }
         ctaLabel={
           tab === "fund" ? (isPaystackFunding ? "Continue to Paystack" : "Approve deposit") : tab === "transfer" ? "Send money" : "Submit Request"
@@ -743,6 +819,14 @@ export function WalletTools({
       />
     </div>
   );
+}
+
+/** Keep decimal typing exact: digits, one dot, max two decimals (partial ok while typing). */
+function sanitizeDecimalTyping(value: string): string {
+  const cleaned = value.replace(/[^0-9.]/g, "").slice(0, 10);
+  const [head, ...rest] = cleaned.split(".");
+  if (rest.length === 0) return head;
+  return `${head}.${rest.join("").slice(0, 2)}`;
 }
 
 function AmountBlock({
@@ -787,13 +871,17 @@ function AmountBlock({
       <div className="mt-2.5 flex items-center gap-2 rounded-2xl border border-black/[0.08] bg-paper px-4 py-[13px] transition-all focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/30 dark:border-line dark:bg-card">
         <span className="font-display text-[15px] font-bold text-zinc-400">GH₵</span>
         <input
-          inputMode="numeric"
+          inputMode="decimal"
           value={custom}
           onChange={(e) => {
-            setCustom(e.target.value.replace(/\D/g, "").slice(0, 4));
+            // Decimal-safe typing: digits with at most one decimal point and
+            // two decimals. The old `replace(/\D/g, "")` stripped the point
+            // and turned GH₵5.50 into GH₵550 — this keeps every pesewa (W1).
+            const next = sanitizeDecimalTyping(e.target.value);
+            setCustom(next);
             setChip(null);
           }}
-          placeholder="Custom amount"
+          placeholder="Custom amount (e.g. 5.50)"
           className="w-full min-w-0 flex-1 bg-transparent font-display text-[15px] font-bold outline-none placeholder:font-sans placeholder:text-xs placeholder:font-semibold placeholder:text-zinc-400"
         />
       </div>
