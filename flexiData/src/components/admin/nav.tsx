@@ -49,6 +49,7 @@ const LINKS: {
   { href: "/admin/withdrawals", label: "Withdrawals", icon: ReceiptText },
   { href: "/admin/wallets", label: "Wallets", icon: PieChart },
   { href: "/admin/reconciliation", label: "Reconciliation", icon: AlertTriangle },
+  { href: "/admin/payout-reconciliation", label: "Payout Exceptions", icon: AlertTriangle },
   { href: "/admin/users", label: "Customers", icon: Users },
   { href: "/admin/audit", label: "Admin activity", icon: ScrollText },
 ];

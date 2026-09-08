@@ -991,3 +991,117 @@ async function runSeed(): Promise<void> {
     }
   });
 }
+
+// ---------------------------------------------------------------------------
+// Payout system schema self-heal (Phase 5+)
+// ---------------------------------------------------------------------------
+
+let payoutSchemaPromise: Promise<void> | null = null;
+
+/**
+ * Ensure the payout system tables exist (withdrawal_audit_logs,
+ * payout_reconciliation_exceptions). Additive only — never drops or rewrites.
+ * Safe to call on every request that touches these tables.
+ */
+export async function repairPayoutSystemSchema(): Promise<void> {
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS "withdrawal_audit_logs" (
+        "id" serial PRIMARY KEY,
+        "withdrawal_id" integer NOT NULL REFERENCES "withdrawal_requests"("id") ON DELETE CASCADE,
+        "withdrawal_ref" varchar(40) NOT NULL,
+        "event" varchar(40) NOT NULL,
+        "previous_status" varchar(20),
+        "new_status" varchar(20),
+        "actor_type" varchar(20) NOT NULL DEFAULT 'system',
+        "actor_id" integer,
+        "actor_email" varchar(160),
+        "provider_reference" varchar(120),
+        "reason" varchar(240),
+        "metadata" jsonb,
+        "created_at" timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+  } catch (error) {
+    if (!isSchemaIncompatibleError(error as any)) throw error;
+    console.warn("[flexidata] withdrawal_audit_logs creation skipped:", (error as Error)?.message);
+  }
+  try {
+    await db.execute(sql`CREATE INDEX IF NOT EXISTS "withdrawal_audit_logs_withdrawal_id_idx" ON "withdrawal_audit_logs" ("withdrawal_id")`);
+    await db.execute(sql`CREATE INDEX IF NOT EXISTS "withdrawal_audit_logs_created_at_idx" ON "withdrawal_audit_logs" ("created_at")`);
+  } catch { /* indexes may already exist */ }
+
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS "payout_reconciliation_exceptions" (
+        "id" serial PRIMARY KEY,
+        "withdrawal_id" integer REFERENCES "withdrawal_requests"("id") ON DELETE SET NULL,
+        "withdrawal_ref" varchar(40),
+        "exception_type" varchar(40) NOT NULL,
+        "description" varchar(500) NOT NULL,
+        "local_status" varchar(20),
+        "provider_status" varchar(80),
+        "provider_reference" varchar(120),
+        "expected_amount" numeric(12,2),
+        "actual_amount" numeric(12,2),
+        "currency" varchar(8) NOT NULL DEFAULT 'GHS',
+        "resolved" boolean NOT NULL DEFAULT false,
+        "resolved_at" timestamptz,
+        "resolved_by" integer,
+        "resolution_note" varchar(240),
+        "created_at" timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+  } catch (error) {
+    if (!isSchemaIncompatibleError(error as any)) throw error;
+    console.warn("[flexidata] payout_reconciliation_exceptions creation skipped:", (error as Error)?.message);
+  }
+  try {
+    await db.execute(sql`CREATE INDEX IF NOT EXISTS "payout_reconciliation_exceptions_type_idx" ON "payout_reconciliation_exceptions" ("exception_type")`);
+    await db.execute(sql`CREATE INDEX IF NOT EXISTS "payout_reconciliation_exceptions_resolved_idx" ON "payout_reconciliation_exceptions" ("resolved")`);
+  } catch { /* indexes may already exist */ }
+
+  // Add new columns to withdrawal_requests if missing
+  try {
+    await db.execute(sql`ALTER TABLE "withdrawal_requests" ADD COLUMN IF NOT EXISTS "provider_reference" varchar(120)`);
+    await db.execute(sql`ALTER TABLE "withdrawal_requests" ADD COLUMN IF NOT EXISTS "provider_status" varchar(80)`);
+    await db.execute(sql`ALTER TABLE "withdrawal_requests" ADD COLUMN IF NOT EXISTS "provider_message" varchar(240)`);
+    await db.execute(sql`ALTER TABLE "withdrawal_requests" ADD COLUMN IF NOT EXISTS "provider_payload" jsonb`);
+    await db.execute(sql`ALTER TABLE "withdrawal_requests" ADD COLUMN IF NOT EXISTS "processed_at" timestamptz`);
+    await db.execute(sql`ALTER TABLE "withdrawal_requests" ADD COLUMN IF NOT EXISTS "completed_at" timestamptz`);
+    await db.execute(sql`ALTER TABLE "withdrawal_requests" ADD COLUMN IF NOT EXISTS "currency" varchar(8) NOT NULL DEFAULT 'GHS'`);
+  } catch (error) {
+    if (!isSchemaIncompatibleError(error as any)) throw error;
+    console.warn("[flexidata] withdrawal_requests column additions skipped:", (error as Error)?.message);
+  }
+
+  // Add 'refunded' to enum if missing
+  try {
+    await db.execute(sql`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_enum
+          JOIN pg_type ON pg_enum.enumtypid = pg_type.oid
+          WHERE pg_type.typname = 'withdrawal_status'
+          AND pg_enum.enumlabel = 'refunded'
+        ) THEN
+          ALTER TYPE "withdrawal_status" ADD VALUE 'refunded';
+        END IF;
+      END
+      $$
+    `);
+  } catch {
+    // Enum modification may fail if type doesn't exist yet — that's fine
+  }
+}
+
+export function ensurePayoutSystemSchema(): Promise<void> {
+  if (!payoutSchemaPromise) {
+    payoutSchemaPromise = repairPayoutSystemSchema().catch((error) => {
+      payoutSchemaPromise = null;
+      console.warn("[flexidata] payout system schema repair failed:", (error as Error)?.message);
+    });
+  }
+  return payoutSchemaPromise;
+}

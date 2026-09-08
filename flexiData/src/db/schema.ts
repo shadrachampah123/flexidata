@@ -32,6 +32,7 @@ export const withdrawalStatusEnum = pgEnum("withdrawal_status", [
   "failed",
   "rejected",
   "cancelled",
+  "refunded",
 ]);
 
 export const txStatusEnum = pgEnum("tx_status", ["successful", "pending", "failed", "reversed"]);
@@ -466,6 +467,17 @@ export const withdrawalRequests = pgTable("withdrawal_requests", {
    * every application-level guard were bypassed.
    */
   idempotencyKey: varchar("idempotency_key", { length: 64 }),
+  // Provider tracking (Phase 5: provider-neutral payout service)
+  providerReference: varchar("provider_reference", { length: 120 }),
+  providerStatus: varchar("provider_status", { length: 80 }),
+  providerMessage: varchar("provider_message", { length: 240 }),
+  providerPayload: jsonb("provider_payload"),
+  /** When admin moved it to processing */
+  processedAt: timestamp("processed_at", { withTimezone: true }),
+  /** When final outcome was determined (successful/refunded/failed) */
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  /** Always GHS for now; required for future provider verification */
+  currency: varchar("currency", { length: 8 }).notNull().default("GHS"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
@@ -473,6 +485,7 @@ export const withdrawalRequests = pgTable("withdrawal_requests", {
   index("withdrawal_requests_wallet_idx").on(table.walletId),
   index("withdrawal_requests_status_idx").on(table.status),
   index("withdrawal_requests_created_at_idx").on(table.createdAt),
+  index("withdrawal_requests_provider_ref_idx").on(table.providerReference),
   // F2: idempotency is database-enforced (NULL keys are legacy rows and are
   // excluded — Postgres treats NULLs as distinct, so this only binds keyed rows).
   uniqueIndex("withdrawal_requests_wallet_idempotency_idx")
@@ -487,3 +500,76 @@ export const withdrawalRequests = pgTable("withdrawal_requests", {
     sql`${table.destinationMethod} in ('momo_mtn', 'telecel_cash')`,
   ),
 ]);
+
+/**
+ * Withdrawal audit trail (Phase 4). Records every lifecycle event with
+ * server-controlled data: who/what triggered it, previous and new status,
+ * provider references, and reasons. Never stores secrets or provider
+ * credentials.
+ */
+export const withdrawalAuditLogs = pgTable(
+  "withdrawal_audit_logs",
+  {
+    id: serial("id").primaryKey(),
+    withdrawalId: integer("withdrawal_id")
+      .notNull()
+      .references(() => withdrawalRequests.id, { onDelete: "cascade" }),
+    withdrawalRef: varchar("withdrawal_ref", { length: 40 }).notNull(),
+    event: varchar("event", { length: 40 }).notNull(),
+    previousStatus: varchar("previous_status", { length: 20 }),
+    newStatus: varchar("new_status", { length: 20 }),
+    actorType: varchar("actor_type", { length: 20 }).notNull().default("system"),
+    actorId: integer("actor_id"),
+    actorEmail: varchar("actor_email", { length: 160 }),
+    providerReference: varchar("provider_reference", { length: 120 }),
+    reason: varchar("reason", { length: 240 }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("withdrawal_audit_logs_withdrawal_id_idx").on(table.withdrawalId),
+    index("withdrawal_audit_logs_withdrawal_ref_idx").on(table.withdrawalRef),
+    index("withdrawal_audit_logs_event_idx").on(table.event),
+    index("withdrawal_audit_logs_created_at_idx").on(table.createdAt),
+    check(
+      "withdrawal_audit_logs_event_check",
+      sql`${table.event} in ('created', 'approved', 'rejected', 'moved_to_processing', 'callback_received', 'marked_successful', 'payout_failed', 'refunded', 'provider_timeout')`,
+    ),
+  ],
+);
+
+/**
+ * Payout reconciliation exceptions (Phase 7). Records mismatches found during
+ * reconciliation between local state and provider state. These are for admin
+ * review only — no automatic balance changes are made.
+ */
+export const payoutReconciliationExceptions = pgTable(
+  "payout_reconciliation_exceptions",
+  {
+    id: serial("id").primaryKey(),
+    withdrawalId: integer("withdrawal_id").references(() => withdrawalRequests.id, { onDelete: "set null" }),
+    withdrawalRef: varchar("withdrawal_ref", { length: 40 }),
+    exceptionType: varchar("exception_type", { length: 40 }).notNull(),
+    description: varchar("description", { length: 500 }).notNull(),
+    localStatus: varchar("local_status", { length: 20 }),
+    providerStatus: varchar("provider_status", { length: 80 }),
+    providerReference: varchar("provider_reference", { length: 120 }),
+    expectedAmount: numeric("expected_amount", { precision: 12, scale: 2 }),
+    actualAmount: numeric("actual_amount", { precision: 12, scale: 2 }),
+    currency: varchar("currency", { length: 8 }).notNull().default("GHS"),
+    resolved: boolean("resolved").notNull().default(false),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolvedBy: integer("resolved_by"),
+    resolutionNote: varchar("resolution_note", { length: 240 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("payout_reconciliation_exceptions_type_idx").on(table.exceptionType),
+    index("payout_reconciliation_exceptions_resolved_idx").on(table.resolved),
+    index("payout_reconciliation_exceptions_created_at_idx").on(table.createdAt),
+    check(
+      "payout_reconciliation_exceptions_type_check",
+      sql`${table.exceptionType} in ('stuck_processing', 'provider_success_local_processing', 'provider_failure_local_processing', 'amount_mismatch', 'duplicate_provider_reference', 'unknown_provider_reference', 'currency_mismatch')`,
+    ),
+  ],
+);
