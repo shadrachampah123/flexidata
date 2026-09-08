@@ -150,19 +150,27 @@ function centsToCedis(pesewas: number): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Allowed `withdrawal_requests.status` transitions. Approval (`pending ->
- * processing`) authorizes a payout; it does NOT complete one. There is
- * deliberately NO edge to `successful` reachable from any current API: that
- * transition belongs to a future payout-provider completion webhook, and this
- * release must not (and cannot) express it.
+ * Allowed `withdrawal_requests.status` transitions.
+ *
+ * Lifecycle:
+ *   pending → processing → successful (via provider callback)
+ *   pending → rejected
+ *   processing → rejected (admin rejection after approval)
+ *   processing → refunded (provider failure or reversal)
+ *   processing → successful (verified provider confirmation)
+ *
+ * The `successful` transition is ONLY reachable via the provider callback
+ * endpoint (Phase 6) — NOT via any admin API. Admin approval moves to
+ * `processing` only; completion requires verified provider confirmation.
  */
 export const WITHDRAWAL_TRANSITIONS: Record<string, readonly string[]> = {
   pending: ["processing", "rejected"],
-  processing: [],
+  processing: ["successful", "rejected", "refunded"],
   successful: [],
   failed: [],
   rejected: [],
   cancelled: [],
+  refunded: [],
 };
 
 export class WithdrawalTransitionError extends Error {
@@ -188,12 +196,41 @@ export function assertWithdrawalTransition(from: string, to: string): void {
 }
 
 /**
- * The admin approval API narrowed to what it may express: `approve` authorizes
- * (`processing`), `reject` refuses (`rejected`). No action, parameter or smuggled
- * field can name `successful` — completion is unreachable through this API.
+ * The admin withdrawal API narrowed to what it may express: `approve`
+ * authorizes (`processing`), `reject` refuses (`rejected`), `refund` returns
+ * funds (`refunded`). No action, parameter or smuggled field can name
+ * `successful` — completion is unreachable through this API and belongs to a
+ * verified provider callback.
  */
 export const ADMIN_WITHDRAWAL_ACTIONS = {
   approve: "processing",
   reject: "rejected",
+  refund: "refunded",
 } as const;
 export type AdminWithdrawalAction = keyof typeof ADMIN_WITHDRAWAL_ACTIONS;
+
+/** Valid events for the withdrawal audit trail (Phase 4). */
+export const WITHDRAWAL_AUDIT_EVENTS = [
+  "created",
+  "approved",
+  "rejected",
+  "moved_to_processing",
+  "callback_received",
+  "marked_successful",
+  "payout_failed",
+  "refunded",
+  "provider_timeout",
+] as const;
+export type WithdrawalAuditEvent = (typeof WITHDRAWAL_AUDIT_EVENTS)[number];
+
+/** Valid exception types for payout reconciliation (Phase 7). */
+export const RECONCILIATION_EXCEPTION_TYPES = [
+  "stuck_processing",
+  "provider_success_local_processing",
+  "provider_failure_local_processing",
+  "amount_mismatch",
+  "duplicate_provider_reference",
+  "unknown_provider_reference",
+  "currency_mismatch",
+] as const;
+export type ReconciliationExceptionType = (typeof RECONCILIATION_EXCEPTION_TYPES)[number];

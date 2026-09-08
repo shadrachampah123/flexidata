@@ -508,8 +508,13 @@ function phaseA(): void {
   check("pending → rejected allowed", canTransitionWithdrawal("pending", "rejected"));
   check("pending → successful FORBIDDEN", !canTransitionWithdrawal("pending", "successful"));
   check("pending → pending forbidden", !canTransitionWithdrawal("pending", "pending"));
-  check("processing → successful forbidden (no manual completion)", !canTransitionWithdrawal("processing", "successful"));
-  check("processing → rejected forbidden", !canTransitionWithdrawal("processing", "rejected"));
+  // Phase 2 expansion: processing can now transition to successful (via provider callback),
+  // rejected (admin rejection), or refunded (admin refund / provider failure). These are
+  // controlled transitions — successful is ONLY reachable via the provider callback endpoint,
+  // NOT via any admin API.
+  check("processing → successful allowed (provider callback only)", canTransitionWithdrawal("processing", "successful"));
+  check("processing → rejected allowed (admin can reject from processing)", canTransitionWithdrawal("processing", "rejected"));
+  check("processing → refunded allowed (admin refund / provider failure)", canTransitionWithdrawal("processing", "refunded"));
   check("processing → pending forbidden", !canTransitionWithdrawal("processing", "pending"));
   check("rejected → processing forbidden", !canTransitionWithdrawal("rejected", "processing"));
   check("rejected → rejected forbidden", !canTransitionWithdrawal("rejected", "rejected"));
@@ -535,9 +540,10 @@ function phaseA(): void {
     threw instanceof Error ? threw.message : String(threw),
   );
   check(
-    "admin API expresses only approve→processing + reject→rejected (never successful)",
+    "admin API expresses only approve→processing + reject→rejected + refund→refunded (never successful)",
     ADMIN_WITHDRAWAL_ACTIONS.approve === "processing" &&
       ADMIN_WITHDRAWAL_ACTIONS.reject === "rejected" &&
+      (ADMIN_WITHDRAWAL_ACTIONS as Record<string, string>).refund === "refunded" &&
       !Object.values(ADMIN_WITHDRAWAL_ACTIONS).includes("successful" as never),
   );
 }

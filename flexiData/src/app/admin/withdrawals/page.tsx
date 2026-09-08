@@ -25,12 +25,9 @@ export default async function AdminWithdrawalsPage({
   const pageSize = parsePageSize(q(params, "pageSize"));
   const status = q(params, "status");
   const search = q(params, "search");
+  const method = q(params, "method");
 
-  // Read-only catalog probes (no DDL needed): surface schema drift that would
-  // otherwise roll back every approve/reject on its audit INSERT (SQLSTATE
-  // 23514) as a visible maintenance state BEFORE the operator clicks — the
-  // action route answers the same drift with an explicit 503, but the point
-  // is that nobody has to discover it by clicking Reject first.
+  // Read-only catalog probes
   const [withdrawalSchema, adminAudit] = await Promise.all([
     describeWithdrawalCompatibility(),
     describeAdminAuditCompatibility(),
@@ -38,17 +35,13 @@ export default async function AdminWithdrawalsPage({
   const actionsBlocked =
     adminAudit.status === "legacy" || adminAudit.status === "missing";
 
-  // Without `withdrawal_requests` the select below would 500 the whole page;
-  // show the maintenance answer instead (the schema self-heal in the write
-  // path keeps trying to create the table additively).
   if (withdrawalSchema.status === "missing") {
     return (
       <div className="space-y-4">
         <AdminPageHead title="Withdrawals" subtitle="Manage user withdrawal requests." />
         <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-[13px] font-semibold text-amber-700 dark:text-amber-300">
           Withdrawals are unavailable: the <code>withdrawal_requests</code> table is missing from
-          this database. Run <code>npx drizzle-kit push</code> against it (see
-          drizzle/0005_lively_hiroim.sql).
+          this database. Run <code>npx drizzle-kit push</code> against it.
         </div>
       </div>
     );
@@ -58,40 +51,53 @@ export default async function AdminWithdrawalsPage({
   if (status) {
     conditions.push(eq(withdrawalRequests.status, status as any));
   }
+  if (method) {
+    conditions.push(eq(withdrawalRequests.destinationMethod, method));
+  }
   if (search) {
-    conditions.push(or(
-      like(withdrawalRequests.ref, `%${search}%`),
-      like(users.email, `%${search}%`),
-      like(wallets.number, `%${search}%`)
-    ));
+    conditions.push(
+      or(
+        like(withdrawalRequests.ref, `%${search}%`),
+        like(users.email, `%${search}%`),
+        like(wallets.number, `%${search}%`),
+        like(sql`${withdrawalRequests.destinationDetails}->>'account'`, `%${search}%`),
+      ),
+    );
   }
 
   const offset = (page - 1) * pageSize;
 
-  const results = await db.select({
-    id: withdrawalRequests.id,
-    ref: withdrawalRequests.ref,
-    amount: withdrawalRequests.amount,
-    fee: withdrawalRequests.fee,
-    netAmount: withdrawalRequests.netAmount,
-    status: withdrawalRequests.status,
-    createdAt: withdrawalRequests.createdAt,
-    method: withdrawalRequests.destinationMethod,
-    dest: sql`${withdrawalRequests.destinationDetails}->>'account'`,
-    userEmail: users.email,
-    walletNumber: wallets.number,
-    adminUserId: withdrawalRequests.adminUserId,
-    rejectionReason: withdrawalRequests.adminRejectionReason,
-  })
-  .from(withdrawalRequests)
-  .leftJoin(users, eq(withdrawalRequests.userId, users.id))
-  .leftJoin(wallets, eq(withdrawalRequests.walletId, wallets.id))
-  .where(and(...conditions))
-  .orderBy(desc(withdrawalRequests.createdAt))
-  .limit(pageSize)
-  .offset(offset);
+  const results = await db
+    .select({
+      id: withdrawalRequests.id,
+      ref: withdrawalRequests.ref,
+      amount: withdrawalRequests.amount,
+      fee: withdrawalRequests.fee,
+      netAmount: withdrawalRequests.netAmount,
+      status: withdrawalRequests.status,
+      createdAt: withdrawalRequests.createdAt,
+      processedAt: withdrawalRequests.processedAt,
+      completedAt: withdrawalRequests.completedAt,
+      method: withdrawalRequests.destinationMethod,
+      dest: sql<string>`${withdrawalRequests.destinationDetails}->>'account'`,
+      network: sql<string>`${withdrawalRequests.destinationDetails}->>'network'`,
+      userEmail: users.email,
+      walletNumber: wallets.number,
+      adminUserId: withdrawalRequests.adminUserId,
+      rejectionReason: withdrawalRequests.adminRejectionReason,
+      providerReference: withdrawalRequests.providerReference,
+      currency: withdrawalRequests.currency,
+    })
+    .from(withdrawalRequests)
+    .leftJoin(users, eq(withdrawalRequests.userId, users.id))
+    .leftJoin(wallets, eq(withdrawalRequests.walletId, wallets.id))
+    .where(and(...conditions))
+    .orderBy(desc(withdrawalRequests.createdAt))
+    .limit(pageSize)
+    .offset(offset);
 
-  const [{ count }] = await db.select({ count: sql<number>`count(*)` })
+  const [{ count }] = await db
+    .select({ count: sql<number>`count(*)::int` })
     .from(withdrawalRequests)
     .leftJoin(users, eq(withdrawalRequests.userId, users.id))
     .leftJoin(wallets, eq(withdrawalRequests.walletId, wallets.id))
@@ -106,11 +112,7 @@ export default async function AdminWithdrawalsPage({
       {actionsBlocked && (
         <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-[13px] font-semibold text-amber-700 dark:text-amber-300">
           Approve / reject is BLOCKED on this database: the admin audit trail still predates the
-          withdrawal actions, so every action would roll back without moving any money (SQLSTATE
-          23514). An operator must apply drizzle/0007 against this database with the targeted,
-          non-destructive migration — <code>npm run migrate:admin-audit-actions</code> (do NOT use
-          <code>npx drizzle-kit push</code> here: it diffs the whole schema and would request
-          DROPs of any production-only tables). No request below has been changed.
+          withdrawal actions. No request below has been changed.
         </div>
       )}
       <WithdrawalsExplorer
@@ -118,7 +120,7 @@ export default async function AdminWithdrawalsPage({
         initialTotal={Number(count)}
         initialPage={page}
         pageSize={pageSize}
-        initialFilters={{ status: status || "", search: search || "" }}
+        initialFilters={{ status: status || "", search: search || "", method: method || "" }}
         actionsBlocked={actionsBlocked}
       />
     </div>

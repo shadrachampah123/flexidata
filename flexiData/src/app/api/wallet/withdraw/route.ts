@@ -7,6 +7,7 @@ import { randomBytes, randomUUID } from "crypto";
 import { withdrawalSubtitle } from "@/lib/ghana-mobile";
 import { validateWithdrawalRequestBody } from "@/lib/withdrawals";
 import { ensureWithdrawalSchema } from "@/lib/seed";
+import { recordWithdrawalEvent } from "@/lib/withdrawal-audit";
 
 export const dynamic = "force-dynamic";
 
@@ -211,7 +212,35 @@ export async function POST(req: Request) {
             destinationDetails: { account: v.msisdn10, network: v.network, method: v.method },
             status: "pending",
             idempotencyKey,
+            currency: "GHS",
           });
+
+          // Record the creation event in the withdrawal audit trail.
+          // The audit table might not exist on un-migrated databases, so we
+          // catch and log the error rather than failing the whole withdrawal.
+          try {
+            // Look up the just-inserted withdrawal id
+            const [insertedRow] = await tx
+              .select({ id: withdrawalRequests.id })
+              .from(withdrawalRequests)
+              .where(eq(withdrawalRequests.ref, withdrawalRef))
+              .limit(1);
+            if (insertedRow) {
+              await recordWithdrawalEvent(tx, {
+                withdrawalId: insertedRow.id,
+                withdrawalRef,
+                event: "created",
+                previousStatus: null,
+                newStatus: "pending",
+                actorType: "system",
+                actorId: userId,
+                metadata: { amount: amountCedis, fee: feeCedis, netAmount: netCedis, method: v.method, destination: v.msisdn10, network: v.network },
+              });
+            }
+          } catch (auditError) {
+            // Non-fatal: the audit table might not exist yet on an un-migrated database
+            console.warn("[flexidata] withdrawal audit event recording failed (non-fatal):", (auditError as Error)?.message);
+          }
 
           // Create transaction record. The subtitle is built server-side from
           // whitelist metadata (W4) — no client string is interpolated, so a
