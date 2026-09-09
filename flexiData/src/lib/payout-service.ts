@@ -1,9 +1,11 @@
+import "server-only";
+
 /**
- * Provider-neutral payout service (Phase 5).
+ * Provider-neutral payout service (Phase 5 + Phase B).
  *
  * This module defines the abstraction layer between FlexiData's withdrawal
- * lifecycle and any future real payout provider (mobile money aggregator,
- * bank transfer service, etc.). No specific provider is hardcoded.
+ * lifecycle and payout providers (Paystack Transfers for real money, plus a
+ * mock provider for development/testing ONLY).
  *
  * The service interface supports:
  *   - Creating a payout instruction
@@ -12,11 +14,28 @@
  *   - Reconciling local state against provider state
  *   - Handling provider failures and timeouts
  *
- * A mock provider is available for development/testing ONLY and is explicitly
- * prevented from running in production.
+ * SAFETY:
+ *   - The mock provider is explicitly prevented from running in production.
+ *   - Real Paystack transfer calls happen ONLY when the explicit production
+ *     transfer flag is enabled (`PAYSTACK_TRANSFERS_ENABLED=true`) — see
+ *     `src/lib/paystack-transfers.ts`. Without it, resolution fails closed.
  */
 
 import type { WithdrawalAuditEvent } from "@/lib/withdrawals";
+import {
+  createMomoRecipient,
+  fetchTransfer,
+  initiateTransfer,
+  isPaystackTransfersEnabled,
+  mapPaystackTransferStatus,
+  payoutCedisToPesewas,
+  PAYOUT_CURRENCY,
+  PaystackTransferAmbiguousError,
+  PaystackTransferValidationError,
+} from "@/lib/paystack-transfers";
+import { isValidPaystackWebhookSignature } from "@/lib/paystack";
+import { pesewasToCedisString } from "@/lib/money";
+import type { WithdrawalMethod } from "@/lib/ghana-mobile";
 
 // ---------------------------------------------------------------------------
 // Provider interface
@@ -44,6 +63,10 @@ export type PayoutStatusResult = {
   message?: string;
   /** When the provider last updated this payout. */
   updatedAt?: Date;
+  /** Amount the provider reports (canonical cedis string, for verification). */
+  amount?: string;
+  /** Currency the provider reports (for verification). */
+  currency?: string;
   rawPayload?: Record<string, unknown>;
 };
 
@@ -61,6 +84,14 @@ export type CreatePayoutParams = {
   destination: string;
   /** Network name (e.g. "MTN"). */
   network: string;
+  /**
+   * Previously created recipient code (RCP_…), when the caller already
+   * persisted one for this withdrawal. Reused verbatim so a retry never
+   * creates a duplicate recipient.
+   */
+  recipientCode?: string | null;
+  /** Server-derived account holder name for recipient creation. */
+  accountName?: string;
 };
 
 /** Parsed callback/webhook data from a provider. */
@@ -75,6 +106,19 @@ export type ProviderCallbackData = {
   currency?: string;
   /** Human-readable message from the provider. */
   message?: string;
+  /**
+   * Our own stable reference echoed back by the provider (the withdrawal ref
+   * for Paystack transfers). Used ONLY as a fallback lookup when the
+   * provider_reference has not been stored yet (webhook/provider race) — never
+   * trusted for amount, user or wallet.
+   */
+  withdrawalRef?: string;
+  /**
+   * True for a structurally valid, correctly signed callback the payout
+   * lifecycle intentionally ignores (e.g. a non-transfer Paystack event).
+   * The route must ack it with 200 and perform NO state change.
+   */
+  ignored?: boolean;
   /** Raw callback payload (for audit; no secrets). */
   rawPayload?: Record<string, unknown>;
 };
@@ -94,7 +138,7 @@ export type CallbackVerificationResult =
  *   - Report honest statuses (no fabricating successes)
  */
 export interface PayoutProvider {
-  /** Human-readable provider name (e.g. "mock", "paystack-payouts"). */
+  /** Human-readable provider name (e.g. "mock", "paystack-transfers"). */
   readonly name: string;
 
   /**
@@ -200,6 +244,207 @@ class MockPayoutProvider implements PayoutProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Paystack Transfers provider (Phase B — real money)
+// ---------------------------------------------------------------------------
+
+/**
+ * Paystack Transfer payout provider.
+ *
+ * Real-money adapter with the same fail-closed posture as the deposit side:
+ *
+ *  - Every call asserts `isPaystackTransfersEnabled()` FIRST (explicit
+ *    `PAYSTACK_TRANSFERS_ENABLED=true` + configured secret key with the
+ *    live-mode lock). Without the flag, creation/status/callback verification
+ *    all refuse before any network I/O.
+ *  - `createPayout` sends the withdrawal ref as Paystack's stable `reference`
+ *    (reused verbatim on retry — never regenerated), converts GHS to integer
+ *    pesewas exactly, validates the recipient server-side, and persists the
+ *    returned recipient code in `rawPayload` for the caller to store.
+ *  - Ambiguous outcomes (timeout/network, or Paystack reporting the reference
+ *    as already used) propagate as `PaystackTransferAmbiguousError` so the
+ *    caller keeps the SAME reference instead of forking a second transfer.
+ *  - `verifyCallback` REQUIRES a valid Paystack HMAC-SHA512 signature and only
+ *    honours `transfer.success` / `transfer.failed` / `transfer.reversed`.
+ *    Anything else signed-but-unsupported is marked `ignored` (ack, no state
+ *    change) so provider retries cannot wedge the endpoint.
+ */
+class PaystackTransferProvider implements PayoutProvider {
+  readonly name = "paystack-transfers";
+
+  private assertEnabled(): void {
+    if (!isPaystackTransfersEnabled()) {
+      throw new PaystackTransferValidationError(
+        "Paystack transfers are disabled. Set PAYSTACK_TRANSFERS_ENABLED=true to enable real payouts.",
+      );
+    }
+  }
+
+  async createPayout(params: CreatePayoutParams): Promise<CreatePayoutResult> {
+    this.assertEnabled();
+
+    if ((params.currency || "").toUpperCase() !== PAYOUT_CURRENCY) {
+      throw new PaystackTransferValidationError(
+        `Unsupported payout currency "${params.currency}" (expected ${PAYOUT_CURRENCY}).`,
+      );
+    }
+    // Exact GHS → pesewas (integer arithmetic only — never floats).
+    const amountPesewas = payoutCedisToPesewas(params.amount);
+
+    const method = params.method as WithdrawalMethod;
+    if (method !== "momo_mtn" && method !== "telecel_cash") {
+      throw new PaystackTransferValidationError(`Unsupported payout method "${params.method}".`);
+    }
+
+    // Reuse a previously persisted recipient code so a retry never creates a
+    // duplicate recipient; otherwise create one (server-side validation inside).
+    let recipientCode = (params.recipientCode ?? "").trim();
+    let recipientCreated = false;
+    if (!recipientCode) {
+      const recipient = await createMomoRecipient({
+        method,
+        destination: params.destination,
+        accountName: params.accountName?.trim() || "FlexiData customer",
+      });
+      recipientCode = recipient.recipientCode;
+      recipientCreated = true;
+    }
+
+    // The withdrawal ref IS the stable Paystack reference (reused verbatim on
+    // every retry of this withdrawal — never regenerated).
+    const initiated = await initiateTransfer({
+      amountPesewas,
+      recipientCode,
+      reference: params.withdrawalRef,
+      reason: `FlexiData withdrawal ${params.withdrawalRef}`,
+    });
+
+    return {
+      providerReference: initiated.transferCode,
+      status: mapPaystackTransferStatus(initiated.rawStatus),
+      message:
+        initiated.rawStatus.toLowerCase() === "otp"
+          ? "Paystack transfer created; awaiting OTP finalization in the Paystack dashboard"
+          : `Paystack transfer ${initiated.transferCode} (${initiated.rawStatus})`,
+      rawPayload: {
+        provider: "paystack-transfers",
+        transfer_code: initiated.transferCode,
+        reference: initiated.reference,
+        recipient_code: recipientCode,
+        recipient_created: recipientCreated,
+        amount_pesewas: amountPesewas,
+        currency: PAYOUT_CURRENCY,
+        raw_status: initiated.rawStatus,
+      },
+    };
+  }
+
+  async getPayoutStatus(providerReference: string): Promise<PayoutStatusResult | null> {
+    this.assertEnabled();
+    const code = providerReference.trim();
+    if (!code) return null;
+    const fetched = await fetchTransfer(code);
+    return {
+      providerReference: fetched.transferCode,
+      status: mapPaystackTransferStatus(fetched.rawStatus),
+      message: `Paystack transfer ${fetched.rawStatus}`,
+      amount:
+        fetched.amountPesewas !== null ? pesewasToCedisString(fetched.amountPesewas) : undefined,
+      currency: fetched.currency ?? undefined,
+      rawPayload: {
+        provider: "paystack-transfers",
+        transfer_code: fetched.transferCode,
+        reference: fetched.reference,
+        raw_status: fetched.rawStatus,
+        amount_pesewas: fetched.amountPesewas,
+        currency: fetched.currency,
+        recipient_code: fetched.recipientCode,
+      },
+    };
+  }
+
+  async verifyCallback(
+    rawBody: string,
+    headers: Record<string, string | string[] | undefined>,
+  ): Promise<CallbackVerificationResult> {
+    this.assertEnabled();
+    // Signature is MANDATORY. Header lookup is case-insensitive.
+    let signature: string | null = null;
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() === "x-paystack-signature") {
+        signature = Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
+        break;
+      }
+    }
+    if (!isValidPaystackWebhookSignature(rawBody, signature)) {
+      return { ok: false, error: "Invalid Paystack webhook signature" };
+    }
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(rawBody) as Record<string, unknown>;
+    } catch {
+      return { ok: false, error: "Invalid callback payload" };
+    }
+    const event = typeof payload.event === "string" ? payload.event : "";
+    const data = (payload.data ?? {}) as Record<string, unknown>;
+
+    // Only transfer lifecycle events move money. Anything else signed-but-
+    // unsupported is acked-and-ignored (no state change, no exception).
+    if (event !== "transfer.success" && event !== "transfer.failed" && event !== "transfer.reversed") {
+      return {
+        ok: true,
+        data: {
+          providerReference: typeof data.transfer_code === "string" ? data.transfer_code : "",
+          status: "pending",
+          message: `Ignored Paystack event "${event || "unknown"}"`,
+          ignored: true,
+          rawPayload: { event },
+        },
+      };
+    }
+
+    const transferCode = typeof data.transfer_code === "string" ? data.transfer_code.trim() : "";
+    if (!transferCode) {
+      return { ok: false, error: "Paystack transfer callback is missing transfer_code" };
+    }
+    const status: PayoutOutcome =
+      event === "transfer.success" ? "successful" : event === "transfer.failed" ? "failed" : "reversed";
+
+    // Amount: Paystack reports integer kobo/pesewas. Anything else is refused
+    // (the route then skips amount verification rather than comparing floats).
+    const rawAmount = data.amount;
+    const amountPesewas =
+      typeof rawAmount === "number" && Number.isInteger(rawAmount) && rawAmount >= 0
+        ? rawAmount
+        : null;
+
+    return {
+      ok: true,
+      data: {
+        providerReference: transferCode,
+        status,
+        amount: amountPesewas !== null ? pesewasToCedisString(amountPesewas) : undefined,
+        currency: typeof data.currency === "string" ? data.currency : undefined,
+        message:
+          typeof data.status === "string"
+            ? `Paystack ${event} (${data.status})`
+            : `Paystack ${event}`,
+        withdrawalRef: typeof data.reference === "string" ? data.reference : undefined,
+        rawPayload: {
+          provider: "paystack-transfers",
+          event,
+          transfer_code: transferCode,
+          reference: typeof data.reference === "string" ? data.reference : null,
+          raw_status: typeof data.status === "string" ? data.status : null,
+          amount_pesewas: amountPesewas,
+          currency: typeof data.currency === "string" ? data.currency : null,
+        },
+      },
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Provider resolution
 // ---------------------------------------------------------------------------
 
@@ -208,26 +453,35 @@ let cachedProvider: PayoutProvider | null = null;
 /**
  * Get the configured payout provider.
  *
- * In development (NODE_ENV !== "production"), the mock provider is used.
- * In production, a real provider MUST be configured via PAYMENT_PROVIDER.
+ * Resolution (fail-closed in production):
+ *   - `PAYOUT_PROVIDER=paystack-transfers` (or `paystack`) + transfers enabled
+ *     → the real Paystack Transfer adapter.
+ *   - production + anything else (unset, `mock`, transfers disabled) → throws.
+ *     The mock provider can NEVER run in production.
+ *   - non-production + unset/other → the mock provider (dev/test aid).
  *
  * The provider is cached for the lifetime of the process.
  */
 export function getPayoutProvider(): PayoutProvider {
   if (cachedProvider) return cachedProvider;
 
-  if (process.env.NODE_ENV === "production") {
-    const configured = process.env.PAYOUT_PROVIDER?.trim();
-    if (!configured || configured === "mock") {
-      throw new Error(
-        "No payout provider configured for production. " +
-          "Set PAYOUT_PROVIDER to a supported provider name.",
+  const configured = (process.env.PAYOUT_PROVIDER ?? "").trim().toLowerCase();
+  const wantsPaystack = configured === "paystack-transfers" || configured === "paystack";
+
+  if (wantsPaystack) {
+    if (!isPaystackTransfersEnabled()) {
+      throw new PaystackTransferValidationError(
+        "Paystack payouts are not enabled. Set PAYSTACK_TRANSFERS_ENABLED=true (and configure PAYSTACK_SECRET_KEY) to use the paystack-transfers provider.",
       );
     }
-    // Future: load real provider adapter here based on configured name
+    cachedProvider = new PaystackTransferProvider();
+    return cachedProvider;
+  }
+
+  if (process.env.NODE_ENV === "production") {
     throw new Error(
-      `Payout provider "${configured}" is not yet implemented. ` +
-        "No real payout provider is connected yet.",
+      "No payout provider configured for production. " +
+        "Set PAYOUT_PROVIDER=paystack-transfers and PAYSTACK_TRANSFERS_ENABLED=true to enable real payouts.",
     );
   }
 
@@ -254,3 +508,6 @@ export function isRealPayoutProviderConnected(): boolean {
     return false;
   }
 }
+
+export { PaystackTransferAmbiguousError };
+export type { WithdrawalAuditEvent };

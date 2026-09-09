@@ -14,9 +14,14 @@
  *   POST /transaction/initialize
  *   GET  /transaction/verify/:ref
  *   GET  /checkout/<ref>?access_code=…   (the page the auth URL points at)
+ *   GET  /bank?type=mobile_money|nuban   (Ghana bank / mobile-money codes)
+ *   POST /transferrecipient              (create recipient → RCP_ code)
+ *   POST /transfer                       (initiate transfer → TRF_ code)
+ *   GET  /transfer/:code                 (fetch transfer status)
  *
  * and a tiny control API for the test script:
  *   POST /_stub/scenario   { ref, scenario, failBefore? }
+ *   POST /_stub/transfer-scenario { reference, scenario }
  *   POST /_stub/reset
  *   GET  /_stub/audit      (what the app called, with auth-header SHAPE only,
  *                           plus the callback_url / channels / metadata the app
@@ -55,6 +60,52 @@ const refs = new Map();
 const audit = [];
 let nextTransactionId = 8_000_000;
 let nextAccessCode = 1_000_000;
+
+/**
+ * Phase B transfer state.
+ * recipients: code -> { type, name, accountNumber, bankCode, currency }
+ * transfers: transferCode -> { reference, amount, currency, recipientCode, scenario }
+ * transferByRef: reference -> transferCode (Paystack enforces unique references)
+ */
+const recipients = new Map();
+const transfers = new Map();
+const transferByRef = new Map();
+/** reference -> scenario set before initiate (like the transaction scenario API) */
+const transferScenarios = new Map();
+let nextRecipientId = 1;
+let nextTransferId = 1;
+
+const MOMO_BANKS = [
+  { name: "MTN Mobile Money", code: "MTN" },
+  { name: "Telecel Cash", code: "TELECEL" },
+];
+const NUBAN_BANKS = [
+  { name: "GCB Bank", code: "GCB" },
+  { name: "Ecobank Ghana", code: "ECO" },
+];
+
+function transferStatusFor(t) {
+  const scenario = t.scenario ?? "pending";
+  if (scenario === "success" || scenario === "success-wrong-amount" || scenario === "success-wrong-currency") {
+    return "success";
+  }
+  if (scenario === "failed" || scenario === "reversed" || scenario === "pending") return scenario;
+  return "pending";
+}
+
+function transferPayload(t, transferCode) {
+  const out = {
+    reference: t.reference,
+    transfer_code: transferCode,
+    status: transferStatusFor(t),
+    amount: t.amount,
+    currency: t.currency,
+    recipient: { recipient_code: t.recipientCode },
+  };
+  if (t.scenario === "success-wrong-amount") out.amount = t.amount + 100;
+  if (t.scenario === "success-wrong-currency") out.currency = "NGN";
+  return out;
+}
 
 function log(...args) {
   // No request headers, no key material — method/path/status/refs only.
@@ -186,6 +237,10 @@ const server = http.createServer(async (req, res) => {
     if (p === "/_stub/reset" && req.method === "POST") {
       refs.clear();
       audit.length = 0;
+      recipients.clear();
+      transfers.clear();
+      transferByRef.clear();
+      transferScenarios.clear();
       return json(res, 200, { ok: true });
     }
     if (p === "/_stub/scenario" && req.method === "POST") {
@@ -225,6 +280,19 @@ const server = http.createServer(async (req, res) => {
       t.verifyCalls = 0;
       return json(res, 200, { ok: true, ref, scenario });
     }
+    if (p === "/_stub/transfer-scenario" && req.method === "POST") {
+      const body = await readBody(req);
+      const reference = typeof body.reference === "string" ? body.reference.trim() : "";
+      const scenario = typeof body.scenario === "string" ? body.scenario.trim() : "";
+      const allowed = ["pending", "success", "success-wrong-amount", "success-wrong-currency", "failed", "reversed"];
+      if (!reference || !allowed.includes(scenario)) {
+        return json(res, 400, { ok: false, error: "reference + one of the allowed scenarios required" });
+      }
+      const code = transferByRef.get(reference);
+      if (code) transfers.get(code).scenario = scenario;
+      else transferScenarios.set(reference, scenario);
+      return json(res, 200, { ok: true, reference, scenario });
+    }
     if (p === "/_stub/audit" && req.method === "GET") {
       return json(res, 200, {
         ok: true,
@@ -241,6 +309,26 @@ const server = http.createServer(async (req, res) => {
               callbackUrl: t.callbackUrl ?? null,
               channels: t.channels ?? null,
               metadata: t.metadata ?? null,
+            },
+          ]),
+        ),
+        recipients: Object.fromEntries(
+          [...recipients.entries()].map(([code, r]) => [
+            code,
+            { type: r.type, name: r.name, accountNumber: r.accountNumber, bankCode: r.bankCode, currency: r.currency },
+          ]),
+        ),
+        transfers: Object.fromEntries(
+          [...transfers.entries()].map(([code, t]) => [
+            code,
+            {
+              reference: t.reference,
+              amount: t.amount,
+              currency: t.currency,
+              recipientCode: t.recipientCode,
+              scenario: t.scenario,
+              authLooksLikeTestKey: t.authLooksLikeTestKey,
+              initiateCalls: t.initiateCalls,
             },
           ]),
         ),
@@ -332,12 +420,104 @@ const server = http.createServer(async (req, res) => {
       );
     }
 
+    // ---- Paystack Transfers surface (Phase B payouts) -----------------------
+    if (p === "/bank" && req.method === "GET") {
+      const type = url.searchParams.get("type") ?? "";
+      const list = type === "nuban" ? NUBAN_BANKS : type === "mobile_money" ? MOMO_BANKS : [...MOMO_BANKS, ...NUBAN_BANKS];
+      return json(res, 200, {
+        status: true,
+        message: "Banks retrieved",
+        data: list.map((b, i) => ({ id: 100 + i, name: b.name, code: b.code, currency: "GHS", type })),
+      });
+    }
+
+    if (p === "/transferrecipient" && req.method === "POST") {
+      const body = await readBody(req);
+      if (body.__unparseable) return json(res, 400, { status: false, message: "Invalid JSON body" });
+      const type = body.type;
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      const accountNumber = typeof body.account_number === "string" ? body.account_number.trim() : "";
+      const bankCode = typeof body.bank_code === "string" ? body.bank_code.trim() : "";
+      if ((type !== "mobile_money" && type !== "nuban") || !name || !accountNumber || !bankCode) {
+        return json(res, 400, { status: false, message: "type, name, account_number and bank_code are required" });
+      }
+      const known = [...MOMO_BANKS, ...NUBAN_BANKS].some((b) => b.code === bankCode);
+      if (!known) {
+        return json(res, 400, { status: false, message: `Unknown bank code ${bankCode}` });
+      }
+      const code = `RCP_stub${String(nextRecipientId++).padStart(4, "0")}`;
+      recipients.set(code, {
+        type,
+        name,
+        accountNumber,
+        bankCode,
+        currency: typeof body.currency === "string" ? body.currency : "GHS",
+      });
+      return json(res, 200, {
+        status: true,
+        message: "Recipient created",
+        data: { recipient_code: code, type, name, account_number: accountNumber, bank_code: bankCode },
+      });
+    }
+
+    if (p === "/transfer" && req.method === "POST") {
+      const body = await readBody(req);
+      if (body.__unparseable) return json(res, 400, { status: false, message: "Invalid JSON body" });
+      const amount = body.amount;
+      const recipient = typeof body.recipient === "string" ? body.recipient.trim() : "";
+      const reference = typeof body.reference === "string" ? body.reference.trim() : "";
+      if (!Number.isInteger(amount) || amount <= 0) {
+        return json(res, 400, { status: false, message: "amount must be a positive integer (minor units)" });
+      }
+      if (!recipient || !recipients.has(recipient)) {
+        return json(res, 400, { status: false, message: "Unknown recipient" });
+      }
+      if (!reference) {
+        return json(res, 400, { status: false, message: "reference is required" });
+      }
+      if (transferByRef.has(reference)) {
+        // Mimic Paystack: stable references are unique — a double-submit with
+        // the same reference is refused, never forked into a second transfer.
+        return json(res, 400, { status: false, message: "Reference already exists" });
+      }
+      const code = `TRF_stub${String(nextTransferId++).padStart(4, "0")}`;
+      const scenario = transferScenarios.get(reference) ?? "pending";
+      transferScenarios.delete(reference);
+      transfers.set(code, {
+        reference,
+        amount,
+        currency: typeof body.currency === "string" && body.currency ? body.currency : "GHS",
+        recipientCode: recipient,
+        scenario,
+        authLooksLikeTestKey: authLooksLikeTestKey(req),
+        initiateCalls: 1,
+      });
+      transferByRef.set(reference, code);
+      return json(res, 200, {
+        status: true,
+        message: "Transfer initiated",
+        data: { reference, transfer_code: code, status: transferStatusFor(transfers.get(code)) },
+      });
+    }
+
+    const fetchTransferMatch = p.match(/^\/transfer\/([^/]+)$/);
+    if (fetchTransferMatch && req.method === "GET") {
+      const code = decodeURIComponent(fetchTransferMatch[1]);
+      const t = transfers.get(code);
+      if (!t) {
+        return json(res, 404, { status: false, message: `Transfer ${code} not found`, data: null });
+      }
+      return json(res, 200, { status: true, message: "Transfer retrieved", data: transferPayload(t, code) });
+    }
+
     json(res, 404, { status: false, message: "Unknown endpoint", data: null });
   } catch (error) {
     log("error", req.method, p, error?.message ?? String(error));
     json(res, 500, { status: false, message: "Stub internal error", data: null });
   } finally {
-    if (p.startsWith("/transaction/")) recordAudit(req, url, res.statusCode ?? 0);
+    if (p.startsWith("/transaction/") || p.startsWith("/transfer") || p === "/bank") {
+      recordAudit(req, url, res.statusCode ?? 0);
+    }
   }
 });
 

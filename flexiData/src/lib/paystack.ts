@@ -136,6 +136,24 @@ async function paystackFetch(path: string, init: RequestInit, context: string): 
   return body;
 }
 
+/**
+ * Shared server-side Paystack API caller for modules beyond deposits/checkout
+ * (Phase B payouts use it for the Transfer + Transfer Recipient endpoints).
+ *
+ * Same guarantees as every other call in this module: the secret key is read
+ * in exactly one place (`paystackSecretKey`, with the live-mode lock), is
+ * never logged, and never appears in an error message. `signal` callers pass
+ * through for timeouts; an aborted request surfaces as a `PaystackRequestError`
+ * whose message names the timeout (never key material).
+ */
+export async function paystackApiRequest(
+  path: string,
+  init: RequestInit,
+  context: string,
+): Promise<Record<string, unknown>> {
+  return paystackFetch(path, init, context);
+}
+
 export type PaystackInitResult = {
   reference: string;
   authorizationUrl: string;
