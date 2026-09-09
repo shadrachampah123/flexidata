@@ -9,6 +9,9 @@ import { describeAdminAuditCompatibility } from "@/lib/schema-compat";
 import {
   ADMIN_WITHDRAWAL_ACTIONS,
   assertWithdrawalTransition,
+  payoutIsInFlight,
+  payoutInFlightMessage,
+  PAYOUT_IN_FLIGHT_CODE,
   WithdrawalTransitionError,
   type AdminWithdrawalAction,
 } from "@/lib/withdrawals";
@@ -189,6 +192,40 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
             `This withdrawal is already ${withdrawal.status} — it cannot be processed again, and no refund will be applied a second time.`,
             409,
             "withdrawal_already_processed",
+          );
+        }
+      }
+
+      // ---------------------------------------------------------------------
+      // IN-FLIGHT PAYOUT GATE — the production-safety fix.
+      //
+      // `reject` and `refund` are the only two actions that RETURN MONEY to the
+      // wallet. Both used to do so unconditionally. If the provider already
+      // holds a transfer for this withdrawal (`provider_reference` is set) — or
+      // if initiation was ambiguous and we genuinely cannot tell
+      // (`provider_status = 'unknown'`) — restoring the balance risks paying the
+      // customer twice: once by Paystack settling the transfer, once by us.
+      //
+      // So we refuse with 409 BEFORE the wallet row is even locked. No balance
+      // is read or written, no ledger row is touched, no audit claim is made,
+      // and the withdrawal stays exactly as it was in `processing`. A later
+      // `transfer.success` therefore still settles it normally through the
+      // callback route, and `transfer.failed` / `transfer.reversed` still
+      // performs the refund automatically — the safe, provider-confirmed path.
+      //
+      // This check is intentionally LOCAL ONLY: it makes no provider API call,
+      // so a Paystack outage can never cause it to fail open.
+      if (adminAction === "reject" || adminAction === "refund") {
+        if (payoutIsInFlight(withdrawal)) {
+          console.warn(
+            `[flexidata] ${adminAction} refused: payout in flight ref=${ref} ${actor} ` +
+              `withdrawal=${withdrawal.ref} provider_reference=${withdrawal.providerReference ?? "-"} ` +
+              `provider_status=${withdrawal.providerStatus ?? "-"} — no wallet refund applied`,
+          );
+          throw new WithdrawalActionError(
+            payoutInFlightMessage(withdrawal),
+            409,
+            PAYOUT_IN_FLIGHT_CODE,
           );
         }
       }

@@ -64,6 +64,10 @@ import {
   ADMIN_WITHDRAWAL_ACTIONS,
   assertWithdrawalTransition,
   canTransitionWithdrawal,
+  IN_FLIGHT_PROVIDER_STATUSES,
+  PAYOUT_IN_FLIGHT_CODE,
+  payoutInFlightMessage,
+  payoutIsInFlight,
   validateWithdrawalRequestBody,
   WithdrawalTransitionError,
 } from "../src/lib/withdrawals";
@@ -545,6 +549,65 @@ function phaseA(): void {
       ADMIN_WITHDRAWAL_ACTIONS.reject === "rejected" &&
       (ADMIN_WITHDRAWAL_ACTIONS as Record<string, string>).refund === "refunded" &&
       !Object.values(ADMIN_WITHDRAWAL_ACTIONS).includes("successful" as never),
+  );
+
+  // --- A7: in-flight payout gate (production-safety fix) -----------------------
+  // reject/refund must be REFUSED (409) whenever a provider payout already
+  // exists or might exist, so the wallet is never credited while Paystack may
+  // still settle the transfer (double-spend).
+
+  // THE TWO CORE ASSERTIONS — previously failing, now covered by the fix.
+  check(
+    "reject/refund BLOCKED when provider_reference exists (in-flight payout)",
+    payoutIsInFlight({ providerReference: "TRF_abc123", providerStatus: "pending" }),
+  );
+  check(
+    "reject/refund BLOCKED when provider_status = 'unknown' (ambiguous payout)",
+    payoutIsInFlight({ providerReference: null, providerStatus: "unknown" }),
+  );
+
+  // The gate must not over-block: a withdrawal the provider never saw is still
+  // rejectable/refundable, otherwise honest refunds become impossible.
+  check(
+    "no provider contact at all → refund still allowed",
+    !payoutIsInFlight({ providerReference: null, providerStatus: null }),
+  );
+  check(
+    "awaiting_provider (no provider configured) → refund still allowed",
+    !payoutIsInFlight({ providerReference: null, providerStatus: "awaiting_provider" }),
+  );
+  check(
+    "initiation_failed with no reference → refund still allowed",
+    !payoutIsInFlight({ providerReference: null, providerStatus: "initiation_failed" }),
+  );
+  // A reference always wins, whatever the recorded status says.
+  check(
+    "provider_reference wins even when status looks terminal",
+    payoutIsInFlight({ providerReference: "TRF_x", providerStatus: "initiation_failed" }),
+  );
+  // Whitespace/casing must not be a bypass.
+  check(
+    "blank/whitespace provider_reference is not treated as a transfer",
+    !payoutIsInFlight({ providerReference: "   ", providerStatus: null }),
+  );
+  check(
+    "provider_status 'UNKNOWN' (case/space variant) still blocks",
+    payoutIsInFlight({ providerReference: null, providerStatus: "  UNKNOWN  " }),
+  );
+  check(
+    "'unknown' is a recognised in-flight provider status",
+    (IN_FLIGHT_PROVIDER_STATUSES as readonly string[]).includes("unknown"),
+  );
+  check(
+    "refusal is a conflict code, and its message promises no refund was applied",
+    PAYOUT_IN_FLIGHT_CODE === "payout_in_flight" &&
+      /no wallet refund was applied/i.test(payoutInFlightMessage({ providerReference: "TRF_abc123" })),
+  );
+  // The settle path must remain open: the gate touches only reject/refund, so
+  // a later transfer.success can still drive processing → successful.
+  check(
+    "in-flight gate leaves processing → successful (transfer.success) reachable",
+    canTransitionWithdrawal("processing", "successful"),
   );
 }
 

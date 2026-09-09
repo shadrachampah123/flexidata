@@ -212,6 +212,69 @@ export const ADMIN_WITHDRAWAL_ACTIONS = {
 } as const;
 export type AdminWithdrawalAction = keyof typeof ADMIN_WITHDRAWAL_ACTIONS;
 
+/**
+ * Provider states in which a payout must be treated as ALREADY IN FLIGHT (or
+ * ambiguous) — money may be moving at the provider right now.
+ *
+ * `unknown` is the ambiguous outcome recorded by `executeWithdrawalPayout`
+ * when initiation timed out / failed at the network level / was refused as a
+ * duplicate reference. In that state we do NOT know whether Paystack accepted
+ * the transfer, so it must be treated exactly like a live one.
+ */
+export const IN_FLIGHT_PROVIDER_STATUSES = ["unknown"] as const;
+
+/**
+ * The production-safety gate in front of the money-returning admin actions
+ * (`reject` and `refund`).
+ *
+ * THE VULNERABILITY THIS CLOSES: both actions unconditionally credited
+ * `wallets.balance` back and marked the withdrawal ledger row `failed`. When a
+ * provider transfer was already initiated (a `provider_reference` exists) or
+ * its fate was unknowable (`provider_status = 'unknown'`), the user could be
+ * paid TWICE — once by Paystack settling the in-flight transfer, and once by
+ * the wallet restoration. That is an unrecoverable double-spend.
+ *
+ * The rule is deliberately conservative and purely local (no provider call, so
+ * it cannot fail open on a network error): if there is ANY evidence a transfer
+ * exists or might exist, the refund path is closed. Resolution belongs to the
+ * provider callback (`transfer.success` settles it, `transfer.failed` /
+ * `transfer.reversed` refunds it) or to payout reconciliation — never to an
+ * admin guessing.
+ */
+export function payoutIsInFlight(withdrawal: {
+  providerReference?: string | null;
+  providerStatus?: string | null;
+}): boolean {
+  const ref = withdrawal.providerReference?.trim();
+  if (ref) return true;
+  const status = withdrawal.providerStatus?.trim().toLowerCase();
+  if (!status) return false;
+  return (IN_FLIGHT_PROVIDER_STATUSES as readonly string[]).includes(status);
+}
+
+/** Machine-readable code returned with the 409 from the in-flight gate. */
+export const PAYOUT_IN_FLIGHT_CODE = "payout_in_flight";
+
+/** Operator-facing explanation for a refused reject/refund. */
+export function payoutInFlightMessage(withdrawal: {
+  providerReference?: string | null;
+  providerStatus?: string | null;
+}): string {
+  const ref = withdrawal.providerReference?.trim();
+  const status = withdrawal.providerStatus?.trim().toLowerCase();
+  const why = ref
+    ? `a payout transfer (${ref}) has already been sent to the provider`
+    : "the payout provider's response was ambiguous, so a transfer may already exist";
+  return (
+    `This withdrawal cannot be rejected or refunded: ${why}` +
+    (status ? ` (provider status: ${status})` : "") +
+    ". NOTHING was changed and NO wallet refund was applied — refunding now could pay the " +
+    "customer twice if the provider settles the transfer. Wait for the provider callback " +
+    "(transfer.success settles it; transfer.failed or transfer.reversed refunds it " +
+    "automatically), or resolve it through payout reconciliation."
+  );
+}
+
 /** Valid events for the withdrawal audit trail (Phase 4). */
 export const WITHDRAWAL_AUDIT_EVENTS = [
   "created",
