@@ -4,7 +4,7 @@ import { db } from "@/db";
 import { wallets, withdrawalRequests, adminAuditLogs, transactions } from "@/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
-import { ensureWithdrawalSchema, ensureAdminAuditActions } from "@/lib/seed";
+import { ensureWithdrawalSchema, ensureAdminAuditActions, ensurePayoutSystemSchema } from "@/lib/seed";
 import { describeAdminAuditCompatibility } from "@/lib/schema-compat";
 import {
   ADMIN_WITHDRAWAL_ACTIONS,
@@ -14,6 +14,7 @@ import {
 } from "@/lib/withdrawals";
 import { recordWithdrawalEvent } from "@/lib/withdrawal-audit";
 import { dispatchNotificationFromEvent } from "@/lib/withdrawal-notifications";
+import { executeWithdrawalPayout, type PayoutAttemptResult } from "@/lib/payout-execution";
 
 export const dynamic = "force-dynamic";
 
@@ -68,7 +69,7 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
     const action = body.action as string | undefined;
     const reason = typeof body.reason === "string" ? body.reason.trim() : "";
 
-    if (action !== "approve" && action !== "reject" && action !== "refund") {
+    if (action !== "approve" && action !== "reject" && action !== "refund" && action !== "retry") {
       return NextResponse.json({ ok: false, error: "Invalid action" }, { status: 400 });
     }
     const adminAction = action as AdminWithdrawalAction;
@@ -158,15 +159,38 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       // valid transitions are allowed. A replayed action (double-click, two
       // admins, retried request) lands here as an explicit conflict — never
       // a second state change, never a second refund.
-      try {
-        assertWithdrawalTransition(withdrawal.status, targetStatus);
-      } catch (error) {
-        if (!(error instanceof WithdrawalTransitionError)) throw error;
-        throw new WithdrawalActionError(
-          `This withdrawal is already ${withdrawal.status} — it cannot be processed again, and no refund will be applied a second time.`,
-          409,
-          "withdrawal_already_processed",
-        );
+      //
+      // `retry` is the one same-state action: it is only valid when the
+      // withdrawal is ALREADY `processing` (re-attempt payout initiation
+      // under the SAME stable reference — never a new transfer). Terminal
+      // withdrawals refuse it as a conflict; `pending` withdrawals must be
+      // approved first.
+      if (adminAction === "retry") {
+        if (withdrawal.status === "pending") {
+          throw new WithdrawalActionError(
+            "This withdrawal is still pending — approve it first instead of retrying.",
+            400,
+            "withdrawal_not_processing",
+          );
+        }
+        if (withdrawal.status !== "processing") {
+          throw new WithdrawalActionError(
+            `This withdrawal is already ${withdrawal.status} — it cannot be retried, and no payout will be initiated a second time.`,
+            409,
+            "withdrawal_already_processed",
+          );
+        }
+      } else {
+        try {
+          assertWithdrawalTransition(withdrawal.status, targetStatus);
+        } catch (error) {
+          if (!(error instanceof WithdrawalTransitionError)) throw error;
+          throw new WithdrawalActionError(
+            `This withdrawal is already ${withdrawal.status} — it cannot be processed again, and no refund will be applied a second time.`,
+            409,
+            "withdrawal_already_processed",
+          );
+        }
       }
 
       if (adminAction === "approve") {
@@ -222,11 +246,11 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
           reason: reason || null,
         });
 
-        // Move to processing (authorized, awaiting a payout provider). No real
-        // money is sent — there is deliberately no payout integration in this
-        // release. The gross amount was already deducted from the wallet when
-        // the request was created, so approve moves no money and leaves the
-        // (non-successful) ledger row exactly as it was.
+        // Move to processing (authorized, awaiting a payout provider). The gross
+        // amount was already deducted from the wallet when the request was
+        // created, so approve moves no wallet money and leaves the
+        // (non-successful) ledger row exactly as it was — completion belongs
+        // to a verified provider webhook.
         const now = new Date();
         await tx
           .update(withdrawalRequests)
@@ -237,6 +261,17 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
             updatedAt: now,
           })
           .where(eq(withdrawalRequests.id, withdrawalId));
+
+        // Phase B: submit to the payout provider under the withdrawal's STABLE
+        // reference (reused verbatim on retry — never a second transfer). When
+        // no provider is configured this records `awaiting_provider` and the
+        // withdrawal simply waits for manual payout or retry; the approval
+        // itself still stands either way.
+        const payout: PayoutAttemptResult = await executeWithdrawalPayout(
+          tx,
+          { ...withdrawal, status: "processing" as const, adminUserId: admin.userId, processedAt: now, updatedAt: now },
+          { type: "admin", id: admin.userId, email: admin.email },
+        );
 
         // Dispatch notification (fire-and-forget after transaction)
         // We capture the data here; dispatch happens after commit
@@ -251,7 +286,7 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
           method: withdrawal.destinationMethod,
         };
 
-        return { ok: true, status: targetStatus, notifyEvent: "moved_to_processing" as const, notifData };
+        return { ok: true, status: targetStatus, notifyEvent: "moved_to_processing" as const, notifData, payout };
       } else if (adminAction === "reject") {
         // REJECT: pending → rejected, refund the wallet
         // This is the same path as before but now also writes to the withdrawal audit trail
@@ -356,6 +391,28 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
           .where(eq(withdrawalRequests.id, withdrawalId));
 
         return { ok: true, status: targetStatus, notifyEvent: "rejected" as const, notifData: null };
+      } else if (adminAction === "retry") {
+        // RETRY: processing → processing — re-attempt payout initiation under
+        // the SAME stable reference. `executeWithdrawalPayout` reuses an
+        // existing transfer when one is already stored (a retry can never
+        // create a second transfer) and never mints a new reference on
+        // ambiguous outcomes. No wallet movement here: the payout provider is
+        // the only thing touched, and only when one is configured.
+        //
+        // Auditing: the attempt is recorded in `withdrawal_audit_logs` with
+        // the admin actor (see `executeWithdrawalPayout`). No
+        // `admin_audit_logs` row is written: its action CHECK has no retry
+        // value and its (target_ref, action) unique index already holds this
+        // withdrawal's `approve_withdrawal` claim — a second claim row would
+        // either violate the CHECK or the uniqueness. The withdrawal trail is
+        // the authoritative audit record for payout retries.
+        const payout: PayoutAttemptResult = await executeWithdrawalPayout(
+          tx,
+          withdrawal,
+          { type: "admin", id: admin.userId, email: admin.email },
+        );
+
+        return { ok: true, status: "processing", notifyEvent: null, notifData: null, payout };
       } else {
         // REFUND: processing → refunded, refund the wallet
         // This is the NEW action for this phase. Only valid from processing state.
@@ -476,12 +533,37 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       });
     }
 
-    return NextResponse.json({ ok: result.ok, status: result.status }, { headers: { "Cache-Control": "no-store, max-age=0" } });
+    // Approve/retry report what the payout attempt did (initiated / reused /
+    // awaiting provider / ambiguous / failed) so the operator knows whether
+    // money is moving or a retry is needed. Reject/refund carry no payout.
+    const payout = "payout" in result ? result.payout : null;
+    return NextResponse.json(
+      { ok: result.ok, status: result.status, ...(payout ? { payout } : {}) },
+      { headers: { "Cache-Control": "no-store, max-age=0" } },
+    );
   } catch (err: unknown) {
     if (err instanceof WithdrawalActionError) {
       const payload: { ok: false; error: string; code?: string } = { ok: false, error: err.message };
       if (err.code) payload.code = err.code;
       return NextResponse.json(payload, { status: err.status });
+    }
+    // A lost idempotency race on the provider reference: another attempt
+    // already stored this transfer code (the 0010 unique index is the final
+    // arbiter). The transaction rolled back, so the withdrawal is unchanged —
+    // answer as a conflict, not a fault.
+    const diag = pgDiagnostic(err);
+    if (diag.code === "23505" && diag.constraint === "withdrawal_requests_provider_ref_idx") {
+      console.warn(
+        `[flexidata] admin withdrawal action lost provider-reference race ref=${ref} ${actor} — transfer already recorded`,
+      );
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "payout_already_initiated",
+          error: "A payout transfer is already recorded for this withdrawal — no second transfer was created.",
+        },
+        { status: 409 },
+      );
     }
     const pgCode = (err as { code?: string } | null)?.code;
     const pgMessage = (err as { message?: string } | null)?.message;
@@ -498,6 +580,23 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       { status: 500 },
     );
   }
+}
+
+/** Walk the Drizzle `cause` chain to the Postgres error (SQLSTATE + constraint). */
+function pgDiagnostic(err: unknown): { code?: string; constraint?: string; message?: string } {
+  let current = err as {
+    code?: string;
+    constraint?: string;
+    message?: string;
+    cause?: unknown;
+  } | null;
+  for (let depth = 0; current && depth < 6; depth++) {
+    if (typeof current.code === "string" && current.code !== "") {
+      return { code: current.code, constraint: current.constraint, message: current.message };
+    }
+    current = (current.cause ?? null) as typeof current;
+  }
+  return { message: (err as { message?: string } | null)?.message };
 }
 
 /**

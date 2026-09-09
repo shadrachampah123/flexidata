@@ -18,28 +18,37 @@ import {
 } from "@/lib/payout-service";
 import { ensureWithdrawalSchema } from "@/lib/seed";
 import { ensurePayoutSystemSchema } from "@/lib/seed";
+import { cedisToPesewas } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST /api/payouts/callback
  *
- * Secure webhook endpoint for payout provider callbacks (Phase 6).
+ * Secure webhook endpoint for payout provider callbacks (Phase 6 + Phase B).
  *
- * No real provider is connected yet — this endpoint builds the infrastructure
- * so a provider can later send: successful payout, failed payout, reversed
- * payout, or pending/processing update.
+ * Handles provider lifecycle events — Paystack `transfer.success` /
+ * `transfer.failed` / `transfer.reversed` (or the mock provider's equivalents
+ * in development): successful payout, failed payout, reversed payout, or a
+ * pending/processing update.
  *
  * Security requirements met:
- *   - Provider signature verification (via provider adapter)
- *   - Rejects invalid signatures
- *   - Callbacks are idempotent (duplicate callbacks cannot double-refund)
+ *   - Provider signature verification (via provider adapter) is MANDATORY —
+ *     unsigned/invalid callbacks are rejected with 401 before any state read
+ *   - Signed-but-unsupported events are acked with 200 and IGNORED (no state
+ *     change, no exception) so provider retries cannot wedge the endpoint
+ *   - Callbacks are idempotent (duplicate deliveries cannot double-refund or
+ *     double-credit: conditional ledger updates + terminal-state guards)
  *   - Does NOT trust amount/user/wallet from callback — looks up by reference
- *   - Verifies expected amount and currency
+ *   - Verifies expected amount (exact integer pesewas — never floats) and
+ *     currency; mismatches become reconciliation exceptions, never settlements
+ *   - Unknown provider references become reconciliation exceptions (never
+ *     fabricate a withdrawal)
  *   - Verifies withdrawal is in valid state before transition
  *   - Locks withdrawal + wallet rows where required
+ *   - Failed/reversed payouts restore the wallet EXACTLY once (conditional
+ *     `status = 'pending'` ledger claim); successful payouts are terminal
  *   - Never creates money from nothing
- *   - Never allows duplicate callbacks to double-credit
  */
 export async function POST(req: Request) {
   const ref = randomBytes(3).toString("hex").toUpperCase();
@@ -94,18 +103,101 @@ export async function POST(req: Request) {
 
     const callbackData = verification.data;
 
-    // 4. Schema self-heal
+    // 4. Signed-but-unsupported events (e.g. a non-transfer Paystack event):
+    // ack with 200 and perform NO database effect — no lookup, no exception,
+    // no state change. Returning an error here would make the provider retry
+    // a callback that can never succeed.
+    if (callbackData.ignored) {
+      return NextResponse.json(
+        { ok: true, ignored: true },
+        { status: 200, headers: NO_STORE },
+      );
+    }
+
+    // 5. Schema self-heal
     await ensureWithdrawalSchema();
     await ensurePayoutSystemSchema();
 
-    // 5. Look up the withdrawal by provider reference
+    // 6. Look up the withdrawal by provider reference
     const result = await db.transaction(async (tx) => {
       // Find the withdrawal by provider reference
-      const [withdrawal] = await tx
+      let [withdrawal] = await tx
         .select()
         .from(withdrawalRequests)
         .where(eq(withdrawalRequests.providerReference, callbackData.providerReference))
         .for("update");
+
+      if (!withdrawal && callbackData.withdrawalRef) {
+        // Fallback: the provider echoed OUR stable reference (the withdrawal
+        // ref) but we have not stored its transfer code yet — the webhook won
+        // a race with the submit transaction. Look up by our own ref (which
+        // the signature authenticates) and adopt the transfer code.
+        const [byRef] = await tx
+          .select()
+          .from(withdrawalRequests)
+          .where(eq(withdrawalRequests.ref, callbackData.withdrawalRef))
+          .for("update");
+        if (byRef) {
+          if (byRef.providerReference && byRef.providerReference !== callbackData.providerReference) {
+            // This withdrawal already belongs to a DIFFERENT provider
+            // transfer — adopting this one would fork it. Exception, no state
+            // change.
+            await tx.insert(payoutReconciliationExceptions).values({
+              withdrawalId: byRef.id,
+              withdrawalRef: byRef.ref,
+              exceptionType: "duplicate_provider_reference",
+              description:
+                `Callback for ${callbackData.providerReference} names withdrawal ${byRef.ref}, ` +
+                `which is already bound to ${byRef.providerReference}`,
+              localStatus: byRef.status,
+              providerStatus: callbackData.status,
+              providerReference: callbackData.providerReference,
+              currency: byRef.currency || "GHS",
+            });
+            return { error: "Conflicting provider reference", status: 409 };
+          }
+          if (!byRef.providerReference) {
+            // Nobody else may own this transfer code (pre-check so the
+            // adoption below cannot hit the 0010 unique index under normal
+            // operation; a microscopic race would still fail LOUDLY via the
+            // index rather than forking silently).
+            const [owner] = await tx
+              .select({ id: withdrawalRequests.id, ref: withdrawalRequests.ref })
+              .from(withdrawalRequests)
+              .where(eq(withdrawalRequests.providerReference, callbackData.providerReference))
+              .limit(1);
+            if (owner) {
+              await tx.insert(payoutReconciliationExceptions).values({
+                withdrawalId: byRef.id,
+                withdrawalRef: byRef.ref,
+                exceptionType: "duplicate_provider_reference",
+                description:
+                  `Callback for ${callbackData.providerReference} names withdrawal ${byRef.ref}, ` +
+                  `but that transfer is already bound to ${owner.ref}`,
+                localStatus: byRef.status,
+                providerStatus: callbackData.status,
+                providerReference: callbackData.providerReference,
+                currency: byRef.currency || "GHS",
+              });
+              return { error: "Conflicting provider reference", status: 409 };
+            }
+            await tx
+              .update(withdrawalRequests)
+              .set({
+                providerReference: callbackData.providerReference,
+                providerPayload: mergeProviderPayload(byRef.providerPayload, {
+                  ...(callbackData.rawPayload ?? {}),
+                  adopted_via_callback_at: new Date().toISOString(),
+                }),
+                updatedAt: new Date(),
+              })
+              .where(eq(withdrawalRequests.id, byRef.id));
+            withdrawal = { ...byRef, providerReference: callbackData.providerReference };
+          } else {
+            withdrawal = byRef;
+          }
+        }
+      }
 
       if (!withdrawal) {
         // Unknown provider reference — create a reconciliation exception
@@ -120,8 +212,11 @@ export async function POST(req: Request) {
         return { error: "Unknown provider reference", status: 404 };
       }
 
-      // 6. Verify currency matches
-      if (callbackData.currency && callbackData.currency !== withdrawal.currency) {
+      // 7. Verify currency matches (case-insensitive; stored verbatim)
+      if (
+        callbackData.currency &&
+        callbackData.currency.toUpperCase() !== (withdrawal.currency || "GHS").toUpperCase()
+      ) {
         await tx.insert(payoutReconciliationExceptions).values({
           withdrawalId: withdrawal.id,
           withdrawalRef: withdrawal.ref,
@@ -130,18 +225,21 @@ export async function POST(req: Request) {
           localStatus: withdrawal.status,
           providerStatus: callbackData.status,
           providerReference: callbackData.providerReference,
-          expectedAmount: String(withdrawal.amount),
+          expectedAmount: String(withdrawal.netAmount),
           actualAmount: callbackData.amount ?? null,
           currency: callbackData.currency,
         });
         return { error: "Currency mismatch", status: 400 };
       }
 
-      // 7. Verify amount matches (if callback provides one)
+      // 8. Verify amount matches EXACTLY in integer pesewas (never floats — a
+      // binary-float comparison could settle GH₵4.90 against GH₵4.89). Either
+      // side unparseable is itself a mismatch: never settle on amounts we
+      // cannot prove equal.
       if (callbackData.amount) {
-        const callbackAmount = Number(callbackData.amount);
-        const expectedAmount = Number(withdrawal.netAmount);
-        if (Math.abs(callbackAmount - expectedAmount) > 0.01) {
+        const callbackPesewas = cedisToPesewas(callbackData.amount);
+        const expectedPesewas = cedisToPesewas(String(withdrawal.netAmount));
+        if (callbackPesewas === null || expectedPesewas === null || callbackPesewas !== expectedPesewas) {
           await tx.insert(payoutReconciliationExceptions).values({
             withdrawalId: withdrawal.id,
             withdrawalRef: withdrawal.ref,
@@ -150,15 +248,15 @@ export async function POST(req: Request) {
             localStatus: withdrawal.status,
             providerStatus: callbackData.status,
             providerReference: callbackData.providerReference,
-            expectedAmount: String(expectedAmount),
-            actualAmount: String(callbackAmount),
+            expectedAmount: String(withdrawal.netAmount),
+            actualAmount: callbackData.amount,
             currency: withdrawal.currency,
           });
           return { error: "Amount mismatch", status: 400 };
         }
       }
 
-      // 8. Determine the target status from the callback outcome
+      // 9. Determine the target status from the callback outcome
       let targetStatus: string;
       let auditEvent: "callback_received" | "marked_successful" | "payout_failed" | "refunded";
       switch (callbackData.status) {
@@ -192,7 +290,12 @@ export async function POST(req: Request) {
             .set({
               providerStatus: callbackData.status,
               providerMessage: callbackData.message || null,
-              providerPayload: callbackData.rawPayload || null,
+              // MERGE, never replace: the stored payload holds the recipient
+              // code + stable reference the payout path persisted.
+              providerPayload: mergeProviderPayload(withdrawal.providerPayload, {
+                ...(callbackData.rawPayload ?? {}),
+                last_callback_at: new Date().toISOString(),
+              }),
               updatedAt: new Date(),
             })
             .where(eq(withdrawalRequests.id, withdrawal.id));
@@ -201,7 +304,7 @@ export async function POST(req: Request) {
           return { error: "Unknown callback status", status: 400 };
       }
 
-      // 9. Validate the state transition
+      // 10. Validate the state transition
       try {
         assertWithdrawalTransition(withdrawal.status, targetStatus);
       } catch (error) {
@@ -229,7 +332,7 @@ export async function POST(req: Request) {
         throw error;
       }
 
-      // 10. Record the callback event
+      // 11. Record the callback event
       await recordWithdrawalEvent(tx, {
         withdrawalId: withdrawal.id,
         withdrawalRef: withdrawal.ref,
@@ -242,7 +345,7 @@ export async function POST(req: Request) {
         metadata: { source: "callback", status_reported: callbackData.status },
       });
 
-      // 11. Apply the state change
+      // 12. Apply the state change
       const now = new Date();
       await tx
         .update(withdrawalRequests)
@@ -250,13 +353,18 @@ export async function POST(req: Request) {
           status: targetStatus as "successful" | "refunded",
           providerStatus: callbackData.status,
           providerMessage: callbackData.message || null,
-          providerPayload: callbackData.rawPayload || null,
+          // MERGE, never replace: the stored payload holds the recipient
+          // code + stable reference the payout path persisted.
+          providerPayload: mergeProviderPayload(withdrawal.providerPayload, {
+            ...(callbackData.rawPayload ?? {}),
+            last_callback_at: now.toISOString(),
+          }),
           completedAt: now,
           updatedAt: now,
         })
         .where(eq(withdrawalRequests.id, withdrawal.id));
 
-      // 12. Update the ledger row to match
+      // 13. Update the ledger row to match
       if (targetStatus === "successful") {
         await tx.execute(
           sql`UPDATE transactions
@@ -364,3 +472,19 @@ export async function POST(req: Request) {
 }
 
 const NO_STORE = { "Cache-Control": "no-store, max-age=0" } as const;
+
+/**
+ * Merge callback payload fields into the stored provider payload WITHOUT
+ * losing what the payout path persisted (recipient_code, reference_sent).
+ * Neither side ever carries secrets — only provider identifiers + statuses.
+ */
+function mergeProviderPayload(
+  existing: unknown,
+  extra: Record<string, unknown>,
+): Record<string, unknown> {
+  const base =
+    existing && typeof existing === "object" && !Array.isArray(existing)
+      ? (existing as Record<string, unknown>)
+      : {};
+  return { ...base, ...extra };
+}

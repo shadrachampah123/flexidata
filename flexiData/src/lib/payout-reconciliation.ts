@@ -14,6 +14,8 @@
  *   - Unknown provider references
  */
 
+import "server-only";
+
 import { sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
@@ -124,7 +126,55 @@ export async function runPayoutReconciliation(): Promise<ReconciliationResult> {
           const providerStatus = await provider.getPayoutStatus(w.providerReference);
           if (!providerStatus) continue;
 
-          // Check for mismatches
+          // Provider/local amount + currency verification (exact string
+          // comparison on canonical cedis — the provider adapter reports the
+          // provider's integer minor units converted WITHOUT floats).
+          if (providerStatus.currency && providerStatus.currency.toUpperCase() !== (w.currency || "GHS").toUpperCase()) {
+            const created = await createExceptionIfNew({
+              withdrawalId: w.id,
+              withdrawalRef: w.ref,
+              exceptionType: "currency_mismatch",
+              description: `Provider reports currency ${providerStatus.currency} for ${w.ref} but local currency is ${w.currency}`,
+              localStatus: w.status,
+              providerStatus: providerStatus.status,
+              providerReference: w.providerReference,
+              expectedAmount: String(w.netAmount),
+              actualAmount: providerStatus.amount ?? null,
+              currency: providerStatus.currency,
+            });
+            if (created) {
+              newExceptions++;
+              exceptions.push({
+                type: "currency_mismatch",
+                count: 1,
+                description: `Provider currency differs for ${w.ref}`,
+              });
+            }
+          } else if (providerStatus.amount && !amountsEqual(providerStatus.amount, String(w.netAmount))) {
+            const created = await createExceptionIfNew({
+              withdrawalId: w.id,
+              withdrawalRef: w.ref,
+              exceptionType: "amount_mismatch",
+              description: `Provider reports amount ${providerStatus.amount} for ${w.ref} but local net amount is ${w.netAmount}`,
+              localStatus: w.status,
+              providerStatus: providerStatus.status,
+              providerReference: w.providerReference,
+              expectedAmount: String(w.netAmount),
+              actualAmount: providerStatus.amount,
+              currency: w.currency,
+            });
+            if (created) {
+              newExceptions++;
+              exceptions.push({
+                type: "amount_mismatch",
+                count: 1,
+                description: `Provider amount differs for ${w.ref}`,
+              });
+            }
+          }
+
+          // Provider/local status divergence (read-only: flags for admin
+          // review — reconciliation NEVER moves money or flips statuses).
           if (providerStatus.status === "successful" && w.status === "processing") {
             const created = await createExceptionIfNew({
               withdrawalId: w.id,
@@ -145,6 +195,29 @@ export async function runPayoutReconciliation(): Promise<ReconciliationResult> {
                 description: `Provider success for ${w.ref} not reflected locally`,
               });
             }
+          } else if (
+            (providerStatus.status === "failed" || providerStatus.status === "reversed") &&
+            w.status === "processing"
+          ) {
+            const created = await createExceptionIfNew({
+              withdrawalId: w.id,
+              withdrawalRef: w.ref,
+              exceptionType: "provider_failure_local_processing",
+              description: `Provider reports ${providerStatus.status} for ${w.ref} but local status is still processing (refund may be required)`,
+              localStatus: w.status,
+              providerStatus: providerStatus.status,
+              providerReference: w.providerReference,
+              expectedAmount: String(w.netAmount),
+              currency: w.currency,
+            });
+            if (created) {
+              newExceptions++;
+              exceptions.push({
+                type: "provider_failure_local_processing",
+                count: 1,
+                description: `Provider ${providerStatus.status} for ${w.ref} not reflected locally`,
+              });
+            }
           }
         } catch {
           // Provider query failed for this reference — skip
@@ -161,6 +234,28 @@ export async function runPayoutReconciliation(): Promise<ReconciliationResult> {
     newExceptions,
     exceptions,
   };
+}
+
+/**
+ * Exact cedis equality WITHOUT floats: both sides must parse to the same
+ * integer pesewas. Unparseable input is NEVER equal (fail closed — the caller
+ * raises an amount_mismatch exception rather than settling).
+ */
+function amountsEqual(a: string, b: string): boolean {
+  const pa = cedisStringToPesewas(a);
+  const pb = cedisStringToPesewas(b);
+  return pa !== null && pb !== null && pa === pb;
+}
+
+function cedisStringToPesewas(value: string): number | null {
+  const s = value.trim();
+  if (!/^-?\d{1,10}(\.\d{1,2})?$/.test(s)) return null;
+  const negative = s.startsWith("-");
+  const unsigned = negative ? s.slice(1) : s;
+  const [whole, frac = ""] = unsigned.split(".");
+  const pesewas = Number(whole) * 100 + Number(frac.padEnd(2, "0"));
+  if (!Number.isSafeInteger(pesewas)) return null;
+  return negative ? -pesewas : pesewas;
 }
 
 async function countProcessingWithdrawals(): Promise<number> {

@@ -1094,6 +1094,76 @@ export async function repairPayoutSystemSchema(): Promise<void> {
   } catch {
     // Enum modification may fail if type doesn't exist yet — that's fine
   }
+
+  // Converge with migration 0010 (unique provider_reference index).
+  await repairProviderReferenceUniqueness();
+}
+
+/**
+ * Converge `withdrawal_requests` with migration 0010 (Phase B payout
+ * hardening): `withdrawal_requests_provider_ref_idx` must be a PARTIAL UNIQUE
+ * index so one provider transfer can map to at most one withdrawal.
+ *
+ * Runs as part of `repairPayoutSystemSchema()`, so a database that never
+ * received the migration file still gets the same protection. Same
+ * production-safety contract as the migration — report-first, never rewrite:
+ * duplicates are REPORTED (by ref) and the index is left untouched for a
+ * human to resolve; otherwise a missing index is created unique and a 0009-era
+ * non-unique index is rebuilt (index-only; no row is ever inserted, updated
+ * or deleted here).
+ */
+async function repairProviderReferenceUniqueness(): Promise<void> {
+  // The withdrawal table itself may not exist on a lagging database.
+  const table = await db.execute<{ present: boolean }>(
+    sql`select to_regclass('withdrawal_requests') is not null as present`,
+  );
+  if (!(table.rows?.[0] as { present?: boolean } | undefined)?.present) return;
+
+  const column = await db.execute<{ present: boolean }>(sql`
+    select count(*)::int > 0 as present
+    from information_schema.columns
+    where table_name = 'withdrawal_requests' and column_name = 'provider_reference'
+  `);
+  if (!(column.rows?.[0] as { present?: boolean } | undefined)?.present) return;
+
+  // Report-first: duplicates can only be hand-edited data — the payout
+  // execution path assigns each provider transfer to exactly one withdrawal.
+  const dupes = await db.execute<{ refs: string | null }>(sql`
+    select string_agg(w.ref, ', ' order by w.ref) as refs
+    from (
+      select ref, count(*) over (partition by provider_reference) as n
+      from withdrawal_requests
+      where provider_reference is not null
+    ) w
+    where w.n > 1
+  `);
+  const dupeRefs = (dupes.rows?.[0] as { refs?: string | null } | undefined)?.refs ?? null;
+  if (dupeRefs) {
+    console.warn(
+      `[flexidata] NOT enforcing withdrawal_requests_provider_ref_idx as UNIQUE: duplicate provider_reference values exist (${dupeRefs}). ` +
+        "Resolve them manually (no row was touched) and re-run; transfer uniqueness currently rests on the payout execution guards alone.",
+    );
+    return;
+  }
+
+  const shape = await db.execute<{ is_unique: boolean | null }>(sql`
+    select i.indisunique as is_unique
+    from pg_class c
+    join pg_index i on i.indexrelid = c.oid
+    where c.relname = 'withdrawal_requests_provider_ref_idx'
+  `);
+  const isUnique = (shape.rows?.[0] as { is_unique?: boolean | null } | undefined)?.is_unique ?? null;
+  if (isUnique === true) return; // Already the 0010 shape — no-op.
+
+  if (isUnique === false) {
+    // The 0009 non-unique shape: index-only rebuild to unique. Rows untouched.
+    await db.execute(sql`drop index if exists withdrawal_requests_provider_ref_idx`);
+  }
+  await db.execute(sql`
+    create unique index if not exists withdrawal_requests_provider_ref_idx
+      on withdrawal_requests (provider_reference)
+      where provider_reference is not null
+  `);
 }
 
 export function ensurePayoutSystemSchema(): Promise<void> {

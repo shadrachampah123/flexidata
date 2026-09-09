@@ -198,14 +198,17 @@ export function assertWithdrawalTransition(from: string, to: string): void {
 /**
  * The admin withdrawal API narrowed to what it may express: `approve`
  * authorizes (`processing`), `reject` refuses (`rejected`), `refund` returns
- * funds (`refunded`). No action, parameter or smuggled field can name
- * `successful` — completion is unreachable through this API and belongs to a
- * verified provider callback.
+ * funds (`refunded`), and `retry` re-attempts payout initiation for a
+ * `processing` withdrawal (staying in `processing` — it reuses the SAME stable
+ * provider reference and can never fork a second transfer). No action,
+ * parameter or smuggled field can name `successful` — completion is
+ * unreachable through this API and belongs to a verified provider callback.
  */
 export const ADMIN_WITHDRAWAL_ACTIONS = {
   approve: "processing",
   reject: "rejected",
   refund: "refunded",
+  retry: "processing",
 } as const;
 export type AdminWithdrawalAction = keyof typeof ADMIN_WITHDRAWAL_ACTIONS;
 

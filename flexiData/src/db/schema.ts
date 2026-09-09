@@ -485,7 +485,13 @@ export const withdrawalRequests = pgTable("withdrawal_requests", {
   index("withdrawal_requests_wallet_idx").on(table.walletId),
   index("withdrawal_requests_status_idx").on(table.status),
   index("withdrawal_requests_created_at_idx").on(table.createdAt),
-  index("withdrawal_requests_provider_ref_idx").on(table.providerReference),
+  // Phase B (0010): one provider transfer maps to at most one withdrawal.
+  // Partial UNIQUE — NULLs (never sent to a provider) are excluded, so only
+  // real provider references are bound. This is the database enforcement
+  // behind "a retried payout can never be adopted twice".
+  uniqueIndex("withdrawal_requests_provider_ref_idx")
+    .on(table.providerReference)
+    .where(sql`${table.providerReference} is not null`),
   // F2: idempotency is database-enforced (NULL keys are legacy rows and are
   // excluded — Postgres treats NULLs as distinct, so this only binds keyed rows).
   uniqueIndex("withdrawal_requests_wallet_idempotency_idx")

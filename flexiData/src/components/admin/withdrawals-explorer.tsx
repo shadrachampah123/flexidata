@@ -41,11 +41,13 @@ export function WithdrawalsExplorer({
 
   const pages = Math.ceil(initialTotal / pageSize);
 
-  const handleAction = async (id: string, action: "approve" | "reject" | "refund") => {
+  const handleAction = async (id: string, action: "approve" | "reject" | "refund" | "retry") => {
     let reason = "";
     if (action === "reject" || action === "refund") {
       reason = window.prompt(`${action === "refund" ? "Refund" : "Rejection"} reason:`) || "";
       if (!reason) return;
+    } else if (action === "retry") {
+      if (!window.confirm("Retry payout initiation? It will reuse the same provider reference — never a second transfer.")) return;
     } else {
       if (!window.confirm("Approve this withdrawal? It will be moved to processing (awaiting payout).")) return;
     }
@@ -226,14 +228,24 @@ export function WithdrawalsExplorer({
                       </>
                     )}
                     {row.status === "processing" && (
-                      <button
-                        onClick={() => handleAction(row.id, "refund")}
-                        disabled={actionsBlocked}
-                        title="Refund (return funds to wallet)"
-                        className="rounded p-1 text-orange-600 transition-colors hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        <RotateCcw className="h-5 w-5" />
-                      </button>
+                      <>
+                        <button
+                          onClick={() => handleAction(row.id, "retry")}
+                          disabled={actionsBlocked}
+                          title="Retry payout initiation (reuses the same provider reference — never a second transfer)"
+                          className="rounded p-1 text-blue-600 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Clock className="h-5 w-5" />
+                        </button>
+                        <button
+                          onClick={() => handleAction(row.id, "refund")}
+                          disabled={actionsBlocked}
+                          title="Refund (return funds to wallet)"
+                          className="rounded p-1 text-orange-600 transition-colors hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <RotateCcw className="h-5 w-5" />
+                        </button>
+                      </>
                     )}
                     {(row.status === "successful" || row.status === "rejected" || row.status === "refunded") && (
                       <span className="text-[10px] text-zinc-400">—</span>
