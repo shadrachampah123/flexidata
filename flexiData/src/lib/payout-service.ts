@@ -19,6 +19,11 @@ import "server-only";
  *   - Real Paystack transfer calls happen ONLY when the explicit production
  *     transfer flag is enabled (`PAYSTACK_TRANSFERS_ENABLED=true`) — see
  *     `src/lib/paystack-transfers.ts`. Without it, resolution fails closed.
+ *   - The temporary withdrawal kill switch (`WITHDRAWALS_ENABLED`, see
+ *     `src/lib/withdrawal-flag.ts`) gates `createPayout` on BOTH adapters:
+ *     while it is not explicitly `true`, no payout is created — not even a
+ *     simulated one. Status reads and callback verification stay available so
+ *     historical records keep reconciling while payouts are paused.
  */
 
 import type { WithdrawalAuditEvent } from "@/lib/withdrawals";
@@ -36,6 +41,7 @@ import {
 import { isValidPaystackWebhookSignature } from "@/lib/paystack";
 import { pesewasToCedisString } from "@/lib/money";
 import type { WithdrawalMethod } from "@/lib/ghana-mobile";
+import { assertWithdrawalsEnabled } from "@/lib/withdrawal-flag";
 
 // ---------------------------------------------------------------------------
 // Provider interface
@@ -190,6 +196,9 @@ class MockPayoutProvider implements PayoutProvider {
 
   async createPayout(params: CreatePayoutParams): Promise<CreatePayoutResult> {
     this.assertNotProduction();
+    // Temporary kill switch: no payout — not even a simulated one — while
+    // WITHDRAWALS_ENABLED is not explicitly true.
+    assertWithdrawalsEnabled();
     // Simulate a provider reference and pending status
     const providerReference = `MOCK-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
     return {
@@ -280,6 +289,10 @@ class PaystackTransferProvider implements PayoutProvider {
   }
 
   async createPayout(params: CreatePayoutParams): Promise<CreatePayoutResult> {
+    // Temporary kill switch FIRST: while WITHDRAWALS_ENABLED is not
+    // explicitly true, no recipient is created and no transfer is initiated —
+    // before the transfers-flag check and before any network I/O.
+    assertWithdrawalsEnabled();
     this.assertEnabled();
 
     if ((params.currency || "").toUpperCase() !== PAYOUT_CURRENCY) {

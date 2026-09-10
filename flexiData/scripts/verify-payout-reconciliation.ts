@@ -86,7 +86,7 @@ class Jar {
   }
 }
 
-const ENV_KEYS = ["NODE_ENV", "PAYSTACK_TRANSFERS_ENABLED", "PAYSTACK_SECRET_KEY", "PAYSTACK_BASE_URL", "PAYOUT_PROVIDER"] as const;
+const ENV_KEYS = ["NODE_ENV", "WITHDRAWALS_ENABLED", "PAYSTACK_TRANSFERS_ENABLED", "PAYSTACK_SECRET_KEY", "PAYSTACK_BASE_URL", "PAYOUT_PROVIDER"] as const;
 function snapshotEnv(): Record<string, string | undefined> {
   const snap: Record<string, string | undefined> = {};
   for (const k of ENV_KEYS) snap[k] = process.env[k];
@@ -287,6 +287,9 @@ async function phaseB(pool: Pool, track: Track): Promise<void> {
   const origEnv = { ...process.env };
   try {
     process.env.NODE_ENV = "test";
+    // The divergence fixture initiates a real (stub) payout, so the temporary
+    // withdrawal kill switch must be explicitly on for this probe.
+    process.env.WITHDRAWALS_ENABLED = "true";
     process.env.PAYOUT_PROVIDER = "paystack-transfers";
     process.env.PAYSTACK_TRANSFERS_ENABLED = "true";
     process.env.PAYSTACK_SECRET_KEY = TEST_KEY;

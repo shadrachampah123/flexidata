@@ -41,7 +41,9 @@
  * `users.is_admin` for that account itself (test database only). Wallet
  * funding uses whichever provider the server has configured (mock settles
  * instantly; Paystack TEST would need the hosted checkout, so the script
- * reports the provider it exercised).
+ * reports the provider it exercised). Phase B creates and approves
+ * withdrawals through the REAL API, so the server must also run with the
+ * temporary kill switch explicitly re-armed (WITHDRAWALS_ENABLED=true).
  */
 import { Pool } from "pg";
 

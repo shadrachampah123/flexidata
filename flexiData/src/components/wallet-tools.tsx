@@ -75,6 +75,7 @@ export function WalletTools({
   pendingFundingRef,
   fundingProvider = "paystack",
   withdrawals = [],
+  withdrawalsEnabled = true,
 }: {
   wallet: WalletDTO;
   initialTab: "fund" | "transfer" | "withdraw";
@@ -95,6 +96,15 @@ export function WalletTools({
    * (production funding lockout): the fund tab renders hard-disabled.
    */
   fundingProvider?: "paystack" | "mock" | "unavailable";
+  /**
+   * Temporary withdrawal kill switch, resolved server-side in
+   * `src/app/wallet/page.tsx` via `isWithdrawalsEnabled()` (fail-closed: only
+   * an explicit `WITHDRAWALS_ENABLED=true` enables). While false, the Withdraw
+   * tab shows an explicit "temporarily unavailable" notice with a disabled CTA
+   * and the request history stays visible. Display only — the withdraw API
+   * enforces the same switch independently.
+   */
+  withdrawalsEnabled?: boolean;
 }) {
   const router = useRouter();
   const isPaystackFunding = fundingProvider === "paystack";
@@ -105,6 +115,11 @@ export function WalletTools({
   // demo deposits in production regardless of what the client sends.
   const isProductionBuild = process.env.NODE_ENV === "production";
   const demoFundingDisabled = isProductionBuild && fundingProvider !== "paystack";
+  // Temporary withdrawal kill switch (a server-resolved prop — the withdraw
+  // API enforces the same switch independently of this UI). While off, the
+  // Withdraw tab renders an explicit notice plus a visibly disabled CTA (never
+  // a silently hidden button), and deposits/transfers are untouched.
+  const withdrawalsDisabled = !withdrawalsEnabled;
   // When we land here straight back from a Paystack redirect the sheet opens
   // straight into its processing/polling state.
   const [tab, setTab] = useState<"fund" | "transfer" | "withdraw">(pendingFundingRef ? "fund" : initialTab);
@@ -177,7 +192,7 @@ export function WalletTools({
     trPesewas >= 100 && trPesewas <= 500_000 && isCompletePhone(dest) && !insufficient;
 
   const wdInsufficient = wdPesewas > balancePesewas;
-  const withdrawReady = wdPesewas >= WITHDRAW_MIN_PESEWAS && isCompletePhone(wdDest) && !wdInsufficient;
+  const withdrawReady = wdPesewas >= WITHDRAW_MIN_PESEWAS && isCompletePhone(wdDest) && !wdInsufficient && !withdrawalsDisabled;
   // The fee preview is the SAME integer-pesewa quote the server charges with
   // (`withdrawalQuote`), so preview and charge can never disagree (W3).
   const wdQuote = withdrawalQuote(wdPesewas);
@@ -361,6 +376,19 @@ export function WalletTools({
       setPhase("result");
       return;
     }
+    // Temporary kill switch (client-side mirror only — the server refuses a
+    // disabled withdrawal regardless of what the client sends, so this is just
+    // the fast local answer when the flag flipped after this page rendered).
+    if (tab === "withdraw" && withdrawalsDisabled) {
+      setResult({
+        status: "failed",
+        headline: "Withdrawals unavailable",
+        message:
+          "Withdrawals are temporarily unavailable. Your balance is safe — deposits, transfers and data purchases still work.",
+      });
+      setPhase("result");
+      return;
+    }
     submittingRef.current = true;
     flowSeq.current += 1;
     setStage("init");
@@ -432,7 +460,9 @@ export function WalletTools({
             ? "Wallet funding is not available right now. Please try again later."
             : data.code === "paystack_init_failed"
               ? "Could not connect to Paystack. Please try again."
-              : (data.error ?? "Failed"),
+              : data.code === "withdrawals_disabled"
+                ? "Withdrawals are temporarily unavailable. Your balance is safe — deposits, transfers and data purchases still work."
+                : (data.error ?? "Failed"),
         );
       }
       if (typeof data.balance === "number") setBalance(data.balance);
@@ -637,6 +667,26 @@ export function WalletTools({
             </Link>
           )}
         </>
+      ) : withdrawalsDisabled ? (
+        <>
+          <div
+            className="animate-fade-up flex items-start gap-2.5 rounded-2xl border border-amber-500/30 bg-amber-400/15 px-4 py-3.5"
+            style={{ animationDelay: "60ms" }}
+          >
+            <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <div>
+              <p className="text-[13px] font-bold text-amber-700 dark:text-amber-300">
+                Withdrawals are temporarily unavailable.
+              </p>
+              <p className="mt-1 text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+                We&apos;ve paused withdrawals while we complete payment-provider approval. Your
+                balance is safe — deposits, transfers and data purchases still work, and your
+                existing withdrawal requests are listed below.
+              </p>
+            </div>
+          </div>
+          <WithdrawalHistory withdrawals={withdrawals} />
+        </>
       ) : (
         <>
           <div className="animate-fade-up" style={{ animationDelay: "60ms" }}>
@@ -696,47 +746,16 @@ export function WalletTools({
                Insufficient balance
              </div>
           )}
-          {withdrawals.length > 0 && (
-            <div className="animate-fade-up mt-5" style={{ animationDelay: "160ms" }}>
-              <p className="mb-2 px-1 text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">
-                Withdrawal requests
-              </p>
-              <Card className="overflow-hidden">
-                <ul className="divide-y divide-black/[0.05] dark:divide-line">
-                  {withdrawals.map((w) => (
-                    <li key={w.id} className="flex items-center gap-3 px-4 py-3.5">
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-rose-500/15 text-rose-500">
-                        <Banknote className="h-[18px] w-[18px]" strokeWidth={2.2} />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-[13px] font-bold">
-                          {money(w.amount)} to {groupPhone(w.destination)}
-                        </p>
-                        <p className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
-                          {w.ref} • {timeAgo(w.createdAt)}
-                        </p>
-                        <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                          Fee {money(w.fee)} • You receive {money(w.netAmount)}
-                        </p>
-                      </div>
-                      <div className="shrink-0">
-                        <StatusBadge status={w.status} />
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </Card>
-            </div>
-          )}
+          <WithdrawalHistory withdrawals={withdrawals} />
         </>
       )}
 
       <button
-        disabled={!ready || (tab === "fund" && demoFundingDisabled)}
+        disabled={!ready || (tab === "fund" && demoFundingDisabled) || (tab === "withdraw" && withdrawalsDisabled)}
         onClick={() => setPhase("confirm")}
         className={cn(
           "animate-fade-up flex w-full items-center justify-center gap-2 rounded-2xl py-4 font-display text-[15px] font-bold transition-all",
-          ready && !(tab === "fund" && demoFundingDisabled)
+          ready && !(tab === "fund" && demoFundingDisabled) && !(tab === "withdraw" && withdrawalsDisabled)
             ? "bg-brand text-ink shadow-[0_12px_28px_rgba(255,203,5,0.35)] hover:-translate-y-0.5 active:scale-[0.98]"
             : "cursor-not-allowed bg-black/[0.05] text-zinc-400 dark:bg-white/[0.06] dark:text-zinc-500",
         )}
@@ -749,7 +768,9 @@ export function WalletTools({
             : `Deposit ${fundPesewas > 0 ? moneyFromPesewas(fundPesewas) : ""}`
           : tab === "transfer"
             ? `Send ${trPesewas > 0 ? moneyFromPesewas(trPesewas) : ""}`
-            : `Withdraw ${wdPesewas > 0 ? moneyFromPesewas(wdPesewas) : ""}`}
+            : withdrawalsDisabled
+              ? "Withdrawals unavailable"
+              : `Withdraw ${wdPesewas > 0 ? moneyFromPesewas(wdPesewas) : ""}`}
       </button>
 
       <FlowSheet
@@ -817,6 +838,47 @@ export function WalletTools({
         }
         result={result}
       />
+    </div>
+  );
+}
+
+/**
+ * The signed-in user's withdrawal request history. Rendered identically whether
+ * withdrawals are enabled or paused — historical records stay visible while the
+ * kill switch is off.
+ */
+function WithdrawalHistory({ withdrawals }: { withdrawals: WithdrawalDTO[] }) {
+  if (withdrawals.length === 0) return null;
+  return (
+    <div className="animate-fade-up mt-5" style={{ animationDelay: "160ms" }}>
+      <p className="mb-2 px-1 text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">
+        Withdrawal requests
+      </p>
+      <Card className="overflow-hidden">
+        <ul className="divide-y divide-black/[0.05] dark:divide-line">
+          {withdrawals.map((w) => (
+            <li key={w.id} className="flex items-center gap-3 px-4 py-3.5">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-rose-500/15 text-rose-500">
+                <Banknote className="h-[18px] w-[18px]" strokeWidth={2.2} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[13px] font-bold">
+                  {money(w.amount)} to {groupPhone(w.destination)}
+                </p>
+                <p className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {w.ref} • {timeAgo(w.createdAt)}
+                </p>
+                <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                  Fee {money(w.fee)} • You receive {money(w.netAmount)}
+                </p>
+              </div>
+              <div className="shrink-0">
+                <StatusBadge status={w.status} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      </Card>
     </div>
   );
 }

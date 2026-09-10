@@ -13,6 +13,7 @@ import {
   type WithdrawalMethod,
 } from "@/lib/ghana-mobile";
 import { parseCedisAmount } from "@/lib/money";
+import { assertWithdrawalsEnabled } from "@/lib/withdrawal-flag";
 
 export { PaystackConfigError, PaystackRequestError };
 
@@ -25,6 +26,13 @@ export { PaystackConfigError, PaystackRequestError };
  *    transfer flag is enabled (`PAYSTACK_TRANSFERS_ENABLED=true`) AND a
  *    Paystack secret key is configured. The flag defaults to OFF: without it,
  *    every function below refuses before touching the network.
+ *  - The temporary withdrawal kill switch (`WITHDRAWALS_ENABLED`, see
+ *    `src/lib/withdrawal-flag.ts`) additionally gates the three CREATION
+ *    entries (`createMomoRecipient`, `createBankRecipient`,
+ *    `initiateTransfer`): while it is not explicitly `true`, no transfer
+ *    recipient is created and no transfer is initiated. Read-only entries
+ *    (`fetchTransfer`, bank-code resolution) stay available so historical
+ *    payouts keep reconciling while new payouts are paused.
  *  - The secret key stays inside `src/lib/paystack.ts` (`server-only`): this
  *    module never reads `process.env.PAYSTACK_SECRET_KEY` directly, never
  *    logs it, and never serialises it into an error.
@@ -285,6 +293,9 @@ function cleanAccountName(value: string): string {
 export async function createMomoRecipient(
   params: CreateMomoRecipientParams,
 ): Promise<TransferRecipientResult> {
+  // Temporary kill switch FIRST: no recipient while withdrawals are paused —
+  // before the transfers-flag check and before any network I/O.
+  assertWithdrawalsEnabled();
   assertTransfersEnabled();
   const network = WITHDRAWAL_METHOD_META[params.method]?.network;
   if (!network) throw new PaystackTransferValidationError("Unsupported withdrawal method.");
@@ -322,6 +333,9 @@ export async function createMomoRecipient(
 export async function createBankRecipient(
   params: CreateBankRecipientParams,
 ): Promise<TransferRecipientResult> {
+  // Temporary kill switch FIRST: no recipient while withdrawals are paused —
+  // before the transfers-flag check and before any network I/O.
+  assertWithdrawalsEnabled();
   assertTransfersEnabled();
   const accountNumber = params.accountNumber.trim().replace(/[\s-]/g, "");
   if (!/^\d{10,16}$/.test(accountNumber)) {
@@ -406,6 +420,9 @@ export type FetchTransferResult = {
 export async function initiateTransfer(
   params: InitiateTransferParams,
 ): Promise<InitiateTransferResult> {
+  // Temporary kill switch FIRST: no transfer while withdrawals are paused —
+  // before the transfers-flag check and before any network I/O.
+  assertWithdrawalsEnabled();
   assertTransfersEnabled();
   if (!Number.isInteger(params.amountPesewas) || params.amountPesewas <= 0) {
     throw new PaystackTransferValidationError("Invalid transfer amount.");

@@ -18,6 +18,12 @@ import {
 import { recordWithdrawalEvent } from "@/lib/withdrawal-audit";
 import { dispatchNotificationFromEvent } from "@/lib/withdrawal-notifications";
 import { executeWithdrawalPayout, type PayoutAttemptResult } from "@/lib/payout-execution";
+import {
+  isWithdrawalsEnabled,
+  WithdrawalsDisabledError,
+  WITHDRAWALS_DISABLED_CODE,
+  WITHDRAWALS_DISABLED_ERROR,
+} from "@/lib/withdrawal-flag";
 
 export const dynamic = "force-dynamic";
 
@@ -95,6 +101,18 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       return NextResponse.json(
         { ok: false, error: `Reason is too long (maximum ${MAX_REASON_LENGTH} characters)` },
         { status: 400 },
+      );
+    }
+
+    // Temporary kill switch (fail-closed): while WITHDRAWALS_ENABLED is not
+    // explicitly true, `approve` and `retry` are blocked BEFORE any database
+    // work — no status change, no payout initiation, no Paystack call.
+    // `reject` and `refund` are deliberately NOT gated: historical-record
+    // reconciliation must keep working while payouts are paused.
+    if ((adminAction === "approve" || adminAction === "retry") && !isWithdrawalsEnabled()) {
+      return NextResponse.json(
+        { ok: false, error: WITHDRAWALS_DISABLED_ERROR, code: WITHDRAWALS_DISABLED_CODE },
+        { status: 503, headers: { "Cache-Control": "no-store, max-age=0" } },
       );
     }
 
@@ -583,6 +601,15 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       const payload: { ok: false; error: string; code?: string } = { ok: false, error: err.message };
       if (err.code) payload.code = err.code;
       return NextResponse.json(payload, { status: err.status });
+    }
+    // Defense in depth: the approve/retry guard above already refuses while
+    // the kill switch is off, but a direct payout-execution throw must still
+    // surface as a 503 (not a 500 fault) if it ever escapes the transaction.
+    if (err instanceof WithdrawalsDisabledError) {
+      return NextResponse.json(
+        { ok: false, error: err.message, code: err.code },
+        { status: 503 },
+      );
     }
     // A lost idempotency race on the provider reference: another attempt
     // already stored this transfer code (the 0010 unique index is the final

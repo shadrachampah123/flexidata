@@ -9,6 +9,7 @@ import {
   describeAdminAuditCompatibility,
   describeWithdrawalCompatibility,
 } from "@/lib/schema-compat";
+import { isWithdrawalsEnabled } from "@/lib/withdrawal-flag";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Withdrawals · FlexiData" };
@@ -34,6 +35,12 @@ export default async function AdminWithdrawalsPage({
   ]);
   const actionsBlocked =
     adminAudit.status === "legacy" || adminAudit.status === "missing";
+  // Temporary withdrawal kill switch, resolved server-side (fail-closed: only
+  // an explicit WITHDRAWALS_ENABLED=true enables). While off, approve and
+  // retry are blocked at the API — the explorer disables those buttons so an
+  // approval cannot be attempted by accident — while the records below stay
+  // visible and reject/refund reconciliation keeps working.
+  const withdrawalsDisabled = !isWithdrawalsEnabled();
 
   if (withdrawalSchema.status === "missing") {
     return (
@@ -115,6 +122,15 @@ export default async function AdminWithdrawalsPage({
           withdrawal actions. No request below has been changed.
         </div>
       )}
+      {withdrawalsDisabled && (
+        <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-[13px] font-semibold text-rose-700 dark:text-rose-300">
+          Withdrawals and payouts are currently <strong>disabled</strong> (WITHDRAWALS_ENABLED is
+          not true). New withdrawal requests are refused, and approve / retry are blocked by the
+          API — the records below remain visible, and reject / refund reconciliation for
+          historical records is still available. Re-enable only after Paystack Transfers /
+          third-party payouts are approved, by setting WITHDRAWALS_ENABLED=true.
+        </div>
+      )}
       <WithdrawalsExplorer
         initialRows={results}
         initialTotal={Number(count)}
@@ -122,6 +138,7 @@ export default async function AdminWithdrawalsPage({
         pageSize={pageSize}
         initialFilters={{ status: status || "", search: search || "", method: method || "" }}
         actionsBlocked={actionsBlocked}
+        withdrawalsDisabled={withdrawalsDisabled}
       />
     </div>
   );
