@@ -7,6 +7,7 @@ import {
   PaystackTransferAmbiguousError,
 } from "@/lib/paystack-transfers";
 import { recordWithdrawalEvent } from "@/lib/withdrawal-audit";
+import { assertWithdrawalsEnabled } from "@/lib/withdrawal-flag";
 
 /**
  * Payout execution — the single choke point that submits a withdrawal to the
@@ -99,6 +100,12 @@ export async function executeWithdrawalPayout(
   actor: PayoutActor,
   opts?: { accountName?: string },
 ): Promise<PayoutAttemptResult> {
+  // Temporary kill switch (fail-closed): while WITHDRAWALS_ENABLED is not
+  // explicitly true, NO payout may execute — refused here, before any status
+  // check, provider resolution, or network I/O, on EVERY path (initiate,
+  // reuse/re-check, retry). The caller's transaction rolls back with this
+  // throw, so the withdrawal row is left exactly as it was.
+  assertWithdrawalsEnabled();
 
   if (withdrawal.status !== "processing") {
     throw new Error(`executeWithdrawalPayout requires status=processing (has ${withdrawal.status})`);

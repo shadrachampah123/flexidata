@@ -44,6 +44,9 @@
  *   npx tsx scripts/verify-withdrawal-security.ts                                  # Phase A only
  *   DATABASE_URL='postgresql://…' npx tsx scripts/verify-withdrawal-security.ts   # A + B
  *   DATABASE_URL='postgresql://…' BASE_URL='http://127.0.0.1:3000' npx tsx scripts/verify-withdrawal-security.ts
+ *
+ * Phase C drives withdrawals through the REAL API, so the app server must run
+ * with the temporary kill switch explicitly re-armed (WITHDRAWALS_ENABLED=true).
  */
 import { Pool } from "pg";
 import {

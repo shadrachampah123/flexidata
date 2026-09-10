@@ -13,6 +13,7 @@ export function WithdrawalsExplorer({
   pageSize,
   initialFilters,
   actionsBlocked = false,
+  withdrawalsDisabled = false,
 }: any) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -42,6 +43,14 @@ export function WithdrawalsExplorer({
   const pages = Math.ceil(initialTotal / pageSize);
 
   const handleAction = async (id: string, action: "approve" | "reject" | "refund" | "retry") => {
+    // Temporary kill switch (client-side mirror only — the admin API refuses
+    // disabled approve/retry regardless): never attempt a payout-side action
+    // while withdrawals are off. Reject/refund stay available for historical
+    // reconciliation.
+    if (withdrawalsDisabled && (action === "approve" || action === "retry")) {
+      alert("Withdrawals are temporarily unavailable. Approve and retry are blocked while payouts are paused.");
+      return;
+    }
     let reason = "";
     if (action === "reject" || action === "refund") {
       reason = window.prompt(`${action === "refund" ? "Refund" : "Rejection"} reason:`) || "";
@@ -211,8 +220,14 @@ export function WithdrawalsExplorer({
                       <>
                         <button
                           onClick={() => handleAction(row.id, "approve")}
-                          disabled={actionsBlocked}
-                          title={actionsBlocked ? "Blocked: audit schema upgrade needed" : "Approve (move to processing)"}
+                          disabled={actionsBlocked || withdrawalsDisabled}
+                          title={
+                            withdrawalsDisabled
+                              ? "Blocked: withdrawals are temporarily unavailable"
+                              : actionsBlocked
+                                ? "Blocked: audit schema upgrade needed"
+                                : "Approve (move to processing)"
+                          }
                           className="rounded p-1 text-emerald-600 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           <CheckCircle2 className="h-5 w-5" />
@@ -231,8 +246,12 @@ export function WithdrawalsExplorer({
                       <>
                         <button
                           onClick={() => handleAction(row.id, "retry")}
-                          disabled={actionsBlocked}
-                          title="Retry payout initiation (reuses the same provider reference — never a second transfer)"
+                          disabled={actionsBlocked || withdrawalsDisabled}
+                          title={
+                            withdrawalsDisabled
+                              ? "Blocked: withdrawals are temporarily unavailable"
+                              : "Retry payout initiation (reuses the same provider reference — never a second transfer)"
+                          }
                           className="rounded p-1 text-blue-600 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           <Clock className="h-5 w-5" />

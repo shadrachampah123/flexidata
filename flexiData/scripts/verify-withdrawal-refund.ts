@@ -38,7 +38,9 @@
  *
  * Usage from the flexiData directory (dev/preview server with a working
  * wallet funding provider — mock settles instantly, Paystack TEST needs the
- * hosted checkout, so prefer mock or the local stub for CI):
+ * hosted checkout, so prefer mock or the local stub for CI — and with the
+ * temporary withdrawal kill switch explicitly re-armed via
+ * WITHDRAWALS_ENABLED=true, since the drive creates a withdrawal):
  *
  *   DATABASE_URL='postgresql://…' npx tsx scripts/verify-withdrawal-refund.ts
  *   DATABASE_URL='postgresql://…' BASE_URL='http://127.0.0.1:3000' \

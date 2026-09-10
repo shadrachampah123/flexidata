@@ -22,6 +22,9 @@
  * Usage:
  *   npx tsx scripts/verify-withdrawal-lifecycle.ts                          # Phase A
  *   DATABASE_URL='...' BASE_URL='...' npx tsx scripts/verify-withdrawal-lifecycle.ts  # A + B
+ *
+ * Phase B drives withdrawals through the REAL API, so the app server must run
+ * with the temporary kill switch explicitly re-armed (WITHDRAWALS_ENABLED=true).
  */
 
 import {

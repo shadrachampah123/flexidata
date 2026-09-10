@@ -31,7 +31,9 @@
  *   * the rejected withdrawal + refund created by the REAL operator is never
  *     touched — the script only drives withdrawals it created itself.
  *
- * Usage from the flexiData directory (dev server with PAYMENTS_PROVIDER=mock):
+ * Usage from the flexiData directory (dev server with PAYMENTS_PROVIDER=mock
+ * and WITHDRAWALS_ENABLED=true — Phase B creates a withdrawal through the
+ * REAL API, so the temporary kill switch must be explicitly re-armed):
  *   DATABASE_URL='postgresql://…' npx tsx scripts/verify-wallet-freshness.ts
  *   DATABASE_URL='postgresql://…' BASE_URL='http://127.0.0.1:3000' \
  *     ADMIN_EMAILS=… npx tsx scripts/verify-wallet-freshness.ts

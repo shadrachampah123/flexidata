@@ -30,6 +30,7 @@
     "verify:withdrawal-lifecycle": "tsx scripts/verify-withdrawal-lifecycle.ts",
     "verify:phase-b": "tsx --conditions=react-server scripts/verify-phase-b-payouts.ts",
     "verify:payout-reconciliation": "tsx --conditions=react-server scripts/verify-payout-reconciliation.ts",
+    "verify:withdrawals-disabled": "tsx --conditions=react-server scripts/verify-withdrawals-disabled.ts",
     "migrate:admin-audit-actions": "tsx scripts/apply-pr38-admin-audit-migration.ts",
     "diagnose:withdrawal-refund": "tsx scripts/diagnose-withdrawal-refund.ts",
     "cleanup:demo-deposits": "tsx scripts/cleanup-demo-deposits.ts",

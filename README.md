@@ -92,6 +92,7 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run verify:admin-withdrawal-action` | Drive the real admin approve/reject withdrawal action end to end (needs `DATABASE_URL` + a running dev app at `BASE_URL`) |
 | `npm run verify:wallet-freshness` | Prove the Wallet page converges on the database after out-of-band money movement (needs `DATABASE_URL` + a running dev app at `BASE_URL`) |
 | `npm run verify:withdrawal-refund` | Prove withdraw → reject restores the wallet exactly once, idempotently, atomically, and the user sees it (needs `DATABASE_URL` + a running dev app at `BASE_URL`) |
+| `npm run verify:withdrawals-disabled` | Prove the withdrawal kill switch is fail-closed and blocks creation/approval/retry/payout before any money or Paystack effect (in-memory; `DATABASE_URL` + `BASE_URL` add a live drive) |
 | `npm run diagnose:withdrawal-refund` | **Read-only** forensics for a failed refund against a real database — identifies the affected withdrawal and which case occurred (needs `DATABASE_URL`) |
 | `npm run cleanup:demo-deposits` | Review-first reversal of demo/mock wallet deposit credits (`--apply` to run) |
 
@@ -869,6 +870,43 @@ re-checks `DP-MTMZN2P8SSBR` before and after.
 > against production with the operator's `DATABASE_URL`. The code fix, the
 > exactly-once guarantee, and the full regression matrix above are what make the
 > next rejection restore the wallet reliably on the first click.
+
+### Temporarily disabling withdrawals (kill switch)
+
+While Paystack Transfers / third-party payouts are not approved for the
+FlexiData Paystack account, the ENTIRE withdrawal/payout feature is inactive
+behind one server-side, fail-closed flag — `WITHDRAWALS_ENABLED` (see
+[`src/lib/withdrawal-flag.ts`](flexiData/src/lib/withdrawal-flag.ts) and
+`WITHDRAWALS_ENABLED=false` in `flexiData/.env.example`). Only an explicit
+`true` enables withdrawals; missing, empty, `false`, or any other value
+(including `1`/`yes`/`on`) disables them.
+
+While disabled, the server refuses — before any wallet, ledger, or Paystack
+effect — new withdrawal requests (`503 withdrawals_disabled`), admin
+**approve** and **retry**, and every payout-execution path (no transfer
+recipient is created and no transfer is initiated, on any provider). The
+payout implementation itself is NOT removed: historical records stay visible,
+`reject`/`refund` reconciliation, the provider callback, and payout
+reconciliation keep working, and deposits, transfers, and data purchases are
+unaffected. The wallet Withdraw tab and `/admin/withdrawals` both show an
+explicit "temporarily unavailable" notice, and `/api/health` reports the
+switch under `withdrawals.enabled`.
+
+Reactivation — only after FlexiData is registered and Paystack
+Transfers/third-party payouts are approved — is a pure configuration change:
+set `WITHDRAWALS_ENABLED=true`. Verify with:
+
+```bash
+cd flexiData
+npm run verify:withdrawals-disabled
+DATABASE_URL='postgresql://…' BASE_URL='http://127.0.0.1:3000' npm run verify:withdrawals-disabled  # + live drive
+```
+
+> The live-drive suites that exercise withdrawals end to end
+> (`verify:phase-b`, `verify:withdrawal-refund`,
+> `verify:admin-withdrawal-action`, `verify:withdrawal-lifecycle`,
+> `verify:withdrawal-security`, `verify:wallet-freshness`) need a dev server
+> started with `WITHDRAWALS_ENABLED=true`.
 
 ## Schema compatibility fallbacks
 

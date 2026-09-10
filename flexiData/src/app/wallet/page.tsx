@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/page-header";
 import { paymentsProvider, PaystackConfigError } from "@/lib/payments";
 import { getRecentWithdrawals } from "@/lib/data";
 import { requireSession } from "@/lib/session";
+import { isWithdrawalsEnabled } from "@/lib/withdrawal-flag";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +42,11 @@ export default async function WalletPage({
     if (!(error instanceof PaystackConfigError)) throw error;
     fundingProvider = "unavailable";
   }
+  // Temporary withdrawal kill switch, resolved server-side (fail-closed: only
+  // an explicit WITHDRAWALS_ENABLED=true enables). Passed down as a plain
+  // boolean — the client never reads the flag itself, and the withdraw API
+  // enforces the same switch independently of whatever the UI renders.
+  const withdrawalsEnabled = isWithdrawalsEnabled();
   return (
     <div>
       {/* Money surface: revalidate against the live balance when the page
@@ -59,6 +65,7 @@ export default async function WalletPage({
         pendingFundingRef={funding}
         fundingProvider={fundingProvider}
         withdrawals={withdrawals}
+        withdrawalsEnabled={withdrawalsEnabled}
       />
     </div>
   );

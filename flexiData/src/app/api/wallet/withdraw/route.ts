@@ -6,6 +6,11 @@ import { and, eq, sql } from "drizzle-orm";
 import { randomBytes, randomUUID } from "crypto";
 import { withdrawalSubtitle } from "@/lib/ghana-mobile";
 import { validateWithdrawalRequestBody } from "@/lib/withdrawals";
+import {
+  isWithdrawalsEnabled,
+  WITHDRAWALS_DISABLED_CODE,
+  WITHDRAWALS_DISABLED_ERROR,
+} from "@/lib/withdrawal-flag";
 import { ensureWithdrawalSchema } from "@/lib/seed";
 import { recordWithdrawalEvent } from "@/lib/withdrawal-audit";
 
@@ -108,6 +113,18 @@ export async function POST(req: Request) {
     if (!auth.ok) return auth.response;
     const { wallet, userId } = auth;
     actor = `user=${userId} wallet=${wallet.id}`;
+
+    // Temporary kill switch (fail-closed): when WITHDRAWALS_ENABLED is not
+    // explicitly true, NO withdrawal may be created — rejected here, before
+    // body parsing, validation, the idempotency lookup, the wallet debit, the
+    // withdrawal row, and the ledger row. Deposits, transfers and data
+    // purchases are unaffected (they live on other routes).
+    if (!isWithdrawalsEnabled()) {
+      return NextResponse.json(
+        { ok: false, error: WITHDRAWALS_DISABLED_ERROR, code: WITHDRAWALS_DISABLED_CODE },
+        { status: 503, headers: NO_STORE },
+      );
+    }
 
     // F8: malformed JSON / empty body is a 400 with zero side effects — never
     // a 500 from a thrown parse error.

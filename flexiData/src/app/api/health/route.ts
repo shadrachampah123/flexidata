@@ -4,6 +4,7 @@ import { hasAuthSecret } from "@/lib/auth";
 import { getPasswordResetEmailDeliveryStatus } from "@/lib/notifications";
 import { paymentsProvider } from "@/lib/payments";
 import { paystackMode } from "@/lib/paystack";
+import { isWithdrawalsEnabled } from "@/lib/withdrawal-flag";
 import { repairCheckoutOrdersSchema, ensureWithdrawalSchema } from "@/lib/seed";
 import {
   describeAdminAuditCompatibility,
@@ -77,10 +78,21 @@ export async function GET() {
     fundingLocked = true;
   }
   const fundingMode = paystackMode();
+  // Temporary withdrawal kill switch (fail-closed: only an explicit
+  // WITHDRAWALS_ENABLED=true enables). Safe to expose: a boolean only.
+  const withdrawalsEnabled = isWithdrawalsEnabled();
 
   return Response.json({
     ok: true,
     database: "connected",
+    withdrawals: {
+      enabled: withdrawalsEnabled,
+      ...(withdrawalsEnabled
+        ? {}
+        : {
+            note: "Withdrawals are temporarily unavailable (WITHDRAWALS_ENABLED is not true).",
+          }),
+    },
     gatewaySchema: schema.status,
     checkoutSchema: {
       status: checkout.status,

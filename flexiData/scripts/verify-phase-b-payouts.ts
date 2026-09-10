@@ -54,10 +54,14 @@
  * Phase C app-server requirements (from the flexiData directory):
  *   DATABASE_URL='postgresql://…' PAYMENTS_PROVIDER=mock \
  *   PAYOUT_PROVIDER=paystack-transfers PAYSTACK_TRANSFERS_ENABLED=true \
+ *   WITHDRAWALS_ENABLED=true \
  *   PAYSTACK_SECRET_KEY='<TEST_PAYSTACK_SECRET>' \
  *   PAYSTACK_BASE_URL='http://127.0.0.1:4599' \
  *   ADMIN_EMAILS='fd-pb-admin@verify.flexidata.internal' \
  *   AUTH_SECRET='<random>' npm run dev -- --port 3000
+ * (WITHDRAWALS_ENABLED=true re-arms the temporary withdrawal kill switch,
+ * which is fail-closed — without it the suite's withdrawals/approvals are
+ * refused with 503.)
  * plus the stub:  PAYSTACK_STUB_PORT=4599 node scripts/paystack-stub.mjs
  * The suite signs payout webhooks with TEST_PAYSTACK_SECRET (default below) —
  * it MUST match the app server's PAYSTACK_SECRET_KEY.
@@ -171,6 +175,7 @@ class Jar {
 
 const ENV_KEYS = [
   "NODE_ENV",
+  "WITHDRAWALS_ENABLED",
   "PAYSTACK_TRANSFERS_ENABLED",
   "PAYSTACK_SECRET_KEY",
   "PAYSTACK_LIVE_MODE",
@@ -255,6 +260,10 @@ async function phaseA(): Promise<void> {
       delete process.env.PAYSTACK_SECRET_KEY;
       delete process.env.PAYOUT_PROVIDER;
       process.env.NODE_ENV = "test";
+      // These checks target the TRANSFERS flag specifically, so the temporary
+      // withdrawal kill switch is explicitly on — otherwise its refusal (not
+      // the transfers refusal under test) is what fires.
+      process.env.WITHDRAWALS_ENABLED = "true";
       resetPayoutProvider();
       const refusals: Array<[string, () => Promise<unknown>]> = [
         ["initiateTransfer", () => initiateTransfer({ amountPesewas: 100, recipientCode: "RCP_x", reference: "WDL-X", reason: "t" })],
@@ -400,6 +409,9 @@ async function phaseA(): Promise<void> {
     const snap = snapshotEnv();
     try {
       process.env.NODE_ENV = "test";
+      // Validation-shape checks: the kill switch is explicitly on so the
+      // ValidationError under test (not the switch refusal) is what fires.
+      process.env.WITHDRAWALS_ENABLED = "true";
       process.env.PAYSTACK_TRANSFERS_ENABLED = "true";
       process.env.PAYSTACK_SECRET_KEY = "sk_test_abc123";
       process.env.PAYSTACK_BASE_URL = "http://127.0.0.1:9";
@@ -596,6 +608,9 @@ async function phaseA(): Promise<void> {
     try {
       const sentinelKey = "sk_test_sentinel_KEYMAT_999";
       process.env.PAYSTACK_SECRET_KEY = sentinelKey;
+      // Kill switch on: this probe asserts the *transfers-disabled* error
+      // carries no key material.
+      process.env.WITHDRAWALS_ENABLED = "true";
       delete process.env.PAYSTACK_TRANSFERS_ENABLED;
       try {
         await initiateTransfer({ amountPesewas: 100, recipientCode: "RCP_x", reference: "WDL-X", reason: "t" });
@@ -934,6 +949,9 @@ async function phaseB(pool: Pool, track: Track): Promise<void> {
     const snap = snapshotEnv();
     try {
       process.env.NODE_ENV = "test";
+      // B5 executes real (stub) payouts: the temporary withdrawal kill switch
+      // must be explicitly on.
+      process.env.WITHDRAWALS_ENABLED = "true";
       process.env.PAYOUT_PROVIDER = "paystack-transfers";
       process.env.PAYSTACK_TRANSFERS_ENABLED = "true";
       process.env.PAYSTACK_SECRET_KEY = TEST_KEY;
@@ -1239,7 +1257,7 @@ async function phaseC(base: string, pool: Pool, track: Track): Promise<void> {
   check("approve → processing", apA.status === 200 && apA.body.status === "processing", JSON.stringify(apA.body).slice(0, 120));
   const payoutA = apA.body.payout as { outcome?: string; providerReference?: string; message?: string } | undefined;
   check("approve reports payout attempt", !!payoutA && typeof payoutA.outcome === "string", payoutA?.outcome ?? "?");
-  check("payout initiated (not skipped)", payoutA?.outcome === "initiated", payoutA?.outcome ?? "missing — is the app started with PAYOUT_PROVIDER=paystack-transfers + flag + stub?");
+  check("payout initiated (not skipped)", payoutA?.outcome === "initiated", payoutA?.outcome ?? "missing — is the app started with PAYOUT_PROVIDER=paystack-transfers + flag + WITHDRAWALS_ENABLED=true + stub?");
   if (payoutA?.outcome !== "initiated") {
     bad("Phase C aborted", "approve did not initiate — check app payout env (provider/flag/stub)");
     return;
