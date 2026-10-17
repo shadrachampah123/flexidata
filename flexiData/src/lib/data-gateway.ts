@@ -142,7 +142,8 @@ export type DataProviderMissingConfig =
   | "real_provider"
   | "base_url"
   | "auth_type"
-  | "credentials";
+  | "credentials"
+  | "rollout_approval";
 
 export type DataProviderRuntimeStatus = {
   /** Safe identifier of the provider the runtime would actually use. */
@@ -231,6 +232,17 @@ export function getDataProviderRuntimeStatus(): DataProviderRuntimeStatus {
       status: "unavailable",
       missing: configured ? ["real_provider"] : ["provider"],
       warning: PRODUCTION_MOCK_WARNING,
+    };
+  }
+
+  // Part 6.3: Reloadly transport exists, but customer activation is not
+  // approved. Never route its responses through the legacy generic normalizer.
+  // This code lock cannot be bypassed with credentials or an environment flag.
+  if (providerCode === "reloadly") {
+    return {
+      ...base, safe: false, status: "unavailable",
+      missing: ["rollout_approval"],
+      warning: "Reloadly customer fulfillment is disabled pending verified Ghana data catalogue, sandbox access and durable settlement/reconciliation review.",
     };
   }
 
