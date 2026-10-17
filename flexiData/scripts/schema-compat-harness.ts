@@ -191,6 +191,11 @@ async function main() {
       strictHealth.gatewaySchema === "legacy" && strictHealth.dataGateway.fallbacks === "disabled",
       strictHealth.dataGateway ?? strictHealth,
     );
+    check(
+      "strict: withdrawal repair is independent of gateway fallback mode",
+      strictHealth.withdrawalSchema?.status === "current",
+      strictHealth.withdrawalSchema,
+    );
 
     const strictFailed = results.filter((r) => !r.ok);
     console.log(`\nSCENARIO=${scenario}  checks=${results.length}  failed=${strictFailed.length}`);
@@ -280,7 +285,11 @@ async function main() {
       lastWrite.columns,
     );
     const txRow = pool.rows.transactions[0];
-    check("provider reference stored", typeof txRow.provider_reference === "string" && txRow.provider_reference.startsWith("mock-"), txRow.provider_reference);
+    check(
+      "provider reference stored",
+      typeof txRow?.provider_reference === "string" && txRow.provider_reference.startsWith("mock-"),
+      txRow?.provider_reference,
+    );
   } else {
     check(
       "purchase skipped missing columns instead of failing",
@@ -361,15 +370,26 @@ async function main() {
   // 6. Health reports the drift so operators know to migrate.
   const health = await (await healthRoute.GET()).json();
   const report = await describeSchemaCompatibility();
+  const withdrawalStatus = breakCatalog ? "unknown" : "current";
+  check(
+    "withdrawal repair and catalog probes are represented accurately",
+    health.withdrawalSchema?.status === withdrawalStatus &&
+      (breakCatalog || (health.withdrawalSchema?.table === true && health.withdrawalSchema?.missing?.length === 0)),
+    health.withdrawalSchema,
+  );
   if (migrated) {
     check("health: schema current", health.gatewaySchema === "current", health);
+  } else if (breakCatalog) {
+    check("health: gateway schema unknown when catalog probe is blocked", health.gatewaySchema === "unknown", health.gatewaySchema);
+    check("health: does not invent missing-object detail without catalog access", report.status === "unknown" && report.missing.length === 0, report);
+    check("health: app still ok", health.ok === true, health.ok);
   } else {
     check("health: schema legacy", health.gatewaySchema === "legacy", health);
     check("health: lists missing objects", report.missing.includes("provider_float_balances"), report.missing);
     check("health: app still ok", health.ok === true, health.ok);
   }
   if (breakCatalog) {
-    check("health: unknown schema when probe blocked", report.status === "legacy" || report.status === "unknown", report.status);
+    check("health: unknown schema when probe blocked", report.status === "unknown", report.status);
   }
 
   if (healMode) {

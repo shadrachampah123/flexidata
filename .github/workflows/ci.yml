@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Lint, typecheck, build, and DB-free verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: flexiData
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: flexiData/package-lock.json
+
+      - name: Install dependencies reproducibly
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build (fake CI-only database URL; no connection is made)
+        run: npm run build
+        env:
+          DATABASE_URL: postgresql://ci_build:ci_build@127.0.0.1:5432/flexidata_build_only
+
+      - name: Verify schema compatibility (5 simulated schema scenarios)
+        run: npm run verify:schema-compat
+
+      - name: Verify registration seed resilience (6 simulated schema scenarios)
+        run: npm run verify:seed-resilience
+
+      - name: Verify production security fixes (in-memory simulator and local stub)
+        run: npm run verify:security-fixes
+
+      - name: Verify auth recovery and signup flow (in-memory simulator)
+        run: npm run verify:auth-flow
+
+      - name: Verify admin authorization (in-memory simulator)
+        run: npm run verify:admin-access
+
+      - name: Verify withdrawals remain disabled (DB-free phase)
+        run: npm run verify:withdrawals-disabled
+
+      - name: Verify withdrawal lifecycle rules (DB-free phase)
+        run: npm run verify:withdrawal-lifecycle
+
+      - name: Verify demo-deposit cleanup safety (in-memory simulator)
+        run: npm run verify:demo-deposit-cleanup
+
+      - name: Integration suites not run in this DB-free job
+        if: always()
+        run: |
+          echo "Not run: real-PostgreSQL, live-app, and external-provider phases (including schema baseline, signup DB checks, withdrawal API/database phases, payout reconciliation, and Paystack E2E)."
+          echo "Their DB-backed phases are not represented as passing by this workflow."
