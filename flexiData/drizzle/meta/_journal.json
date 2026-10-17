@@ -78,6 +78,13 @@
       "when": 1788949539509,
       "tag": "0010_withdrawal_provider_ref_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1792195200000,
+      "tag": "0011_purchase_attempts",
+      "breakpoints": true
     }
   ]
 }

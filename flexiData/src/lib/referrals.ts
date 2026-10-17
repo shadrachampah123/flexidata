@@ -1,3 +1,4 @@
+import type { PoolClient } from "pg";
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "@/db";
 import { users, wallets } from "@/db/schema";
@@ -12,7 +13,22 @@ import { makeRef } from "@/lib/format";
  */
 const REFERRAL_POINTS = 150;
 
-export async function creditReferralReward(userId: number, walletId: number): Promise<void> {
+export async function creditReferralReward(userId: number, walletId: number, client?: PoolClient): Promise<void> {
+  // Durable purchase settlement supplies its existing transaction. Keep the
+  // same reward claim + ledger rather than creating parallel reward accounting.
+  if (client) {
+    const marked = await client.query(`UPDATE users SET referral_rewarded_at=now()
+      WHERE id=$1 AND referred_by IS NOT NULL AND referral_rewarded_at IS NULL
+      AND EXISTS (SELECT 1 FROM wallets WHERE user_id=users.referred_by)
+      RETURNING referred_by`, [userId]);
+    if (!marked.rows[0]) return;
+    const reward = await client.query(`UPDATE wallets SET points=points+$2 WHERE id=(
+      SELECT id FROM wallets WHERE user_id=$1 ORDER BY id LIMIT 1) RETURNING id`, [marked.rows[0].referred_by, REFERRAL_POINTS]);
+    await client.query(`INSERT INTO transactions (ref,wallet_id,type,status,direction,title,subtitle,amount,points)
+      VALUES ($1,$2,'referral','successful','in','Referral Bonus',$3,0,$4)`,
+    [makeRef("RF"), reward.rows[0].id, `${REFERRAL_POINTS} points earned from a friend's first purchase`, REFERRAL_POINTS]);
+    return;
+  }
   const rows = await db
     .select({
       id: users.id,

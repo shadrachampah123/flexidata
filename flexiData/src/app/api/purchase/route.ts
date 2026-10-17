@@ -1,3 +1,4 @@
+import { PurchaseLifecycle, PurchaseConflict, PurchaseFundsError } from "@/lib/purchase-lifecycle";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { bundlePlans, transactions, wallets } from "@/db/schema";
@@ -5,6 +6,7 @@ import { insertTransactionRow } from "@/lib/data";
 import { requireAccount } from "@/lib/api-auth";
 import { creditReferralReward } from "@/lib/referrals";
 import {
+  getDataProviderCode,
   DataProviderConfigError,
   DataProviderFloatError,
   DataProviderRequestError,
@@ -162,6 +164,22 @@ export async function POST(req: Request) {
 
       cost = Number(plan.price);
       title = `${network} ${plan.label} Data`;
+
+      // Non-mock purchases require a durable customer retry key. Development
+      // mock simulation retains its legacy DB-free harness behavior only.
+      if (getDataProviderCode() !== "mock") {
+        const key = req.headers.get("Idempotency-Key");
+        if (!key) return Response.json({ ok: false, error: "Idempotency-Key required" }, { status: 400 });
+        const lifecycle = new PurchaseLifecycle();
+        const order = { reference: ref, walletId: wallet.id, network: network as "MTN" | "TELECEL", recipient,
+          planLabel: plan.label, category: plan.category,
+          providerProductCode: plan.providerProductCode, amount: cost };
+        const claim = await lifecycle.create(order, key);
+        if (claim.created) await lifecycle.submit(order);
+        return Response.json({ ok: true, ref: claim.ref, cost,
+          trackable: true, etaSeconds: null, provider: getDataProviderCode(),
+          providerMessage: "Awaiting verified provider confirmation", ...(await lifecycle.summary(claim.ref)) });
+      }
 
       if (balance < cost) {
         return Response.json({ ok: false, error: "insufficient_funds", needed: cost, balance }, { status: 402 });
@@ -420,6 +438,8 @@ export async function POST(req: Request) {
 
     return Response.json({ ok: false, error: "Unknown purchase type" }, { status: 400 });
   } catch (error) {
+    if (error instanceof PurchaseConflict) return Response.json({ ok: false, error: error.message }, { status: 409 });
+    if (error instanceof PurchaseFundsError) return Response.json({ ok: false, error: "insufficient_funds" }, { status: 402 });
     if (error instanceof DataProviderConfigError) {
       return Response.json({ ok: false, error: error.message, code: "provider_unavailable" }, { status: 503 });
     }

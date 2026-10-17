@@ -1,3 +1,4 @@
+import { PurchaseLifecycle } from "@/lib/purchase-lifecycle";
 import "server-only";
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "@/db";
@@ -5,6 +6,7 @@ import { bundlePlans, checkoutOrders, wallets } from "@/db/schema";
 import { insertTransactionRow } from "@/lib/data";
 import { creditReferralReward } from "@/lib/referrals";
 import {
+  getDataProviderCode,
   assertDataProviderRuntimeSafe,
   deriveProviderProductCode,
   getStoredProviderFloatBalance,
@@ -411,6 +413,20 @@ export async function reconcileCheckoutOrder(ref: string): Promise<CheckoutOrder
  * webhooks can never double-send a bundle.
  */
 async function fulfillPaidOrder(ref: string): Promise<void> {
+  assertDataProviderRuntimeSafe();
+  if (getDataProviderCode() !== "mock") {
+    const order = await getCheckoutOrder(ref);
+    if (!order || order.orderStatus !== "paid") return;
+    const lifecycle = new PurchaseLifecycle();
+    const submission = { reference: order.ref, walletId: order.walletId,
+      network: order.network as "MTN" | "TELECEL", recipient: order.recipient,
+      planLabel: order.planLabel, category: order.category,
+      providerProductCode: order.providerProductCode, amount: Number(order.amount) };
+    const claim = await lifecycle.create(submission, order.ref, "checkout");
+    if (claim.created) await lifecycle.submit(submission);
+    return;
+  }
+
   const claimed = await db
     .update(checkoutOrders)
     .set({ orderStatus: "fulfilling", fulfillmentStatus: "submitted", updatedAt: new Date() })

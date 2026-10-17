@@ -139,3 +139,11 @@ Part 5 and Part 6.1/6.2 harnesses continue to cover their existing regressions.
 No existing assertions were removed or weakened. No database schema, migrations,
 prices, deposits, withdrawal implementation, admin functionality or airtime-to-cash
 were changed. The new CI step supplements the existing Part 5 checks.
+
+## Part 6.3A follow-up
+
+The lifecycle gaps above describe the PR #47 baseline. The additive durable
+real-provider claim/settlement and callable reconciliation implementation is now
+specified in [Part 6.3A](part-6.3a-durable-purchases.md), including migration safety,
+contract changes, actual PostgreSQL test evidence and remaining activation blockers.
+This does not remove the Reloadly activation lock or establish live/sandbox sales.

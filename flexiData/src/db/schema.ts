@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   pgTable,
+  uuid,
   serial,
   varchar,
   numeric,
@@ -579,3 +580,29 @@ export const payoutReconciliationExceptions = pgTable(
     ),
   ],
 );
+
+/** Additive Part 6.3A claim, not a second accounting ledger. */
+export const purchaseAttempts = pgTable("purchase_attempts", {
+  ref: varchar("ref", { length: 40 }).primaryKey().references(() => transactions.ref),
+  walletId: integer("wallet_id").notNull().references(() => wallets.id),
+  requestKey: varchar("request_key", { length: 100 }).notNull(),
+  fingerprint: varchar("fingerprint", { length: 64 }).notNull(),
+  request: jsonb("request").notNull(),
+  floatReserved: boolean("float_reserved").notNull().default(false),
+  source: varchar("source", { length: 10 }).notNull(),
+  provider: varchar("provider", { length: 40 }).notNull(),
+  state: varchar("state", { length: 20 }).notNull().default("created"),
+  providerReference: varchar("provider_reference", { length: 120 }),
+  pollCount: integer("poll_count").notNull().default(0),
+  nextPollAt: timestamp("next_poll_at", { withTimezone: true }).notNull().defaultNow(),
+  leaseUntil: timestamp("lease_until", { withTimezone: true }),
+  leaseToken: uuid("lease_token"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex("purchase_attempt_wallet_key").on(table.walletId, table.requestKey),
+  uniqueIndex("purchase_attempt_provider_reference").on(table.provider, table.providerReference).where(sql`${table.providerReference} IS NOT NULL`),
+  index("purchase_attempt_due").on(table.nextPollAt).where(sql`${table.state} IN ('submitted','pending','unknown')`),
+  check("purchase_attempt_source", sql`${table.source} IN ('wallet','checkout')`),
+  check("purchase_attempt_state", sql`${table.state} IN ('created','submitted','pending','unknown','delivered','failed')`),
+  check("purchase_attempt_poll_count", sql`${table.pollCount} BETWEEN 0 AND 12`),
+]);
