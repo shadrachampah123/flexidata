@@ -36,6 +36,7 @@ export function BuyData({
   const [planId, setPlanId] = useState<number | null>(null);
   const [phone, setPhone] = useState(wallet.number);
   const [dropOpen, setDropOpen] = useState(false);
+  const purchaseKey = useRef<{ identity: string; key: string } | null>(null);
   const catTriggerRef = useRef<HTMLButtonElement>(null);
   const closeDrop = useCallback(() => setDropOpen(false), []);
   const [balance, setBalance] = useState(wallet.balance);
@@ -98,9 +99,18 @@ export function BuyData({
     }
 
     try {
+      const identity = JSON.stringify([network, activeCat?.id, plan.id, phone]);
+      const storageKey = `flexidata-purchase-${wallet.id}`;
+      if (!purchaseKey.current) {
+        try { purchaseKey.current = JSON.parse(sessionStorage.getItem(storageKey) ?? "null"); } catch { /* unavailable storage */ }
+      }
+      if (purchaseKey.current?.identity !== identity) {
+        purchaseKey.current = { identity, key: crypto.randomUUID() };
+      }
+      try { sessionStorage.setItem(storageKey, JSON.stringify(purchaseKey.current)); } catch { /* in-memory retry key remains */ }
       const res = await fetch("/api/purchase", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": purchaseKey.current.key },
         body: JSON.stringify({
           kind: "data",
           network,
@@ -381,7 +391,15 @@ export function BuyData({
       <FlowSheet
         open={phase !== "idle"}
         phase={phase === "idle" ? "confirm" : phase}
-        onClose={() => setPhase("idle")}
+        onClose={() => {
+          // A returned reference lets the customer explicitly start a NEW
+          // purchase. Network errors retain the original key, including reloads.
+          if (result?.ref) {
+            purchaseKey.current = null;
+            try { sessionStorage.removeItem(`flexidata-purchase-${wallet.id}`); } catch { /* storage unavailable */ }
+          }
+          setPhase("idle");
+        }}
         title="Confirm purchase"
         rows={
           plan
