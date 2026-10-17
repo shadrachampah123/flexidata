@@ -1003,3 +1003,30 @@ both covered.
 > ⚠️ Never commit `drizzle.config.json` with a real password, and never put a
 > real `DATABASE_URL` in a file tracked by git. Use Vercel env vars and a local
 > `.env.local` (git-ignored) instead.
+
+## Part 6.3 — real-provider groundwork (activation blocked)
+
+Reloadly is the documented candidate, **not an approved live integration**.
+The sandbox-only transport supports OAuth, async submission and correlated status
+lookup. MTN Ghana Data has an official historical example; current Telecel data
+support and the complete FlexiData catalogue are unverified.
+
+`DATA_API_PROVIDER=reloadly` fails closed before wallet debit or checkout payment
+in every runtime and health reports `rollout_approval` missing. Credentials cannot
+unlock customer fulfillment. The existing mock production lock and health fields
+remain intact. Legacy generic callbacks cannot settle Reloadly transactions.
+No production credentials, sandbox transactions or commercial approval have been
+verified; no live fulfillment is enabled by this work.
+
+See [provider evidence, sandbox setup, lifecycle gaps and rollout prerequisites](docs/part-6.3-provider-readiness.md)
+for the exact external and engineering blockers. For isolated transport testing,
+obtain legitimately issued test credentials from Reloadly's test-mode dashboard,
+set the server-only `RELOADLY_MODE=sandbox`, `RELOADLY_CLIENT_ID` and
+`RELOADLY_CLIENT_SECRET`, and keep customer purchases disabled. Never use live
+credentials. `npm run verify:reloadly` (inside `flexiData`) is deterministic and
+network-free; it is **not** evidence of account-backed sandbox delivery.
+
+Operational rule: async acceptance is pending; unknown/timeouts must be reconciled
+without retrying the purchase or refunding speculatively. `customIdentifier` is
+not treated as a provider idempotency guarantee. The legacy generic gateway's
+configuration-ready status does not constitute provider/commercial approval.

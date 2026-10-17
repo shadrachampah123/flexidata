@@ -222,6 +222,13 @@ export async function POST(req: Request) {
       return Response.json({ ok: false, error: "Only data callbacks are supported" }, { status: 400 });
     }
 
+    // Reloadly does not use the legacy generic callback protocol. Until an
+    // authenticated, documented callback/reconciliation integration is reviewed,
+    // even a valid legacy shared secret must not settle a Reloadly transaction.
+    if (tx.provider === "reloadly") {
+      return Response.json({ ok: false, error: "Provider reconciliation unavailable" }, { status: 409 });
+    }
+
     // PRODUCTION LOCK (delivery reporting): a callback may never turn a
     // simulated/mock order into a delivered one. New mock orders cannot be
     // created in production any more (see data-gateway), but a legacy row must
