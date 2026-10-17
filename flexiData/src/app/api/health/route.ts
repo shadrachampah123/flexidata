@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { hasAuthSecret } from "@/lib/auth";
 import { getPasswordResetEmailDeliveryStatus } from "@/lib/notifications";
 import { paymentsProvider } from "@/lib/payments";
+import { getDataProviderRuntimeStatus } from "@/lib/data-gateway";
 import { paystackMode } from "@/lib/paystack";
 import { isWithdrawalsEnabled } from "@/lib/withdrawal-flag";
 import { repairCheckoutOrdersSchema, ensureWithdrawalSchema } from "@/lib/seed";
@@ -81,6 +82,13 @@ export async function GET() {
   // Temporary withdrawal kill switch (fail-closed: only an explicit
   // WITHDRAWALS_ENABLED=true enables). Safe to expose: a boolean only.
   const withdrawalsEnabled = isWithdrawalsEnabled();
+
+  // Data-provider identity + runtime safety, derived from the SAME selection
+  // and validation logic the purchase paths use (never a second config source).
+  // Only safe metadata is exposed: a sanitized identifier, mode, booleans and
+  // missing-configuration CATEGORIES. No key, token, secret, URL, raw env value
+  // or connection string is ever read into this response.
+  const dataProvider = getDataProviderRuntimeStatus();
 
   return Response.json({
     ok: true,
@@ -167,6 +175,16 @@ export async function GET() {
             }),
     },
     dataGateway: {
+      // Data-provider identity and production safety. A mock/unset provider in
+      // a production runtime reports providerSafe:false + providerStatus:
+      // "unavailable" — this endpoint must never call that healthy.
+      provider: dataProvider.provider,
+      providerMode: dataProvider.mode,
+      providerConfigured: dataProvider.configured,
+      providerSafe: dataProvider.safe,
+      providerStatus: dataProvider.status,
+      ...(dataProvider.missing.length > 0 ? { providerMissing: dataProvider.missing } : {}),
+      ...(dataProvider.warning ? { providerWarning: dataProvider.warning } : {}),
       schema: schema.status,
       providerFloatTable: schema.providerFloatTable,
       missing: schema.missing,

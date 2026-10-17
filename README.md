@@ -41,7 +41,9 @@ Telecel bundle delivery, referral rewards and a vendor/agent program.
 
 > Data fulfillment runs against the mock provider in local development. Point the data
 > gateway environment variables below at a real Ghanaian data-API aggregator for live
-> MTN / Telecel delivery.
+> MTN / Telecel delivery. In production the mock provider is hard-blocked and a
+> misconfigured real provider fails closed — see
+> [Data-provider production lock](#data-provider-production-lock).
 
 ## Stack
 
@@ -86,6 +88,7 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run verify:schema-compat` | Run the data-gateway schema fallback scenarios |
 | `npm run verify:schema-baseline` | Probe a pre-gateway database for the fallback behaviour |
 | `npm run verify:seed-resilience` | Check the shared catalog seed can't take sign-up down on a lagging schema |
+| `npm run verify:data-provider-safety` | Prove the production mock-provider lock rejects before wallet debit/Paystack charge, never falls back to mock, keeps dev simulation working, and exposes no provider secrets in `/api/health` (in-memory, network-free) |
 | `npm run verify:signup` | Sign-up regression checks against a real database (needs `DATABASE_URL`) |
 | `npm run verify:demo-deposit-cleanup` | Prove the demo-deposit cleanup tool reverses only mock credits (in-memory, no database needed) |
 | `npm run verify:withdrawal` | Prove a database can accept a withdrawal (`--write-probe` adds INSERTs that are rolled back; needs `DATABASE_URL`) |
@@ -315,7 +318,7 @@ flexiData/
 | `RESEND_FROM_EMAIL` | A sender verified in Resend, e.g. `FlexiData <support@your-domain.com>`. Required with `RESEND_API_KEY`. |
 | `RESEND_REPLY_TO` | Optional address that receives replies to reset emails. |
 | `NOTIFY_WEBHOOK_URL` | Alternative email relay accepting `{ to, subject, text, html }` JSON. Used when Resend is not fully configured. In production with neither transport, forgot password returns an honest 502 rather than pretending an email was sent. |
-| `DATA_API_PROVIDER` | Data gateway adapter to use: `mock` for local dev, or your production provider slug |
+| `DATA_API_PROVIDER` | Data gateway adapter to use: `mock` for local dev, or your production provider slug. **Production lock:** `mock` (explicit or unset, since unset defaults to `mock`) is refused before wallet debit/Paystack checkout. A real provider without a valid base URL + matching credentials also fails closed; there is no mock fallback |
 | `DATA_API_BASE_URL` | Base URL for your Ghanaian data-API gateway/provider |
 | `DATA_API_PURCHASE_PATH` | Relative path used to submit MTN / Telecel data orders |
 | `DATA_API_BALANCE_PATH` | Optional path used to sync provider float balances |
@@ -330,6 +333,49 @@ flexiData/
 | `DATA_API_SCHEMA_PROBE_MS` | How often the detected gateway schema is re-read from the catalog (default `60000`) |
 | `DATA_MOCK_RESULT` | Test-only override for the `mock` data gateway result: `successful` / `pending` / `failed`. Unset keeps the demo behaviour (mostly successful) |
 | `DRIZZLE_ALLOW_LOCAL_DB` | Set to `1` to let `drizzle-kit` target a `localhost` database on CI/Vercel (it refuses by default) |
+
+### Data-provider production lock
+
+Data purchases fail closed in a production runtime (`NODE_ENV=production`):
+
+- `DATA_API_PROVIDER=mock`, or `DATA_API_PROVIDER` unset (which resolves to
+  `mock`), is refused by **both** purchase paths — `POST /api/purchase`
+  (wallet debit) and the Paystack pay-as-you-go checkout — **before** the wallet
+  is debited or Paystack is initialised. The API returns `503` with code
+  `provider_unavailable` and a safe, actionable message; no response contains a
+  key, token, secret, or raw environment value.
+- A real provider must have a valid `DATA_API_BASE_URL` and the credentials its
+  `DATA_API_AUTH_TYPE` requires. Missing or incomplete configuration is refused
+  in every runtime; it never silently falls back to the mock provider. A real
+  provider that is unreachable surfaces a request error (`502`) rather than a
+  simulated delivery.
+- `submitDataBundleOrder()` and the float-sync path enforce the same guard, so a
+  future caller cannot bypass the routes and obtain a mock delivery result.
+- Development and test (`NODE_ENV=test`) simulations remain fully usable,
+  including the existing atomic debit/refund behaviour when a simulated
+  provider reports a failure.
+
+`/api/health` reports the configured identity and runtime safety under
+`dataGateway` — for example, a production mock configuration:
+
+```json
+{
+  "ok": true,
+  "dataGateway": {
+    "provider": "mock",
+    "providerMode": "mock",
+    "providerConfigured": true,
+    "providerSafe": false,
+    "providerStatus": "unavailable",
+    "providerMissing": ["real_provider"],
+    "providerWarning": "The mock data provider is disabled in production. Configure a real data provider (DATA_API_PROVIDER, DATA_API_BASE_URL and its credentials)."
+  }
+}
+```
+
+A correctly configured real provider reports
+`providerSafe: true`, `providerStatus: "ready"`, and its provider identifier.
+`ok`/`database` and the existing schema/readiness fields are unchanged.
 
 ## Migrations
 

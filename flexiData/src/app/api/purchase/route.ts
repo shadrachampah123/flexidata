@@ -8,6 +8,7 @@ import {
   DataProviderConfigError,
   DataProviderFloatError,
   DataProviderRequestError,
+  assertDataProviderRuntimeSafe,
   deriveProviderProductCode,
   ensureProviderFloatCapacity,
   getStoredProviderFloatBalance,
@@ -117,13 +118,25 @@ function clampText(value: string | null | undefined, max = 200): string {
 
 export async function POST(req: Request) {
   try {
-    // Authenticate first — unauthenticated callers must never reach the
-    // money-moving logic or receive anything but a clean 401.
+    // Body parsing happens before authentication solely so a DATA purchase can
+    // run the side-effect-free provider preflight first (the same posture as
+    // POST /api/wallet/fund). Nothing is written, debited, or looked up on this
+    // path; authentication still precedes every DB/money operation below.
+    const body = (await req.json().catch(() => ({}))) as Body;
+    const { kind, network, recipient } = body;
+
+    // FAIL-CLOSED PRODUCTION LOCK — before authentication, wallet lookup,
+    // wallet debit, float sync, or any provider call. A production deployment
+    // configured with the mock provider (or no provider, which defaults to
+    // mock, or an incomplete real provider) must never start a data purchase.
+    if (kind === "data") {
+      assertDataProviderRuntimeSafe();
+    }
+
+    // Authenticate before the money-moving logic — unauthenticated callers must
+    // never reach it or receive anything but a clean 401.
     const auth = await requireAccount();
     if (!auth.ok) return auth.response;
-
-    const body = (await req.json()) as Body;
-    const { kind, network, recipient } = body;
 
     if (!network || (network !== "MTN" && network !== "TELECEL")) {
       return Response.json({ ok: false, error: "Choose a network" }, { status: 400 });
@@ -153,6 +166,12 @@ export async function POST(req: Request) {
       if (balance < cost) {
         return Response.json({ ok: false, error: "insufficient_funds", needed: cost, balance }, { status: 402 });
       }
+
+      // Belt-and-braces immediately before the irreversible debit. The route
+      // preflight above already ran, but keeping this check adjacent to the
+      // debit means a future refactor cannot reintroduce the old behaviour
+      // (debit first, discover the provider is mock/unconfigured afterwards).
+      assertDataProviderRuntimeSafe();
 
       // Atomic, conditional debit BEFORE the provider call: the `balance >= cost`
       // guard lives in the UPDATE itself, so concurrent purchases/transfers can

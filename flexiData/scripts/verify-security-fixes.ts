@@ -599,7 +599,10 @@ async function main() {
         points: overrides.points ?? 150,
         network: "MTN",
         recipient: "0244123456",
-        provider: "mock",
+        // Real provider identity: production callbacks may not mark a mock /
+        // simulated order as delivered (Part 6.1); the settlement mechanics
+        // under test are provider-independent.
+        provider: "yenkodata",
         provider_product_code: "MTN-UP2U-1GB",
         provider_reference: `prov-${id}`,
         provider_status: overrides.charged ? "successful" : "pending",
