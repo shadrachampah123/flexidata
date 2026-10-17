@@ -56,7 +56,7 @@ async function main() {
   // The sim's "legacy" model keeps the catalog tables and only strips the
   // data-gateway objects; here we additionally model a database missing the
   // seed's own tables, which is the case the old code let crash sign-up.
-  const { schema } = installSim({ migrated: process.env.SCENARIO === "current" });
+  const { pool: getPool, schema } = installSim({ migrated: process.env.SCENARIO === "current" });
   const scenario = process.env.SCENARIO ?? "current";
 
   if (scenario === "no-price-alerts") delete schema.tables.price_alerts;
@@ -74,7 +74,10 @@ async function main() {
   resetSchemaCapabilitiesCache();
 
   const expect = EXPECT[scenario];
-  let result: { ok: boolean; userId?: number; error?: string };
+  type RegistrationResult =
+    | { ok: true; userId: number; walletId: number }
+    | { ok: false; error: string; reason?: string };
+  let result: RegistrationResult;
 
   try {
     result = await registerUser({
@@ -90,20 +93,34 @@ async function main() {
     return;
   }
 
+  const pool = getPool();
+  function verify(label: string, pass: boolean, detail?: unknown) {
+    console.log(`  ${pass ? "PASS" : "FAIL"}  ${label}${pass ? "" : ` -> ${JSON.stringify(detail)}`}`);
+    if (!pass) process.exitCode = 1;
+  }
+
   if (expect.ok) {
-    const pass = result.ok && typeof result.userId === "number";
-    console.log(`  ${pass ? "PASS" : "FAIL"}  registerUser succeeds (account created)`);
-    if (!pass) {
-      console.log(`         -> ${JSON.stringify(result)}`);
-      process.exitCode = 1;
+    const succeeded = result.ok && Number.isInteger(result.userId) && Number.isInteger(result.walletId);
+    verify("registerUser returns both userId and walletId", succeeded, result);
+    if (result.ok) {
+      const user = pool.rows.users.find((row) => row.id === result.userId);
+      const wallet = pool.rows.wallets.find((row) => row.id === result.walletId);
+      verify("registered user row is persisted", Boolean(user && user.email === `ama-${scenario}@flexidata-verify.test`), user);
+      verify("wallet is created for that user with zero starting balance", Boolean(
+        wallet && wallet.user_id === result.userId && wallet.balance === "0.00",
+      ), wallet);
+      verify("agent profile is linked to the new wallet", pool.rows.agent_profiles.some((row) => row.wallet_id === result.walletId));
+    } else {
+      verify("failed registration creates no user or wallet", pool.rows.users.length === 0 && pool.rows.wallets.length === 0, {
+        users: pool.rows.users.length, wallets: pool.rows.wallets.length,
+      });
     }
   } else if (expect.friendly) {
     const pass = !result.ok && typeof result.error === "string" && !/ref/i.test(result.error);
-    console.log(`  ${pass ? "PASS" : "FAIL"}  missing required column blocks with a friendly message, not a 500`);
-    if (!pass) {
-      console.log(`         -> ${JSON.stringify(result)}`);
-      process.exitCode = 1;
-    }
+    verify("missing required column blocks with a friendly message, not a 500", pass, result);
+    verify("blocked registration creates no orphan user or wallet", pool.rows.users.length === 0 && pool.rows.wallets.length === 0, {
+      users: pool.rows.users.length, wallets: pool.rows.wallets.length,
+    });
   }
 }
 

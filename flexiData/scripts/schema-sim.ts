@@ -173,11 +173,26 @@ const schema: Schema = {
     ],
     agent_profiles: ["id", "wallet_id", "tier", "referral_code", "referrals", "commission", "volume", "created_at"],
     admin_audit_logs: ADMIN_AUDIT_LOGS,
+    withdrawal_requests: migrated
+      ? [
+          "id", "ref", "user_id", "wallet_id", "amount", "fee", "net_amount",
+          "destination_method", "destination_details", "status", "admin_user_id",
+          "admin_rejection_reason", "provider_fields", "created_at", "updated_at",
+        ]
+      : [],
   },
   enums: {
     tx_status: migrated
       ? ["successful", "pending", "failed", "reversed"]
       : ["successful", "pending", "failed"],
+    // The base transaction enum exists in both schemas; the withdrawal repair
+    // adds its final label on databases that have not received that migration.
+    tx_type: migrated
+      ? ["deposit", "purchase", "transfer", "conversion", "reward", "withdrawal"]
+      : ["deposit", "purchase", "transfer", "conversion", "reward"],
+    ...(migrated
+      ? { withdrawal_status: ["pending", "processing", "successful", "failed", "rejected", "cancelled"] }
+      : {}),
     // the fulfillment enum type only ships with the gateway migration
     ...(migrated
       ? { fulfillment_status: ["queued", "submitted", "processing", "delivered", "failed", "refunded"] }
@@ -228,27 +243,35 @@ class FakePg {
     scheduled_topups: [],
     agent_profiles: [],
     admin_audit_logs: [],
+    withdrawal_requests: [],
   };
   captured: { kind: string; table: string; columns: string[]; sql?: string }[] = [];
   errors: string[] = [];
   serials: Record<string, number> = {};
+  constraints = new Set<string>();
 
   constructor(
     public schema: Schema,
     public breakCatalog: boolean,
   ) {}
 
-  /** drizzle sets rowMode:"array" and maps result rows positionally */
-  private arrayMode = false;
+  /** Drizzle sets rowMode:"array" and maps result rows positionally. */
   private selectOrder: string[] = [];
 
   async query(config: unknown, params?: unknown[]) {
-    const cfg = config as { text?: string; rowMode?: string };
+    const cfg = config as { text?: string; rowMode?: string; values?: unknown[] };
     const text = typeof config === "string" ? config : cfg.text ?? "";
-    this.arrayMode = typeof config === "object" && cfg.rowMode === "array";
-    const result = await Promise.resolve(this.run(text, (params ?? []) as unknown[]));
-    if (this.arrayMode && this.selectOrder.length > 0 && Array.isArray(result.rows)) {
-      const order = this.selectOrder;
+    const arrayMode = typeof config === "object" && cfg.rowMode === "array";
+    // node-postgres accepts both query(text, values) and a QueryConfig with
+    // `values`. Drizzle's pg adapter uses the latter; dropping it silently
+    // makes WHERE clauses miss their fixture rows and inserts lose their data.
+    const boundValues = params ?? cfg.values ?? [];
+    const result = this.run(text, boundValues as unknown[]);
+    // Capture query-local state before yielding. Concurrent calls (notably the
+    // auth user's parallel user+wallet lookups) must not overwrite each other's
+    // positional mapping order.
+    const order = [...this.selectOrder];
+    if (arrayMode && order.length > 0 && Array.isArray(result.rows)) {
       return {
         ...result,
         rows: result.rows.map((row: Record<string, unknown>) => order.map((column) => row?.[column] ?? null)),
@@ -376,9 +399,28 @@ class FakePg {
   }
 
   run(sqlRaw: string, params: unknown[]) {
+    this.selectOrder = [];
     const sql = sqlRaw.replace(/\s+/g, " ").trim();
     const lower = sql.toLowerCase();
     if (process.env.DEBUG) console.log("SQL>>>", sql.includes("conflict") ? sql : sql.slice(0, 260));
+    // The withdrawal health probe combines three catalog results into one row.
+    // Model its aliases and PostgreSQL array values, not merely a generic empty
+    // response: the real code treats an empty enum array differently from a
+    // missing required status label.
+    if (lower.includes("information_schema.columns") && lower.includes("as status_values") && lower.includes("as tx_types")) {
+      if (this.breakCatalog) {
+        throw pgError('permission denied for view "information_schema.columns"', "42501");
+      }
+      const columns = this.columnsOf("withdrawal_requests");
+      return {
+        rows: [{
+          columns,
+          status_values: this.schema.enums.withdrawal_status ?? [],
+          tx_types: this.schema.enums.tx_type ?? [],
+        }],
+        rowCount: 1,
+      };
+    }
 
     if (lower.includes("information_schema.columns")) {
       if (this.breakCatalog) {
@@ -391,19 +433,68 @@ class FakePg {
       };
     }
 
-    if (lower.includes("pg_enum")) {
-      if (this.breakCatalog) throw pgError("catalog access denied", "42501");
-      const name = sql.match(/values \('([a-z_]+)'\)/i)?.[1] ?? "tx_status";
-      return { rows: [{ enum_name: name, labels: this.schema.enums[name as "tx_status"] ?? [] }], rowCount: 1 };
+    if (lower.startsWith("select 1 as ok from pg_type") && !lower.includes("pg_enum")) {
+      const name = sql.match(/typname\s*=\s*'([a-z_]+)'/i)?.[1];
+      const exists = Boolean(name && Object.hasOwn(this.schema.enums, name));
+      return { rows: exists ? [{ ok: 1 }] : [], rowCount: exists ? 1 : 0 };
     }
 
-    const countMatch = lower.match(/select count\(\*\)::int as c from ([a-z_]+)/);
-    if (countMatch) {
-      const table = countMatch[1];
-      return { rows: [{ c: (this.rows[table] ?? []).length }], rowCount: 1 };
+    if (lower.includes("pg_enum")) {
+      if (this.breakCatalog) throw pgError("catalog access denied", "42501");
+      const name = sql.match(/(?:values\s*\('([a-z_]+)'\)|typname\s*=\s*'([a-z_]+)')/i);
+      const enumName = name?.[1] ?? name?.[2] ?? "tx_status";
+      const labels = this.schema.enums[enumName] ?? [];
+      if (lower.includes("as enum_name")) {
+        return { rows: [{ enum_name: enumName, labels }], rowCount: 1 };
+      }
+      return { rows: labels.map((enumlabel) => ({ enumlabel })), rowCount: labels.length };
     }
 
     let m: RegExpMatchArray | null;
+
+    // Model the additive withdrawal repair DDL that runSeed issues. This is
+    // intentionally limited to withdrawal objects; unrelated DDL remains a
+    // no-op and cannot mutate the simulator's application tables.
+    if (lower.startsWith("do $repair$") && lower.includes("withdrawal_status")) {
+      this.schema.enums.withdrawal_status ??= [
+        "pending", "processing", "successful", "failed", "rejected", "cancelled",
+      ];
+      return { rows: [], rowCount: 0 };
+    }
+    if ((m = sql.match(/^alter type tx_type add value if not exists '([a-z_]+)'/i))) {
+      const labels = this.schema.enums.tx_type ?? (this.schema.enums.tx_type = []);
+      if (!labels.includes(m[1])) labels.push(m[1]);
+      return { rows: [], rowCount: 0 };
+    }
+    if (lower.startsWith("create table if not exists withdrawal_requests")) {
+      const body = sql.match(/\((.*)\)$/)?.[1] ?? "";
+      const cols = splitTop(body, ",")
+        .map((part) => part.match(/^\s*([a-z_]+)\s+/i)?.[1])
+        .filter((column): column is string => Boolean(column));
+      this.schema.tables.withdrawal_requests = [...new Set([...(this.schema.tables.withdrawal_requests ?? []), ...cols])];
+      return { rows: [], rowCount: 0 };
+    }
+    if (/^alter table "?withdrawal_requests"?/i.test(sql)) {
+      const cols = [...sql.matchAll(/add column if not exists\s+([a-z_]+)/gi)].map((match) => match[1]);
+      this.schema.tables.withdrawal_requests = [...new Set([...(this.schema.tables.withdrawal_requests ?? []), ...cols])];
+      const constraint = sql.match(/add constraint\s+"?([a-z_]+)"?/i)?.[1];
+      if (constraint) this.constraints.add(constraint);
+      return { rows: [], rowCount: 0 };
+    }
+
+    const constraintCount = lower.match(/select count\(\*\)::int as ([a-z_]+) from pg_constraint where conname\s*=\s*\$(\d+)/);
+    if (constraintCount) {
+      const alias = constraintCount[1];
+      const name = String(params[Number(constraintCount[2]) - 1] ?? "");
+      return { rows: [{ [alias]: this.constraints.has(name) ? 1 : 0 }], rowCount: 1 };
+    }
+
+    const countMatch = lower.match(/select count\(\*\)::int as ([a-z_]+) from ([a-z_]+)/);
+    if (countMatch) {
+      const alias = countMatch[1];
+      const table = countMatch[2];
+      return { rows: [{ [alias]: (this.rows[table] ?? []).length }], rowCount: 1 };
+    }
 
     if ((m = sql.match(/^insert into "?([a-z_]+)"? \(([^)]*)\) values ([\s\S]*?)( on conflict [\s\S]*?)?( returning ([\s\S]*))?$/i))) {
       const table = m[1];
