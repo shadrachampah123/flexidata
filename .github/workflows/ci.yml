@@ -52,6 +52,9 @@ jobs:
       - name: Verify production security fixes (in-memory simulator and local stub)
         run: npm run verify:security-fixes
 
+      - name: Verify production data-provider lock and health safety (in-memory, network-free)
+        run: npm run verify:data-provider-safety
+
       - name: Verify auth recovery and signup flow (in-memory simulator)
         run: npm run verify:auth-flow
 

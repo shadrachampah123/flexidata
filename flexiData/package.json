@@ -12,6 +12,7 @@
     "verify:schema-compat": "tsx scripts/schema-compat-harness.ts",
     "verify:schema-baseline": "tsx scripts/schema-baseline-probe.ts",
     "verify:security-fixes": "tsx scripts/verify-security-fixes.ts",
+    "verify:data-provider-safety": "tsx scripts/verify-data-provider-safety.ts",
     "verify:seed-resilience": "tsx scripts/verify-seed-resilience.ts",
     "verify:signup": "tsx scripts/verify-signup.ts",
     "verify:auth-flow": "tsx scripts/verify-auth-flow.ts",

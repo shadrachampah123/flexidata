@@ -5,6 +5,7 @@ import { bundlePlans, checkoutOrders, wallets } from "@/db/schema";
 import { insertTransactionRow } from "@/lib/data";
 import { creditReferralReward } from "@/lib/referrals";
 import {
+  assertDataProviderRuntimeSafe,
   deriveProviderProductCode,
   getStoredProviderFloatBalance,
   projectProviderFloatUsage,
@@ -165,6 +166,11 @@ export async function createCheckoutOrder(params: {
   recipient: string;
   requestOrigin: string | null;
 }): Promise<{ ref: string; authorizationUrl: string; amount: number; planLabel: string }> {
+  // This is a real Paystack charge path, so the data provider must be able to
+  // deliver before the order row is created or Paystack is called. Otherwise a
+  // customer could pay and then receive only a mock/"delivered" simulation.
+  assertDataProviderRuntimeSafe();
+
   const network = params.network?.trim().toUpperCase();
   if (network !== "MTN" && network !== "TELECEL") {
     throw new CheckoutInputError("Choose a network.");

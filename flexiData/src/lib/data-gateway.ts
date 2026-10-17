@@ -66,6 +66,12 @@ export type StoredFloatBalance = {
 };
 
 export class DataProviderConfigError extends Error {
+  /**
+   * Stable machine-readable code for API callers. It carries no configuration
+   * details, credential material, or provider response data.
+   */
+  readonly code = "provider_unavailable";
+
   constructor(message: string) {
     super(message);
     this.name = "DataProviderConfigError";
@@ -124,6 +130,188 @@ export function deriveProviderProductCode(network: string, category: string, lab
 
 export function getDataProviderCode(): string {
   return env("DATA_API_PROVIDER")?.toLowerCase() ?? "mock";
+}
+
+/**
+ * Missing *kinds* of configuration. Deliberately categories, never the values:
+ * health output and errors must never include a key, token, secret, URL, or any
+ * other raw environment value.
+ */
+export type DataProviderMissingConfig =
+  | "provider"
+  | "real_provider"
+  | "base_url"
+  | "auth_type"
+  | "credentials";
+
+export type DataProviderRuntimeStatus = {
+  /** Safe identifier of the provider the runtime would actually use. */
+  provider: string;
+  /** True when DATA_API_PROVIDER was explicitly set (not defaulted to mock). */
+  configured: boolean;
+  mode: "mock" | "live";
+  production: boolean;
+  /** False when the configuration is not safe for THIS runtime. */
+  safe: boolean;
+  status: "ready" | "unavailable";
+  /** Missing configuration categories only — never values or secrets. */
+  missing: DataProviderMissingConfig[];
+  /** Safe, actionable operator message (null when no action is needed). */
+  warning: string | null;
+};
+
+/**
+ * Provider identifiers are exposed by the health endpoint, so keep them to a
+ * small, inert character set. This prevents an accidental/malicious environment
+ * value from being reflected verbatim into a JSON response.
+ */
+function safeProviderIdentifier(value: string): string {
+  const cleaned = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return cleaned || "unknown";
+}
+
+const PRODUCTION_MOCK_WARNING =
+  "The mock data provider is disabled in production. Configure a real data provider " +
+  "(DATA_API_PROVIDER, DATA_API_BASE_URL and its credentials).";
+
+const DEVELOPMENT_MOCK_WARNING =
+  "Data bundles are SIMULATED by the mock provider (development/test only).";
+
+const INCOMPLETE_REAL_PROVIDER_WARNING =
+  "The configured data provider is missing required configuration. Set DATA_API_BASE_URL " +
+  "and valid DATA_API_AUTH_TYPE credentials.";
+
+/**
+ * Resolve the data provider's runtime safety WITHOUT contacting the provider and
+ * WITHOUT exposing any configuration values.
+ *
+ * This is the single source of truth used by the purchase guard, the data
+ * gateway itself and /api/health. It reuses `getDataProviderCode()` plus the
+ * same `getGatewayConfig()` / `buildHeaders()` validation the real request path
+ * uses, so health can never disagree with what a purchase would actually do.
+ *
+ * Rules:
+ *   - `mock` is allowed only outside a production runtime.
+ *   - `mock` is unsafe in production whether it was set explicitly or defaulted
+ *     because DATA_API_PROVIDER is unset.
+ *   - A real provider must have a valid base URL and credentials for its auth
+ *     mode. A missing/invalid real provider is unsafe in EVERY runtime; there is
+ *     no fallback to the mock provider.
+ */
+export function getDataProviderRuntimeStatus(): DataProviderRuntimeStatus {
+  const providerCode = getDataProviderCode();
+  const configured = env("DATA_API_PROVIDER") !== null;
+  const production = process.env.NODE_ENV === "production";
+  const provider = safeProviderIdentifier(providerCode);
+  const base = {
+    provider,
+    configured,
+    mode: providerCode === "mock" ? ("mock" as const) : ("live" as const),
+    production,
+  };
+
+  if (providerCode === "mock") {
+    if (!production) {
+      return {
+        ...base,
+        safe: true,
+        status: "ready",
+        missing: [],
+        warning: DEVELOPMENT_MOCK_WARNING,
+      };
+    }
+    return {
+      ...base,
+      safe: false,
+      status: "unavailable",
+      missing: configured ? ["real_provider"] : ["provider"],
+      warning: PRODUCTION_MOCK_WARNING,
+    };
+  }
+
+  let config: GatewayConfig;
+  try {
+    config = getGatewayConfig();
+  } catch (error) {
+    if (error instanceof DataProviderConfigError) {
+      return {
+        ...base,
+        safe: false,
+        status: "unavailable",
+        missing: ["auth_type"],
+        warning: INCOMPLETE_REAL_PROVIDER_WARNING,
+      };
+    }
+    throw error;
+  }
+
+  const missing: DataProviderMissingConfig[] = [];
+  if (!config.baseUrl) {
+    missing.push("base_url");
+  } else {
+    try {
+      const parsed = new URL(config.baseUrl);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        missing.push("base_url");
+      }
+    } catch {
+      missing.push("base_url");
+    }
+  }
+
+  try {
+    // Reuse the exact header/auth validation the real request would run. The
+    // returned headers are discarded immediately; no credential is exposed.
+    buildHeaders(config);
+  } catch (error) {
+    if (error instanceof DataProviderConfigError) {
+      missing.push("credentials");
+    } else {
+      throw error;
+    }
+  }
+
+  if (missing.length > 0) {
+    return {
+      ...base,
+      safe: false,
+      status: "unavailable",
+      missing,
+      warning: INCOMPLETE_REAL_PROVIDER_WARNING,
+    };
+  }
+
+  return {
+    ...base,
+    safe: true,
+    status: "ready",
+    missing: [],
+    warning: null,
+  };
+}
+
+/**
+ * Fail-closed production/runtime guard. Throws the repository's config error
+ * (mapped by the API routes to a safe 503 `provider_unavailable`) whenever the
+ * configured data provider cannot safely deliver a real bundle in this runtime.
+ *
+ * Callers must invoke this BEFORE any irreversible side effect — in particular
+ * before a wallet debit or a Paystack charge.
+ */
+export function assertDataProviderRuntimeSafe(): DataProviderRuntimeStatus {
+  const status = getDataProviderRuntimeStatus();
+  if (!status.safe) {
+    throw new DataProviderConfigError(
+      status.warning ??
+        "Data bundle delivery is unavailable: the data provider configuration is not safe for this runtime.",
+    );
+  }
+  return status;
 }
 
 function getGatewayConfig(): GatewayConfig {
@@ -439,6 +627,12 @@ function buildPurchasePayload(order: DataBundleOrder, config: GatewayConfig): Re
 }
 
 export async function submitDataBundleOrder(order: DataBundleOrder): Promise<GatewayResult> {
+  // The definitive choke point: no caller (route, job, future integration) can
+  // obtain a simulated/mock delivery result in a production runtime, and no
+  // caller can silently fall back to mock when a real provider is incomplete.
+  // The purchase routes run this earlier as well, so a wallet is never debited
+  // before this can fail.
+  assertDataProviderRuntimeSafe();
   const config = getGatewayConfig();
   const payload = buildPurchasePayload(order, config);
 
@@ -622,6 +816,9 @@ export async function upsertProviderFloatBalance(input: {
 }
 
 export async function syncProviderFloatBalance(network: "MTN" | "TELECEL"): Promise<number | null> {
+  // Float data is provider metadata too: the mock provider must not be able to
+  // make a production deployment look like it has real aggregator float.
+  assertDataProviderRuntimeSafe();
   const config = getGatewayConfig();
 
   if (config.provider === "mock") {

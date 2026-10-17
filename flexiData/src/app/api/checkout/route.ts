@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { users } from "@/db/schema";
 import { requireAccount } from "@/lib/api-auth";
 import { CheckoutInputError, createCheckoutOrder } from "@/lib/checkout";
+import { DataProviderConfigError } from "@/lib/data-gateway";
 import { requestOrigin } from "@/lib/notifications";
 import { isPaystackConfigured, PaystackConfigError, PaystackRequestError } from "@/lib/paystack";
 import { isMissingRelationError } from "@/lib/schema-compat";
@@ -69,6 +70,20 @@ export async function POST(req: Request) {
   } catch (error) {
     if (error instanceof CheckoutInputError) {
       return Response.json({ ok: false, error: error.message }, { status: 400 });
+    }
+    if (error instanceof DataProviderConfigError) {
+      // Safe, actionable operator message only — no provider config values,
+      // credentials, or secrets. The customer must never be charged through
+      // Paystack when fulfillment cannot use a production-safe provider.
+      console.error("checkout data-provider lock:", error.message);
+      return Response.json(
+        {
+          ok: false,
+          error: error.message,
+          code: "provider_unavailable",
+        },
+        { status: 503 },
+      );
     }
     if (error instanceof PaystackConfigError) {
       // Config problems (missing key / live-mode lock) are logged server-side
