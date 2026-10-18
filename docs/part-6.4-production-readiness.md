@@ -18,8 +18,9 @@ mutated production data, deployed, or started a scheduler. Every real-PostgreSQL
 check used a disposable local database (`purchase_lifecycle_test`), never a
 production URL.
 
-Starting point: `main` at `21ffc08bab591a49c1abc9c170fb05272904052a` (verified
-before work began). Prerequisites: [Part 6.3 readiness](part-6.3-provider-readiness.md),
+Historical implementation starting point: `main` at `21ffc08bab591a49c1abc9c170fb05272904052a` (verified
+before that work began). Current evidence is rechecked at `main`
+`9175fb6b0e32246dca850b65a34be183a1400f0e`; prerequisites: [Part 6.3 readiness](part-6.3-provider-readiness.md),
 [Part 6.3A durable purchases](part-6.3a-durable-purchases.md).
 
 ## Scope and result
@@ -412,8 +413,10 @@ is the latest, still flagged), so no version bump can resolve it. It is part of
 the linting toolchain only: it is not shipped to the runtime, and it processes
 only repository-controlled glob patterns, not user input.
 
-**Accepted residual risk:** re-check monthly and upgrade when upstream publishes
-a fix. Do not force-override `micromatch`/`fast-glob` to unpatched forks.
+**Accepted interim policy:** keep the advisory visible and reassess when a patched
+`braces` release or compatible published parent release exists. Do not
+force-override `micromatch`/`fast-glob` to unpatched forks. The current exact
+evidence is maintained in the [dependency audit report](../flexiData/docs/security/dependency-audit-cve-2026-93687-2026-10-18.md).
 
 Verification of the dependency change: the full CI mirror (lint, typecheck,
 production build, all DB-free verifiers, both real-PostgreSQL suites) passed on
@@ -456,14 +459,13 @@ runtime code, migration, journal entry, schema or fail-closed behavior was
 changed to add these steps, and nothing here is provider, production,
 deployment or operational evidence.
 
-Known verification debt: the historical admin acceptance harnesses
-(`verify:admin-phase1`, `verify:admin-phase2`, `verify:admin-support`,
-`verify:admin-ops`) remain outside CI. `verify:admin-phase1` and
-`verify:admin-phase2` still assert a two-file browser-write-surface snapshot
-from 2026-09-05; the withdrawal and payout-reconciliation admin explorers added
-on 2026-09-08/09 legitimately expanded that surface, so those two assertions
-are not green on current `main`. They were not re-run, edited or "fixed" here,
-and they are not evidence of a regression; they need their own reviewed update.
+Current admin verification status: the Phase 0–2 and safe Phase 3–6
+harnesses are enforced in `.github/workflows/ci.yml` at the current baseline.
+The current DB-free recheck is recorded in
+[`docs/admin-ops-dashboard/07-inventory-and-security-review.md`](admin-ops-dashboard/07-inventory-and-security-review.md)
+and the concise [Parts 6.5B–6.9 evidence matrix](production-readiness-evidence-2026-10-18.md).
+Database-backed and live-app portions remain explicitly skipped without an
+approved non-production `DATABASE_URL`/`BASE_URL` pair.
 
 ## Files and migration impact
 
