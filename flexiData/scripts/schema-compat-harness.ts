@@ -13,6 +13,15 @@
  */
 import { BASE_TX, GATEWAY_TX, BASE_PLANS, FLOAT_COLS, installSim } from "./schema-sim";
 
+// The mock data provider randomises purchase outcomes unless DATA_MOCK_RESULT
+// pins them (src/lib/data-gateway.ts). The refund assertions below describe the
+// charged-then-reversed path, which needs a charged purchase. A provider-failed
+// purchase is recorded "Not charged" and is never refunded twice by a callback,
+// so asserting "refund recorded" for it would fail about 1 run in 25. Pin the
+// outcome so this harness is deterministic (the same pattern as
+// verify-data-provider-safety.ts).
+process.env.DATA_MOCK_RESULT = "successful";
+
 const SCENARIOS = ["legacy", "current", "probedown", "strict", "heal"];
 
 function runAllScenarios() {
