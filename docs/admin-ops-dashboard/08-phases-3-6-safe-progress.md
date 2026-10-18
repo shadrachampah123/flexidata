@@ -1,7 +1,7 @@
 # Phases 3–6 — Safe progress, inactive boundaries, and owner decisions
 
 **Evidence date:** 2026-10-18  
-**Current baseline:** `main` at `e48d45a20bcf0efccb755096cd005d3fa65d9256` (merge of PR #69)
+**Current baseline:** `main` at `3882bd57434aa10f3eb40fda67c133fda9956c8c` (merge of PR #70)
 **Status:** safe repository work is merged and rechecked; Phases 3–6 are **not complete** and no owner decision is implied.
 
 This record separates what can be hardened against the currently shipped schema from

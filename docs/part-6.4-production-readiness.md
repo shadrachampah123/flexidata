@@ -20,7 +20,7 @@ production URL.
 
 Historical implementation starting point: `main` at `21ffc08bab591a49c1abc9c170fb05272904052a` (verified
 before that work began). Current evidence is rechecked at `main`
-`e48d45a20bcf0efccb755096cd005d3fa65d9256`; prerequisites: [Part 6.3 readiness](part-6.3-provider-readiness.md),
+`3882bd57434aa10f3eb40fda67c133fda9956c8c`; prerequisites: [Part 6.3 readiness](part-6.3-provider-readiness.md),
 [Part 6.3A durable purchases](part-6.3a-durable-purchases.md).
 
 ## Scope and result

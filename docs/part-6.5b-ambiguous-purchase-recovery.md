@@ -1,5 +1,9 @@
 # Part 6.5B — ambiguous purchase recovery: BLOCKED / hold-only procedure
 
+**Current repository baseline:** `main` at `3882bd57434aa10f3eb40fda67c133fda9956c8c` (merge of PR #70).
+**Gate status:** **BLOCKED / NOT VERIFIED (8/8 policy gates open).**
+**Release posture:** **NO-GO for live fulfillment.**
+
 ## Decision and inspected implementation
 
 No terminal manual-resolution endpoint, UI, SQL override or migration is shipped.
@@ -10,23 +14,68 @@ that an ambiguous provider outcome can safely be resolved.
 
 Inspected paths:
 
-- `src/lib/purchase-lifecycle.ts`: atomic wallet debit/claim/ledger creation;
-  submitted-before-network claim; no POST retry; leased, fenced status reads;
-  terminal settlement couples ledger, wallet refund, float, points/referrals and
-  checkout updates. Wallet failures refund; checkout failures do not credit the
-  wallet and need a separate externally-paid refund procedure.
-- `drizzle/0011_purchase_attempts.sql` and `src/db/schema.ts`: six states;
-  provider-reference uniqueness; no manual hold flag or resolution evidence table.
+- `flexiData/src/lib/reloadly.ts`: sandbox-only transport (`RELOADLY_MODE=sandbox`,
+  `NODE_ENV !== "production"` enforced in `assertReloadlySandboxConfiguration()`).
+  `submitReloadlySandbox()` sends `POST /topups-async` with `operatorId`,
+  `amount: order.localAmount`, `useLocalAmount: true`, `customIdentifier: order.reference`,
+  and `recipientPhone: { countryCode: "GH", number: order.recipient }`, with a
+  20-second abort timeout, `redirect: "error"`, and zero retries. Even HTTP 200
+  with a positive integer `transactionId` returns `providerStatus: "accepted"`
+  (`status: "pending"`), never `"delivered"`. `lookupReloadlySandbox()` calls
+  `GET /topups/{transactionId}/status` and returns `"delivered"` or `"rejected"`
+  only when `response.ok` is true, `String(transaction.transactionId) === providerReference`,
+  `transaction.customIdentifier === reference`, and both top-level `response.body.status`
+  and nested `transaction.status` are mutually consistent (`"SUCCESSFUL"` or `"FAILED"`).
+- `flexiData/src/lib/purchase-lifecycle.ts`: atomic wallet debit/claim/ledger creation
+  (`PurchaseLifecycle.create()` locks `wallets FOR UPDATE`, checks `(wallet_id, request_key)`
+  and SHA-256 payload `fingerprint`, debits `wallets.balance` or transitions
+  `checkout_orders` `paid -> fulfilling`, optionally reserves generic GHS float,
+  and inserts `transactions` + `purchase_attempts` in one PostgreSQL transaction);
+  `submit()` commits `state = 'submitted'` before network I/O and performs at most
+  one POST without retry; `reconcile()` claims up to 20 due Reloadly rows with
+  `provider_reference IS NOT NULL`, `poll_count < 12`, and a 2-minute UUID lease
+  (`FOR UPDATE SKIP LOCKED`); `settle()` requires matching `ref`, `provider_reference`,
+  and `lease_token` and atomically settles ledger, wallet refund (`source = 'wallet'`
+  only), generic float release, loyalty points/referrals, and `checkout_orders`.
+  Checkout failures set `order_status = 'fulfillment_failed'` without crediting the
+  customer wallet and need a separate externally-paid refund procedure.
+- `flexiData/src/app/api/purchase/route.ts` and `flexiData/src/app/api/purchase/callback/route.ts`:
+  `POST /api/purchase` runs `assertDataProviderRuntimeSafe()` before authentication or
+  wallet access and requires `Idempotency-Key` (`^[A-Za-z0-9_-]{1,100}$`) for non-mock
+  data purchases. `POST /api/purchase/callback` unconditionally rejects `tx.provider === "reloadly"`
+  and any durable row (`tx.subtitle.startsWith("[durable] ")`) with HTTP `409`.
+- `flexiData/drizzle/0011_purchase_attempts.sql` and `flexiData/src/db/schema.ts`: six states
+  (`created`, `submitted`, `pending`, `unknown`, `delivered`, `failed`); unique
+  `(wallet_id, request_key)` and partial unique `(provider, provider_reference) WHERE provider_reference IS NOT NULL`;
+  `poll_count BETWEEN 0 AND 12`; no manual hold flag or resolution evidence table.
   `unknown` is unresolved, **not** a dedicated persistent poller hold.
-- `src/lib/admin/auth.ts`: branded, session-derived admin context and allowlist
-  gate. Customer identity/test seams must never authorize money-changing actions.
-- `src/lib/support-actions.ts`: existing checkout support actions are not durable
-  purchase settlement. `delivery_resolved` must not be reused for ambiguous
-  `purchase_attempts` outcomes.
-- `admin_audit_logs` / migration 0007: constrained action vocabulary, short reason,
-  checkout-oriented target ref, replay index. No purchase-resolution action or
-  structured evidence/version history. Do not widen this ad hoc or overwrite an
-  existing audit row.
+- `flexiData/src/lib/admin/auth.ts` and `flexiData/src/lib/admin/request-policy.ts`:
+  branded, session-derived two-signal admin gate (`users.is_admin = true` plus
+  `ADMIN_EMAILS`) and same-origin write provenance check. Customer identity/test
+  seams must never authorize money-changing actions.
+- `flexiData/src/lib/support-actions.ts`: existing checkout support actions
+  (`delivery_resolved`, `refund_review`) touch only `checkout_orders` delivery
+  columns and `admin_audit_logs`; they are not durable purchase settlement and
+  must not be reused for ambiguous `purchase_attempts` outcomes.
+- `admin_audit_logs` / migration 0007 / `flexiData/src/lib/admin/audit-writer.ts`:
+  constrained 6-action vocabulary (`suspend`, `activate`, `delivery_resolved`,
+  `refund_review`, `approve_withdrawal`, `reject_withdrawal`), 240-character
+  reason bound, 4–40-character target ref, partial replay index. No
+  purchase-resolution action or structured evidence/version history. Do not widen
+  this ad hoc or overwrite an existing audit row.
+
+## Eight-gate classification summary (repository facts vs. external evidence vs. owner decisions)
+
+| Gate | Priority focus | Verified in repository (`PASS` for hold boundary) | External Reloadly / provider account-owner evidence needed | Internal owner policy / design approval needed | Current status |
+| --- | --- | --- | --- | --- | --- |
+| **1. Provider correlation identifiers & missing-ID lookup** | Priority 1 (Part 6.4 F-1, F-6) | `submitReloadlySandbox` sends `customIdentifier = order.reference`; `lookupReloadlySandbox` requires exact `transactionId` + `customIdentifier` match; DB enforces partial unique `(provider, provider_reference)`; no-reference rows are never polled (`verify:purchase-lifecycle`). | Written contract/confirmation and sandbox trace for `customIdentifier` uniqueness, lookup method when `transactionId` is missing (timeout/response loss), retention window, duplicate mapping, and empty-search semantics. | Integration owner + Reloadly account owner sign-off on the versioned correlation/lookup contract and rule that empty/expired search is never proof of failure. | **BLOCKED / NOT VERIFIED** |
+| **2. Authoritative finality, callbacks & delayed outcomes** | Priority 2 (Part 6.4 F-6, F-7) | Only mutually consistent `SUCCESSFUL` or `FAILED` on `GET /topups/{id}/status` settles a row; HTTP 200 on `/topups-async` is `pending`; `/api/purchase/callback` returns HTTP 409 for Reloadly and `[durable]` rows (`verify:reloadly`, `verify:purchase-lifecycle`). | Written provider confirmation of status state machine, maximum finality window, post-`SUCCESSFUL` reversal or post-`FAILED` late delivery behavior, and webhook signature/replay/delivery contract (if callbacks are ever proposed). | Integration/Security owner + provider technical owner approval of the terminal-evidence matrix, finality window, and callback lock policy. | **BLOCKED / NOT VERIFIED** |
+| **3. Duplicate requests, retries, float, refunds, reversals & partial fulfillment** | Priority 3 (Part 6.4 F-3, F-5) | `(wallet_id, request_key)` + SHA-256 fingerprint prevent duplicate client debits; `submit()` never retries POST; failed wallet purchases refund exactly once; failed checkout purchases never credit the wallet; Reloadly skips generic GHS float projection (`verify:purchase-lifecycle`). | Reloadly account currency, wholesale pricing/discount/fee schedule, denomination mapping (`useLocalAmount: true`), duplicate-submission behavior on identical `customIdentifier`, and provider reversal/partial-fulfillment rules. | Finance/Treasury owner, Paystack/payment owner, and provider account owner approval of float accounting, wallet vs. checkout refund funding/authority, partial fulfillment, and late-success-after-refund handling. | **BLOCKED / NOT VERIFIED** |
+| **4. Evidence ownership, access & retention** | Policy / Governance | `purchase_attempts` stores sanitized request JSON and provider reference only (no secrets or raw error payloads); `admin_audit_logs` is constrained to 6 existing actions (`verify:admin-phase3-6`). | Confirmation of which provider dashboard/API fields and support ticket artefacts may be retained as immutable audit evidence. | Security/Privacy/Data owner + Incident owner approval of restricted store, custodian, retention/deletion schedule, and digest-only linkage in DB/GitHub. | **BLOCKED / NOT VERIFIED** |
+| **5. Safe state transitions & persistent hold semantics** | Engineering / Data Integrity | 6 persisted states (`created`, `submitted`, `pending`, `unknown`, `delivered`, `failed`); lease token fencing; terminal immutability; `unknown` with a reference remains pollable up to `MAX_PURCHASE_POLLS = 12`. | None beyond Gates 1–2 finality windows. | Engineering/data-integrity owner + release owner approval of legal transition graph, treatment of stale `created` and exhausted/no-reference rows, and persistent review-hold state that excludes pollers. | **BLOCKED / NOT VERIFIED** |
+| **6. Idempotency & concurrency for future resolution** | Engineering / Database | Existing purchase creation and settlement use row locks (`FOR UPDATE`), unique constraints, and UUID lease fencing; 20-way concurrent settlement tests pass (`verify:purchase-lifecycle`). | None (internal database/API invariant). | Engineering/database owner + Finance/Treasury owner approval of resolution-event schema, idempotency key/fingerprint rules, expected-state/version locking, and opposite-decision conflict rejection. | **BLOCKED / NOT VERIFIED** |
+| **7. Reviewer & approval requirements (maker-checker)** | Security / Finance / Governance | Two-signal admin gate (`requireAdminApi()`) and same-origin request provenance (`adminWriteRequestDecision()`) exist, but admin power is binary (`is_admin`) with no maker-checker purchase table (`docs/admin-ops-dashboard/08-phases-3-6-safe-progress.md`). | None (internal governance/authorization). | Account/release owner, Finance/Treasury owner, and Security owner approval of two-person control (`requester != approver`), per-role thresholds, and server-side transactional enforcement. | **BLOCKED / NOT VERIFIED** |
+| **8. Escalation, SLAs & customer communication** | Operations / Support | `reconcile:purchases -- --report` and `--check` classify 5 attention categories (`reconciliation_overdue`, `retry_budget_exhausted`, `unresolved_without_provider_reference`, `created_not_submitted`, `backlog_exceeds_report_cap`) read-only (`verify:production-readiness`). | Provider support escalation contact, ticket SLA, and dispute-resolution window for stuck or unreferenced top-ups. | Operations/incident owner, Customer Support owner, Finance owner, and release owner approval of on-call roster, response SLAs, escalation thresholds, and non-promissory customer message templates. | **BLOCKED / NOT VERIFIED** |
 
 ## Owner decision checklist — all policy gates unresolved
 
@@ -284,3 +333,132 @@ and attempted resubmission; it also checks evidence-free settlement cannot match
 a lease/reference. These are **hold invariants**, not tests of a manual workflow.
 The broader suite covers existing lease fencing, terminal replay, rollback,
 refund/points exactly once and callback refusal. CI runs synthetic providers only.
+
+---
+
+## Provider-evidence request packet (Reloadly / account owner)
+
+Submit the questions and sandbox trace requests below to Reloadly technical
+support or the authorized Reloadly account owner. Store raw responses, sandbox
+logs, and commercial documents in the restricted evidence store; record only
+versioned document references and SHA-256 digests in repository records. Every
+item below is currently **`BLOCKED / NOT VERIFIED`**.
+
+### Section P-1 — Correlation identifiers & lookup when `transactionId` is missing (Gate 1 / Part 6.4 F-1, F-6)
+
+| Item | Question / required artifact from Reloadly | Current status |
+| --- | --- | --- |
+| **P-1.1 `customIdentifier` contract** | Confirm the exact character set, maximum length, and persistence guarantee for `customIdentifier` on `POST /topups-async` (FlexiData currently sends `^[A-Za-z0-9_-]{1,100}$` purchase `ref`). Confirm that `GET /topups/{transactionId}/status` always echoes `transaction.customIdentifier` verbatim. | **BLOCKED / NOT VERIFIED** |
+| **P-1.2 Server-side deduplication on `customIdentifier`** | Does Reloadly enforce uniqueness or idempotency on `customIdentifier` (rejecting or replaying a second `POST /topups-async` with the same `customIdentifier`), or will a second POST execute a second billable top-up? (FlexiData currently assumes **no** provider deduplication and never retries `POST /topups-async`.) | **BLOCKED / NOT VERIFIED** |
+| **P-1.3 Lookup when `transactionId` is lost** | When `POST /topups-async` times out or drops the connection before FlexiData receives `transactionId`, what API endpoint (e.g., `GET /topups/reports/transactions?customIdentifier=...`) or dashboard search locates the attempt by `customIdentifier` alone? Provide an account-backed sandbox trace demonstrating lookup by `customIdentifier` without `transactionId`. | **BLOCKED / NOT VERIFIED** |
+| **P-1.4 Indexing lag & empty-search semantics** | After `POST /topups-async` is accepted by Reloadly, what is the maximum indexing delay before a transaction appears in history/search or status lookup? After what elapsed window (if ever) does an empty `customIdentifier` search prove Reloadly never received the request? | **BLOCKED / NOT VERIFIED** |
+| **P-1.5 Retention window & duplicate mapping** | How long are `transactionId` and `customIdentifier` retained in Reloadly status and report endpoints, and how does the search API behave if multiple transactions ever share a `customIdentifier`? | **BLOCKED / NOT VERIFIED** |
+
+### Section P-2 — Authoritative transaction finality, callbacks & delayed status behavior (Gate 2 / Part 6.4 F-6, F-7)
+
+| Item | Question / required artifact from Reloadly | Current status |
+| --- | --- | --- |
+| **P-2.1 Status state machine & dual-field agreement** | Confirm the complete set of possible values for top-level `status` and nested `transaction.status` on `GET /topups/{transactionId}/status` (e.g., `SUCCESSFUL`, `FAILED`, `PROCESSING`, `PENDING`, `REFUNDED`). Can top-level `status` and `transaction.status` ever disagree, and what does each combination mean? | **BLOCKED / NOT VERIFIED** |
+| **P-2.2 Maximum finality window** | What is the maximum time an async Ghana data top-up can remain in `PROCESSING` / `PENDING` before reaching a terminal `SUCCESSFUL` or `FAILED` state? (FlexiData's poller currently performs at most 12 reads over ~6 hours.) | **BLOCKED / NOT VERIFIED** |
+| **P-2.3 Post-terminal reversals or late delivery** | Can a transaction reported as `SUCCESSFUL` later transition to `FAILED` / `REFUNDED` (operator clawback), or can a transaction reported as `FAILED` later deliver data to the recipient? If so, within what window and how is it surfaced? | **BLOCKED / NOT VERIFIED** |
+| **P-2.4 Webhook / callback contract (if ever used)** | Does Reloadly provide authenticated webhooks for `/topups-async`? If so, provide the exact signature header, signing algorithm, timestamp/replay window, retry schedule, and payload schema. (Until independently verified and approved, `/api/purchase/callback` refuses all Reloadly and durable rows with HTTP `409`.) | **BLOCKED / NOT VERIFIED** |
+
+### Section P-3 — Duplicate requests, retries, refunds, reversals, partial fulfillment & float (Gate 3 / Part 6.4 F-2, F-3, F-4, F-5)
+
+| Item | Question / required artifact from Reloadly | Current status |
+| --- | --- | --- |
+| **P-3.1 Ghana data catalogue & Telecel coverage** | Provide the current authenticated Reloadly operator catalogue (`operatorId`, supported local denominations, bundle descriptions) for MTN Ghana Data and Telecel Ghana Data. Confirm whether Telecel Ghana **data** bundles are supported in sandbox and production. | **BLOCKED / NOT VERIFIED** |
+| **P-3.2 Account currency, wholesale pricing & float deduction** | Confirm the Reloadly wallet billing currency, FX/discount calculation when `useLocalAmount: true` is sent, when Reloadly debits account float (on `POST /topups-async` acceptance vs. `SUCCESSFUL`), and when/how Reloadly credits float back on `FAILED`. | **BLOCKED / NOT VERIFIED** |
+| **P-3.3 Partial fulfillment & denomination mismatch** | Can a Ghana data top-up ever partially fulfill (delivering a smaller bundle or airtime credit instead of the requested data bundle), and how is that represented in the status response and account ledger? | **BLOCKED / NOT VERIFIED** |
+| **P-3.4 Provider support escalation & dispute SLA (Gate 8)** | Provide the Reloadly support channel, required fields (`transactionId`, `customIdentifier`, UTC timestamp, operator), response SLA, and dispute-resolution window for stuck or unreferenced transactions. | **BLOCKED / NOT VERIFIED** |
+
+---
+
+## Owner decision and sign-off template — leave blank until verified
+
+Keep completed records and underlying provider/financial artifacts in the
+restricted evidence store. Record only immutable reference IDs and SHA-256
+digests here; never commit secrets, raw customer phone numbers, database URLs,
+or unredacted provider payloads to Git. Do **not** fill in synthetic values or
+treat this template as an approval.
+
+```text
+Part 6.5B decision record ID:
+Repository baseline SHA: 3882bd57434aa10f3eb40fda67c133fda9956c8c
+Overall Part 6.5B gate status: BLOCKED / NOT VERIFIED
+Live fulfillment release posture: NO-GO (locked in code and policy)
+
+GATE 1 — PROVIDER CORRELATION IDENTIFIERS & MISSING-ID LOOKUP
+  Status: BLOCKED / NOT VERIFIED
+  Reloadly technical owner / contact reference:
+  FlexiData integration owner (person ID / role):
+  Provider contract / support confirmation reference & SHA-256 digest:
+  Sandbox trace reference (stored ID + customIdentifier + missing-ID lookup):
+  Approved minimum wait window before treating absent customIdentifier lookup as non-received:
+  Signed-off timestamp (UTC):
+
+GATE 2 — AUTHORITATIVE FINALITY, DELAYED OUTCOMES & CALLBACK POLICY
+  Status: BLOCKED / NOT VERIFIED
+  Provider technical owner + FlexiData integration/security owner (person IDs / roles):
+  Approved terminal status matrix reference & SHA-256 digest:
+  Maximum finality window (hours/days) and post-terminal reversal policy:
+  Callback posture (KEEP DISABLED HTTP 409 / SEPARATE AUTH GATE REFERENCE):
+  Signed-off timestamp (UTC):
+
+GATE 3 — DUPLICATE REQUESTS, RETRIES, FLOAT, REFUNDS, REVERSALS & PARTIAL FULFILLMENT
+  Status: BLOCKED / NOT VERIFIED
+  Finance/Treasury owner (person ID / role):
+  Reloadly account owner (person ID / role):
+  Paystack / payment owner for external checkout refunds (person ID / role):
+  Approved Ghana data SKU & denomination schedule reference & SHA-256 digest:
+  Approved Reloadly float currency/accounting & reconciliation rules reference:
+  Wallet refund vs. external Paystack checkout refund authorization matrix reference:
+  Treatment of partial fulfillment and late-success-after-refund:
+  Signed-off timestamp (UTC):
+
+GATE 4 — EVIDENCE OWNERSHIP, ACCESS & RETENTION
+  Status: BLOCKED / NOT VERIFIED
+  Named incident record custodian (person ID / role):
+  Security/Privacy/Data owner (person ID / role):
+  Restricted evidence store location & access-control policy reference:
+  Retention / deletion schedule & digest-only GitHub rule reference:
+  Signed-off timestamp (UTC):
+
+GATE 5 — SAFE STATE TRANSITIONS & PERSISTENT HOLD SEMANTICS
+  Status: BLOCKED / NOT VERIFIED
+  FlexiData engineering/data-integrity owner (person ID / role):
+  Account/release owner (person ID / role):
+  Approved state transition table reference (created, submitted, pending, unknown, review_hold, delivered, failed):
+  Worker-exclusion / lease-fencing specification for review_hold rows:
+  Signed-off timestamp (UTC):
+
+GATE 6 — IDEMPOTENCY & CONCURRENCY FOR FUTURE MANUAL RESOLUTION
+  Status: BLOCKED / NOT VERIFIED
+  FlexiData engineering/database owner (person ID / role):
+  Finance/Treasury owner (person ID / role):
+  Approved resolution-event schema & idempotency-key/fingerprint specification reference:
+  Expected-state/version locking & opposite-decision rejection test plan reference:
+  Signed-off timestamp (UTC):
+
+GATE 7 — REVIEWER & APPROVAL REQUIREMENTS (MAKER-CHECKER)
+  Status: BLOCKED / NOT VERIFIED
+  Account/release owner (person ID / role):
+  Finance/Treasury owner (person ID / role):
+  Security owner (person ID / role):
+  Two-person control matrix (requester != approver, role caps, step-up freshness) reference:
+  Alignment with Admin Phase 3 (Decision 3A) and Phase 5 (Decision 5A) reference:
+  Signed-off timestamp (UTC):
+
+GATE 8 — ESCALATION, SERVICE LEVELS & CUSTOMER COMMUNICATION
+  Status: BLOCKED / NOT VERIFIED
+  Operations/incident owner (primary & backup person IDs / roles):
+  Customer Support owner (person ID / role):
+  Finance escalation contact (person ID / role):
+  Approved SLA thresholds (no-reference, exhausted, stale-created, overdue) & runbook reference:
+  Approved non-promissory customer communication templates reference:
+  Signed-off timestamp (UTC):
+
+OVERALL SIGN-OFF TO BEGIN PART 6.5B TOOLING IMPLEMENTATION (GATES 1–8 ALL REQUIRED)
+  Decision: BLOCKED — DO NOT IMPLEMENT TERMINAL RECOVERY OR UNLOCK LIVE FULFILLMENT
+  Account/release owner signature / reference / timestamp (UTC):
+```

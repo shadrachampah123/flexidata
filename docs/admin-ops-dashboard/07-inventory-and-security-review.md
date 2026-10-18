@@ -3,7 +3,7 @@
 **Date:** 2026-10-18
 **Historical review branch:** `arena/25fe0a5d-flexidata`
 **Historical base:** `2159f13` (PR #63 merge)
-**Current baseline verified for continuation:** `main` / `origin/main` at `e48d45a20bcf0efccb755096cd005d3fa65d9256` (PR #69 merge)
+**Current baseline verified for continuation:** `main` / `origin/main` at `3882bd57434aa10f3eb40fda67c133fda9956c8c` (PR #70 merge)
 **Repository:** `shadrachampah123/flexidata`
 **Reviewer:** Arena Agent — end-to-end admin roadmap completion sweep
 
@@ -37,11 +37,11 @@ The earlier historical review suite was DB-free green at its review baseline. Th
 | **5** | Controlled financial actions — `wallet_adjustments` with maker-checker, per-role caps, reversal via new adjustment | **PARTIAL VIA WITHDRAWALS** (withdrawal path implements maker-checker pattern; generic adjustments not built) | Withdrawal approve (maker) → provider callback (taker) approximates maker-checker; but generic balance-adjustment primitive (`ADJ-<ref>-<seq>`, idempotent claim, `balance ± amount` SQL) is not yet a standalone endpoint. | No endpoint accepts target balance; money moves only via `balance=balance±x` in one TX with idempotency claim + audit; two distinct admins required (today: requester is customer, approver is admin — not admin/admin distinct pair for withdrawals). | `verify:withdrawal-security` F1–F8 cover amount exactness, idempotency, and 409s, but not distinct-admin enforcement for same-role adjustment. | **Blocked:** approve independent `wallet_adjustments` design + owner approval for amount caps; do not generalize withdrawal refund into arbitrary balance setter. |
 | **6** | Emergency & system controls — `system_controls` (pause funding/purchases/network/checkout, maintenance banner) | **NOT STARTED** | No `system_controls` table; no kill-switch UI beyond `WITHDRAWALS_ENABLED`. Existing routes have no additive guard call. | Fail-safe defaults (unreadable control → normal reads, blocked money moves), audited toggle with reason + auto-expiry. | No test suite. | Needs owner-approved control keys and consumer injection points (`createDepositRequest`, `submitDataBundleOrder`, checkout). |
 | **6.4–6.9** | Production readiness, recovery guidance (6.5A), ambiguous-purchase hold gates (6.5B), restore-plan preflight (6.6), monitoring readiness (6.7), provider qualification (6.8), release decision (6.9) | **BLOCKED / NOT ACTIVATED** (repository-level work merged, operational gates remain) | 6.6 DB-free preflight (`verify:restore-plan-preflight`, 16/16), 6.5A/B recovery guidance docs, 6.4 `verify:production-readiness` (8/8). Provider (`DATA_API_PROVIDER=mock` in prod → 503) and Reloadly (`RELOADLY_MODE=sandbox` only) locks intact. | Operational prerequisites (backup artifact+checksum, isolation proof, least-privilege RO principal, scheduler/cadence, alert transport/dest, owner assignments, separate cleanup authorization, independent review) require explicit owner approvals — none recorded in repo. | `verify:restore-plan-preflight` 16/16, `verify:production-readiness` 8/8, `verify:reloadly` 30/30, `verify:health-recovery` 14/14 all DB-free green. | All six production gates remain unchecked in `part-6.5b-ambiguous-purchase-recovery.md`, `part-6.6-restore-rehearsal-readiness.md`, `part-6.7-monitoring-readiness.md`. Do not run restore/cleanup/monitoring until approvals evidenced. |
-| **DepSec** | GHSA-vfj7-8cjw-p6xm / CVE-2026-93687 | **DOCUMENTED, NOT FIXED** | `flexiData/docs/security/dependency-audit-cve-2026-93687-2026-10-18.md` records 5 high advisories (dev-only `npm audit` clean, full audit exits 1). | A compatible published fix + smallest safe edge update + full audit pass. | `npm audit --omit=dev` 0 vulns, full audit 5 highs at the current e48d45a checkpoint. | Wait for reviewed compatible fix; do not downgrade Next.js, suppress, or force upgrade. |
+| **DepSec** | GHSA-vfj7-8cjw-p6xm / CVE-2026-93687 | **DOCUMENTED, NOT FIXED** | `flexiData/docs/security/dependency-audit-cve-2026-93687-2026-10-18.md` records 5 high advisories (dev-only `npm audit` clean, full audit exits 1). | A compatible published fix + smallest safe edge update + full audit pass. | `npm audit --omit=dev` 0 vulns, full audit 5 highs at the current 3882bd5 checkpoint. | Wait for reviewed compatible fix; do not downgrade Next.js, suppress, or force upgrade. |
 
 ---
 
-## 3. Verification evidence (DB-free, rechecked at main e48d45a on 2026-10-18)
+## 3. Verification evidence (DB-free, rechecked at main 3882bd5 on 2026-10-18)
 
 | Suite | Command | Result | Scope |
 |---|---|---|---|
@@ -149,7 +149,7 @@ The earlier historical review suite was DB-free green at its review baseline. Th
 
 ## 6. Roadmap update
 
-`docs/roadmap.md` now records the current `e48d45a20bcf0efccb755096cd005d3fa65d9256` / PR #69 checkpoint, the refreshed dependency audit, and the Parts 6.5B–6.9 evidence matrix. It does not claim unverified live integration. The admin-specific evidence remains in this inventory and the enforced verification harnesses + CI workflow.
+`docs/roadmap.md` now records the current `3882bd57434aa10f3eb40fda67c133fda9956c8c` / PR #70 checkpoint, the refreshed dependency audit, and the Parts 6.5B–6.9 evidence matrix. It does not claim unverified live integration. The admin-specific evidence remains in this inventory and the enforced verification harnesses + CI workflow.
 
 **Roadmap evidence at this baseline:** `docs/roadmap.md` should be read together with this inventory (`07-...`) and the four repaired harnesses. No admin phase is marked complete without DB-free evidence; DB-required evidence is explicitly labelled as not-run-here. The CI workflow was extended to enforce DB-free admin invariants on every PR/push to `main`.
 
@@ -157,7 +157,7 @@ The earlier historical review suite was DB-free green at its review baseline. Th
 
 ## 7. Delivery — PRs and merge status
 
-The stale-harness repair and safe Phase 3–6 boundary work described here is present in current `main` through PR #67; the evidence refresh and roadmap reconciliation are merged through PR #69 at `e48d45a20bcf0efccb755096cd005d3fa65d9256`. This follow-on CI runner hygiene update includes no application code, schema, dependency upgrade, production migration, live provider call, or monitoring activation.
+The stale-harness repair and safe Phase 3–6 boundary work described here is present in current `main` through PR #67; the evidence refresh, roadmap reconciliation, and CI runner hygiene updates are merged through PR #70 at `3882bd57434aa10f3eb40fda67c133fda9956c8c`. This follow-on Part 6.5B documentation update includes no application code, schema, dependency upgrade, production migration, live provider call, or monitoring activation.
 
 Per strict safety boundaries: no production DB writes, no live provider/payment calls, no restore rehearsals, no fail-closed weakening, no CVE suppression.
 

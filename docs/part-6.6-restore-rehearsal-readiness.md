@@ -9,7 +9,7 @@ part of this readiness work.
 ## Evidence rechecked against current `main`
 
 The repository baseline for this review is `main` at
-`e48d45a20bcf0efccb755096cd005d3fa65d9256` (PR #69 merge).
+`3882bd57434aa10f3eb40fda67c133fda9956c8c` (PR #70 merge).
 
 **Evidence actually present in the repository:**
 
