@@ -381,14 +381,21 @@ Summarized from the sections above:
 
 ### Changes in this release (separate commit, reviewable independently)
 
+Exact lockfile diff against `main` (`flexiData/package.json` and `flexiData/package-lock.json` only):
+
 | Package | Before | After | Reason |
 | --- | --- | --- | --- |
-| `next` | `16.3.3` | `16.4.2` | Patches the critical advisories (`next` 16.0.0–16.3.7). Non-major. The advisories were not exploitable through features this app uses (no `ImageResponse`, `next/image`, draft mode or `use cache`), but the patched release is still the correct baseline. |
-| `eslint-config-next` | `16.3.3` | `16.4.2` | Matches the Next version. Development only. |
-| `brace-expansion` (transitive) | `1.1.18` / `5.0.9` | `1.1.21` / `5.0.12` | Patch-level fixes produced by `npm audit fix` (lockfile only). |
-| `source-map-js` (transitive) | `1.2.1` | `1.2.2` | Patch-level fix from `npm audit fix` (lockfile only). |
+| `next` (direct, exact pin) | `16.3.3` | `16.4.2` | Patches the critical advisories (`next` 16.0.0–16.3.7). Non-major. The advisories were not reachable through features this app uses (no `ImageResponse`, `next/image`, draft mode or `use cache`), but the patched release is the correct baseline. |
+| `eslint-config-next` (direct devDependency, exact pin) | `16.3.3` | `16.4.2` | Matches the Next version. Development only. |
+| `@next/env`, `@next/swc-*` (8 platform binaries), `@next/eslint-plugin-next` | `16.3.3` | `16.4.2` | Required companions of `next` / `eslint-config-next`, resolved by npm. |
+| `sharp` (optional, image processing used by Next) | `0.35.4` | `0.35.5` | Patched release for the high advisory (librsvg, CVE-2026-96889). Resolved as a `next` dependency. |
+| `@img/sharp-*` (16 platform packages), `@img/sharp-libvips-*` (13 platform packages) | `0.35.4` / `1.3.3` | `0.35.5` / `1.3.4` | Platform binaries that must match `sharp`. Optional; not used by any route in this app. |
+| `brace-expansion` (transitive, two copies) | `1.1.18` / `5.0.9` | `1.1.21` / `5.0.12` | Patch-level fixes (quadratic-time and stack-exhaustion DoS advisories). |
+| `source-map-js` (transitive) | `1.2.1` | `1.2.2` | Patch-level fix (event-loop DoS advisory). |
 
-`sharp` leaves the audit as a consequence of the Next upgrade.
+No package was added or removed, and no major version changed. Every change
+above is a minor or patch update within the same major line (Next 16.3 → 16.4,
+sharp 0.35.4 → 0.35.5, and so on).
 
 ### After (`npm audit`)
 
@@ -402,7 +409,11 @@ only repository-controlled glob patterns, not user input.
 **Accepted residual risk:** re-check monthly and upgrade when upstream publishes
 a fix. Do not force-override `micromatch`/`fast-glob` to unpatched forks.
 
-Verification of the dependency change is listed in "Verification evidence".
+Verification of the dependency change: the full CI mirror (lint, typecheck,
+production build, all DB-free verifiers, both real-PostgreSQL suites) passed on
+the exact lockfile, and a production-mode smoke run of the built app returned
+`ok`, current schema probes, pages rendering, and the Reloadly purchase path
+still refused with HTTP 503 before authentication.
 
 ---
 
