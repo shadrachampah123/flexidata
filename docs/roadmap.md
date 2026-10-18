@@ -1,7 +1,7 @@
 # FlexiData release roadmap
 
 **Last updated:** 2026-10-18  
-**Current repository baseline:** PR #57 merged to `main` at `ad543d6465f64aa454030525f8595650b3aa5ea4`. All three post-merge CI jobs passed in [run 39095328003](https://github.com/shadrachampah123/flexidata/actions/runs/39095328003); GitHub reports the Vercel Production deployment successful at [deployment D3p9gDqZ7Msb213UB7YqVnbNmx1J](https://vercel.com/shadrachampah123s-projects/flexidata/D3p9gDqZ7Msb213UB7YqVnbNmx1J). This is deployment status only, not a fresh application/production health or data audit. Earlier PR #53, #52 and #51 merge/deployment details are historical checkpoint facts; do not treat them as current health evidence.
+**Repository evidence checkpoint for this update:** PR #58 merged to `main` at `f10ec9ea691194a7b7ca75ab943eff2874dc4778`. All three post-merge CI jobs passed in [run 39095537201](https://github.com/shadrachampah123/flexidata/actions/runs/39095537201); GitHub reports the Vercel Production deployment successful at [deployment BXS61HE2L5CXbXhTe3yQHv7s4tpQ](https://vercel.com/shadrachampah123s-projects/flexidata/BXS61HE2L5CXbXhTe3yQHv7s4tpQ). This is deployment status only, not a fresh application/production health or data audit. Earlier PR #53–57 merge/deployment details are historical checkpoint facts; do not treat them as current health evidence.
 
 ## Release summary
 
@@ -15,7 +15,7 @@ FlexiData has completed the current code/documentation milestones through Part 6
 | 6.5A — recovery guidance | Merged in PR #51 and reported deployed to Production; post-merge CI passed. | Health/readiness behavior and recovery guidance are verified against the deployed revision and operational runbook. | No additional code gate is currently recorded. Do not treat a green health endpoint as proof of full operational readiness. |
 | 6.5B — ambiguous purchase recovery | Merged in PR #51 and reported deployed to Production as hold-only safeguards. | Evidence requirements and policy are approved before any terminal, money-changing recovery operation is implemented. | Provider correlation/finality and callback semantics, float/refund/reversal policy, evidence ownership/retention, safe transitions/idempotency, dual review and escalation remain unresolved. See the [owner decision checklist](part-6.5b-ambiguous-purchase-recovery.md). |
 | 6.6 — restore-plan preflight and non-production rehearsal | The original `18daf03` source was not recovered. A fresh DB-free metadata-only replacement is merged in PR #57 at `ad543d6465f64aa454030525f8595650b3aa5ea4`; it is not claimed to be the original. No rehearsal has been run. | The replacement validates declared metadata only and unconditionally refuses `--apply`; it is not execution authority. A real non-production rehearsal remains a separate blocked owner-approved task. | Obtain the exact non-production pair, backup artifact and independently established checksum, isolation proof, tool/access/cost approval, abort criteria, separate cleanup authorization and verification approvals. See [Part 6.6 readiness checklist](part-6.6-restore-rehearsal-readiness.md). |
-| 6.7 — monitoring and operational ownership | Adapter exists in unpublished local commit `40710d7`; disabled by default and not included in `main`. | Named owner, least-privilege read-only runtime/database access, approved alert destination and transport, documented response procedure, and verified delivery path. | Confirm ownership and permissions first. Do not activate monitoring until the prerequisites are explicitly approved and verified. |
+| 6.7 — monitoring and operational ownership | Repository-only readiness analysis is documented in [Part 6.7](part-6.7-monitoring-readiness.md). `main` has aggregate purchase summaries and an operator CLI, but no monitoring adapter, scheduler, destination, or assigned on-call owner. Monitoring remains disabled; the cited `40710d7` is unpublished and not available for this review. | Named owner, least-privilege read-only database access, approved alert destination/content, dedupe/rate limits, response procedure, and synthetic delivery/failure tests. | Operations/release owners must assign primary/backup and approve the read-only/alert design. Do not run `--poll` as monitoring or activate a scheduler until every gate is evidenced and separately approved. |
 | 6.8 — provider qualification and fulfillment readiness | Incomplete. Reloadly live fulfillment remains locked; purchases remain fail-closed. | Provider-specific qualification evidence, safe sandbox tests, correlation/finality behavior and failure/reconciliation handling are reviewed. | Complete qualification without live fulfillment or real customer/payment actions. Synthetic-provider success is not live-provider qualification. |
 | 6.9 — release decision | Pending; no general live-fulfillment approval is implied by prior merges. | A recorded go/no-go decision reviews all evidence, unresolved risks, owners, rollback/incident readiness and the precise scope being enabled. | Requires restore and operational evidence plus provider and policy gates. Live fulfillment needs a separate explicit owner decision. |
 
@@ -47,18 +47,19 @@ The open gates are provider correlation/lookup guarantees; authoritative finalit
 
 Until these decisions are approved, keep the hold-only behavior. No override endpoint, UI, direct SQL recovery path, migration, forced purchase state, or wallet/withdrawal behavior change should be introduced as a shortcut.
 
-### 4. Part 6.7 — monitoring and operational ownership
+### 4. Part 6.7 — read-only monitoring readiness analysis; activation blocked
 
-**Current artifact:** disabled-by-default, read-only monitoring adapter in unpublished local commit `40710d7`; a documentation correction exists in unpublished commit `2dd996f`. Neither commit was included in PR #51 or PR #52.
+A repository-only assessment is recorded in [Part 6.7 monitoring readiness](part-6.7-monitoring-readiness.md). It found that `reportSummary()` and `reconcileAttention()` provide aggregate purchase attention data, while `--report` exposes up to 500 row references and `--check` returns an attention exit code. There is no alert transport, scheduler, dedicated read-only database role, owner roster or delivery test in current `main`. No production database connection or operational `--report`/`--check` run was made for the assessment; CI tests use disposable PostgreSQL and synthetic data.
 
-Before publication or activation:
+The operator `--poll` mode is not a monitoring-only check: it claims rows, changes lease/poll metadata and performs Reloadly sandbox status reads. Keep it out of any alert schedule. The reported unpublished `40710d7` adapter was not recovered or reviewed and is not included; `2dd996f` and unrelated work also remain separate.
 
-- Review the local diff and tests against current `main`; verify no provider polling, fulfillment, settlement, purchase mutation, or other write path has been introduced.
-- Name a primary owner and backup/escalation contact, and document response expectations.
-- Approve least-privilege, read-only runtime/database access and verify the adapter cannot mutate purchase, wallet, withdrawal, provider or billing state.
-- Approve the alert destination, transport, message contents and failure behavior; avoid exposing secrets or unnecessary customer data.
-- Verify deduplication, rate limiting, actionable alert criteria, health of the alert path and a documented runbook using synthetic events only.
-- Keep activation as a separate, explicit decision after review and successful verification. A merged adapter does not mean monitoring is active.
+**Next actions:**
+
+- Assign a primary/backup incident owner, response targets and escalation path.
+- Approve a dedicated least-privilege read-only database principal and prove it cannot write; prefer explicit read-only transactions in any future adapter.
+- Approve aggregate-only alert content, destination, transport, privacy/retention, dedupe/rate limits and failure behavior.
+- Verify every signal, repeated event, stale data, outage, redaction and delivery failure against synthetic summaries and an isolated fake sink only.
+- Keep monitoring disabled until a separate, explicit activation decision is approved. A code merge, test, deployment or checklist does not activate monitoring.
 
 ### 5. Part 6.8 — provider qualification and fulfillment readiness
 
@@ -121,3 +122,4 @@ Do not assume these short SHAs identify the current branch head or that local te
 - [Part 6.5 — verification record](part-6.5-verification.md)
 - [Part 6.5B — ambiguous-purchase recovery](part-6.5b-ambiguous-purchase-recovery.md)
 - [Part 6.6 — restore-rehearsal readiness](part-6.6-restore-rehearsal-readiness.md)
+- [Part 6.7 — monitoring readiness](part-6.7-monitoring-readiness.md)
