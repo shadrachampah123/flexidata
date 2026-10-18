@@ -42,7 +42,8 @@
     "reconcile:purchases": "tsx --conditions=react-server scripts/reconcile-purchases.ts",
     "migrate:purchase-attempts": "tsx scripts/apply-purchase-attempts-migration.ts",
     "verify:purchase-attempts-migration": "tsx scripts/verify-purchase-attempts-migration.ts",
-    "verify:production-readiness": "tsx --conditions=react-server scripts/verify-production-readiness.ts"
+    "verify:production-readiness": "tsx --conditions=react-server scripts/verify-production-readiness.ts",
+    "verify:health-recovery": "tsx scripts/verify-health-recovery.ts"
   },
   "dependencies": {
     "@fontsource-variable/manrope": "^5.3.0",

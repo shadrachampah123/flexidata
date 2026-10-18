@@ -92,6 +92,31 @@ async function main() {
     await restarted.submit(order("TIMEOUT"), async () => { throw new Error("must not POST again"); });
     assert.equal((await restarted.report()).find(r => r.ref === "TIMEOUT").provider_reference, null);
     pass("timeout after acceptance: durable unknown, no refund, no POST retry, visible without ID");
+    // 6.5B: absence of evidence is not a terminal outcome.
+    await database.query("UPDATE purchase_attempts SET provider='reloadly' WHERE ref='TIMEOUT'");
+    const heldBefore = (await database.query(`SELECT row_to_json(a) AS attempt,
+      row_to_json(t) AS ledger FROM purchase_attempts a JOIN transactions t USING(ref)
+      WHERE a.ref='TIMEOUT'`)).rows[0];
+    const pointsBeforeHold = (await database.query("SELECT points FROM wallets WHERE id=1")).rows[0].points;
+    let unsafeCalls = 0;
+    await Promise.all(Array.from({ length: 8 }, () => restarted.reconcile(20, async () => {
+      unsafeCalls++; throw new Error("No reference means no lookup");
+    })));
+    await Promise.all(Array.from({ length: 8 }, () => restarted.submit(order("TIMEOUT"), async () => {
+      unsafeCalls++; throw new Error("No resubmission allowed");
+    })));
+    for (const state of ["delivered", "failed"] as const) {
+      assert.equal(await restarted.settle("TIMEOUT", "invented-reference", state,
+        "00000000-0000-0000-0000-000000000099"), false);
+    }
+    assert.equal(unsafeCalls, 0);
+    assert.deepEqual((await database.query(`SELECT row_to_json(a) AS attempt,
+      row_to_json(t) AS ledger FROM purchase_attempts a JOIN transactions t USING(ref)
+      WHERE a.ref='TIMEOUT'`)).rows[0], heldBefore);
+    assert.equal(await balance(), 980);
+    assert.equal((await database.query("SELECT points FROM wallets WHERE id=1")).rows[0].points, pointsBeforeHold);
+    pass("6.5B hold invariant: concurrent no-reference review cannot submit, settle, refund, award points or rewrite original outcomes");
+    // Synthetic fixture only: not an operator recovery instruction.
     await database.query("UPDATE purchase_attempts SET provider='reloadly',provider_reference='102' WHERE ref='TIMEOUT'");
     await restarted.reconcile(20, async (_, id) => result(id, "delivered"));
     assert.equal(await balance(), 980);

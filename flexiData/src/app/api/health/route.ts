@@ -1,3 +1,4 @@
+import { SCHEMA_RECOVERY, AUDIT_RECOVERY, PURCHASE_RECOVERY } from "@/lib/health-recovery";
 import { sql } from "drizzle-orm";
 import { db } from "@/db";
 import { hasAuthSecret } from "@/lib/auth";
@@ -107,14 +108,14 @@ export async function GET() {
     checkoutSchema: {
       status: checkout.status,
       missing: checkout.missing,
-      ...(checkout.hint ? { hint: checkout.hint } : {}),
+      ...(checkout.hint ? { hint: SCHEMA_RECOVERY } : {}),
     },
     signupSchema: {
       status: signup.status,
       blocked: signupBlocked,
       missing: signup.missing,
       requiredMissing: signup.requiredMissing,
-      ...(signup.hint ? { hint: signup.hint } : {}),
+      ...(signup.hint ? { hint: SCHEMA_RECOVERY } : {}),
     },
     // Withdrawals have no runtime fallback: without `withdrawal_requests` the
     // route cannot record a request at all. Reported separately for the same
@@ -125,7 +126,7 @@ export async function GET() {
       blocked: withdrawal.status === "missing",
       table: withdrawal.table,
       missing: withdrawal.missing,
-      ...(withdrawal.hint ? { hint: withdrawal.hint } : {}),
+      ...(withdrawal.hint ? { hint: SCHEMA_RECOVERY } : {}),
     },
     // The admin withdrawal actions can fail on an object NO other probe
     // covers: the audit action CHECK predating `approve_withdrawal` /
@@ -136,7 +137,7 @@ export async function GET() {
       blocked: adminAudit.status === "legacy" || adminAudit.status === "missing",
       table: adminAudit.table,
       missing: adminAudit.missing,
-      ...(adminAudit.hint ? { hint: adminAudit.hint } : {}),
+      ...(adminAudit.hint ? { hint: AUDIT_RECOVERY } : {}),
     },
     // Durable purchase claims (migration 0011). Reported, never fatal to the
     // health response: a missing table makes data purchases fail closed.
@@ -145,7 +146,7 @@ export async function GET() {
       blocked: purchaseAttempts.status !== "current",
       table: purchaseAttempts.table,
       missing: purchaseAttempts.missing,
-      ...(purchaseAttempts.hint ? { hint: purchaseAttempts.hint } : {}),
+      ...(purchaseAttempts.hint ? { hint: PURCHASE_RECOVERY } : {}),
     },
     auth: {
       // The two operational causes of the orphaned-account incident: a missing
@@ -157,7 +158,7 @@ export async function GET() {
         blocked: authBlocked,
         missing: auth.missing,
         requiredMissing: auth.requiredMissing,
-        ...(auth.hint ? { hint: auth.hint } : {}),
+        ...(auth.hint ? { hint: SCHEMA_RECOVERY } : {}),
       },
       // Safe to expose: it names only the active transport and never leaks
       // a key, sender address, relay URL, or reset token.
@@ -200,7 +201,7 @@ export async function GET() {
       providerFloatTable: schema.providerFloatTable,
       missing: schema.missing,
       fallbacks: schema.fallbacks,
-      ...(degraded ? { hint: schema.hint } : {}),
+      ...(degraded ? { hint: SCHEMA_RECOVERY } : {}),
       ...(schema.status === "unknown"
         ? { note: "Could not read the catalog; gateway columns are assumed present." }
         : {}),
@@ -213,39 +214,20 @@ export async function GET() {
       : {}),
     ...(signupBlocked
       ? {
-          signupWarning:
-            "Sign-up is blocked: the database is missing required columns. Run `npx drizzle-kit push` against it.",
+          signupWarning: "Sign-up is blocked: required database columns are missing. " + SCHEMA_RECOVERY,
         }
       : {}),
     ...(withdrawal.status === "missing" || withdrawal.status === "drifted"
-      ? {
-          withdrawalWarning:
-            "Withdrawals are blocked: the withdrawal schema is not in this database. " +
-            "Run `npx drizzle-kit push` against it (drizzle/0005_lively_hiroim.sql).",
-        }
+      ? { withdrawalWarning: "Withdrawals are blocked: the withdrawal schema is not ready. " + SCHEMA_RECOVERY }
       : {}),
     ...(adminAudit.status === "legacy" || adminAudit.status === "missing"
-      ? {
-          adminAuditWarning:
-            "Admin approve/reject of withdrawals is blocked: the audit action constraint predates the " +
-            "withdrawal actions and every admin withdrawal action rolls back (SQLSTATE 23514). Apply " +
-            "drizzle/0007 with `npm run migrate:admin-audit-actions` (targeted, non-destructive) — " +
-            "prefer it over `npx drizzle-kit push`, which diffs the whole schema and would also request " +
-            "removal of any tables that exist in the database but not in src/db/schema.ts.",
-        }
+      ? { adminAuditWarning: "Admin withdrawal actions are blocked: audit schema is not ready. " + AUDIT_RECOVERY }
       : {}),
     ...(purchaseAttempts.status !== "current"
-      ? {
-          purchaseAttemptsWarning:
-            "Durable data-purchase tracking is not ready (purchase_attempts is " +
-            `${purchaseAttempts.status}). Data purchases fail closed until migration 0011 is applied and verified.`,
-        }
+      ? { purchaseAttemptsWarning: `Durable data-purchase tracking is not ready (purchase_attempts is ${purchaseAttempts.status}). ` + PURCHASE_RECOVERY }
       : {}),
     ...(authBlocked
-      ? {
-          authWarning:
-            "Sessions/password resets are blocked: the database is missing required columns. Run `npx drizzle-kit push` against it.",
-        }
+      ? { authWarning: "Sessions/password resets are blocked: required database columns are missing. " + SCHEMA_RECOVERY }
       : {}),
     ...(!secretConfigured
       ? {

@@ -1,5 +1,7 @@
 # FlexiData
 
+Release status and remaining gates: [roadmap](docs/roadmap.md).
+
 A sleek, mobile-first **data bundle & airtime vending app** for Ghana — built around the
 same feature set as Ghana's leading data-selling platforms (DataPlug, RemaData,
 MyDataBundle, GetDataGH, DataSika): real user accounts, a funded wallet, instant MTN &

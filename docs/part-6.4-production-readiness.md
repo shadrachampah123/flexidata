@@ -1,5 +1,11 @@
 # Part 6.4 — Production verification and controlled readiness
 
+> **6.5 session status:** Part 6.4 implementation is merged. The owner reports
+> production migration application and verification completed; this session has
+> not independently verified that report and performed no production access.
+> Unchecked operational checks and external prerequisites below remain open.
+> See [roadmap](roadmap.md) and the [blocked manual-recovery decision](part-6.5b-ambiguous-purchase-recovery.md).
+
 **Status: engineering readiness only. Live Reloadly fulfillment remains LOCKED.**
 This document does not grant activation. It records what is verified, what is
 not, the procedures an operator must follow, and the go/no-go gates that must
