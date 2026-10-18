@@ -43,6 +43,8 @@
     "migrate:purchase-attempts": "tsx scripts/apply-purchase-attempts-migration.ts",
     "verify:purchase-attempts-migration": "tsx scripts/verify-purchase-attempts-migration.ts",
     "verify:production-readiness": "tsx --conditions=react-server scripts/verify-production-readiness.ts",
+    "preflight:restore-plan": "tsx scripts/restore-plan-preflight.ts",
+    "verify:restore-plan-preflight": "tsx scripts/verify-restore-plan-preflight.ts",
     "verify:health-recovery": "tsx scripts/verify-health-recovery.ts"
   },
   "dependencies": {
