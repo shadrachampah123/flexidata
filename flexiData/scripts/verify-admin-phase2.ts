@@ -538,7 +538,10 @@ async function main(): Promise<void> {
         statusRoute(
           new Request(`http://localhost/api/admin/users/${id}/status`, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              origin: "http://localhost",
+            },
             body: JSON.stringify(body),
           }),
           { params: Promise.resolve({ id: String(id) }) },
@@ -567,7 +570,10 @@ async function main(): Promise<void> {
       const badId = await statusRoute(
         new Request("http://localhost/api/admin/users/0/status", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            origin: "http://localhost",
+          },
           body: JSON.stringify({ action: "suspend", confirm: true }),
         }),
         { params: Promise.resolve({ id: "0" }) },

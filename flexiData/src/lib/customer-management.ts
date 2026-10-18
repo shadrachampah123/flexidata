@@ -3,6 +3,7 @@ import "server-only";
 import { and, eq, ne } from "drizzle-orm";
 import { db } from "@/db";
 import { adminAuditLogs, users } from "@/db/schema";
+import { adminAuditValues } from "@/lib/admin/audit-writer";
 import { isSchemaIncompatibleError } from "@/lib/schema-compat";
 
 /**
@@ -82,12 +83,14 @@ export async function setCustomerStatus(input: {
         .returning({ id: users.id });
 
       if (updated.length > 0) {
-        await tx.insert(adminAuditLogs).values({
-          adminUserId: input.adminUserId,
-          targetUserId: input.targetUserId,
-          action: input.action,
-          reason,
-        });
+        await tx.insert(adminAuditLogs).values(
+          adminAuditValues({
+            adminUserId: input.adminUserId,
+            targetUserId: input.targetUserId,
+            action: input.action,
+            reason,
+          }),
+        );
       }
 
       return { ok: true as const, accountStatus: nextStatus, changed: updated.length > 0 };

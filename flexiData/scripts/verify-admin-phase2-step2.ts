@@ -556,9 +556,12 @@ async function main(): Promise<void> {
     ["fulfilledAt", "fulfillmentStatus", "orderStatus", "updatedAt"],
   );
   check(
-    "the checkout update is conditional on payment capture and a supportable status",
+    "the checkout update is conditional on payment capture and the complete race-safe support predicate",
     actions.includes(`eq(checkoutOrders.paymentStatus, "successful")`) &&
-      actions.includes("inArray(checkoutOrders.orderStatus, [...SUPPORTABLE_ORDER_STATUSES])"),
+      actions.includes(`eq(checkoutOrders.orderStatus, "fulfillment_failed")`) &&
+      actions.includes(`inArray(checkoutOrders.orderStatus, ["paid", "fulfilling"])`) &&
+      actions.includes("lt(checkoutOrders.updatedAt, supportCutoff)") &&
+      actions.includes("stillSupportable"),
   );
   // Scan CODE, not prose: the module comments about what it must never do use
   // the forbidden words deliberately, so strip comments before the scan.
@@ -836,7 +839,10 @@ async function main(): Promise<void> {
         supportRoute(
           new Request(`http://localhost/api/admin/orders/${encodeURIComponent(ref)}/support`, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              origin: "http://localhost",
+            },
             body: JSON.stringify(body),
           }),
           { params: Promise.resolve({ ref }) },
@@ -915,7 +921,10 @@ async function main(): Promise<void> {
       const malformed = await supportRoute(
         new Request("http://localhost/api/admin/orders/CO%27;%20drop/support", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            origin: "http://localhost",
+          },
           body: JSON.stringify({ action: "delivery_resolved", orderRef: "CO'; drop", confirm: true }),
         }),
         { params: Promise.resolve({ ref: "CO'; drop" }) },

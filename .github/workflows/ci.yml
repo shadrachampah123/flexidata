@@ -85,6 +85,9 @@ jobs:
       - name: "Verify admin investigation & accountability (DB-free: diagnosis engine, source guarantees)"
         run: npm run verify:admin-ops
 
+      - name: "Verify safe admin Phase 3-6 boundaries (DB-free: request, audit, support race, kill switch)"
+        run: npm run verify:admin-phase3-6
+
       - name: Verify withdrawals remain disabled (DB-free phase)
         run: npm run verify:withdrawals-disabled
 

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireAdminApi } from "@/lib/admin/auth";
+import { rejectCrossSiteAdminWrite } from "@/lib/admin/request-policy";
+import { adminAuditValues } from "@/lib/admin/audit-writer";
 import { db } from "@/db";
 import { wallets, withdrawalRequests, adminAuditLogs, transactions } from "@/db/schema";
 import { and, eq, sql } from "drizzle-orm";
@@ -58,6 +60,8 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
     // of the identical 404 that keeps the admin area undiscoverable.
     const gate = await requireAdminApi();
     if (!gate.ok) return gate.response;
+    const crossSite = rejectCrossSiteAdminWrite(req);
+    if (crossSite) return crossSite;
     const { admin } = gate.context;
     actor = `admin=${admin.userId}`;
     const { id } = await context.params;
@@ -281,12 +285,14 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
         // duplicate `approve_withdrawal` for this ref impossible at the
         // database level, even if the status guard above were ever bypassed.
         // If anything below fails, the claim rolls back with the rest.
-        await tx.insert(adminAuditLogs).values({
-          adminUserId: admin.userId,
-          targetUserId: withdrawal.userId,
-          action: "approve_withdrawal",
-          targetRef: withdrawal.ref,
-        });
+        await tx.insert(adminAuditLogs).values(
+          adminAuditValues({
+            adminUserId: admin.userId,
+            targetUserId: withdrawal.userId,
+            action: "approve_withdrawal",
+            targetRef: withdrawal.ref,
+          }),
+        );
 
         // Record in the withdrawal audit trail
         await recordWithdrawalEvent(tx, {
@@ -395,13 +401,15 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
         }
 
         // 4. CLAIM the rejection
-        await tx.insert(adminAuditLogs).values({
-          adminUserId: admin.userId,
-          targetUserId: withdrawal.userId,
-          action: "reject_withdrawal",
-          reason: reason,
-          targetRef: withdrawal.ref,
-        });
+        await tx.insert(adminAuditLogs).values(
+          adminAuditValues({
+            adminUserId: admin.userId,
+            targetUserId: withdrawal.userId,
+            action: "reject_withdrawal",
+            reason,
+            targetRef: withdrawal.ref,
+          }),
+        );
 
         // Record in withdrawal audit trail
         await recordWithdrawalEvent(tx, {
@@ -518,13 +526,15 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
         }
 
         // CLAIM: admin audit log (refund_withdrawal action)
-        await tx.insert(adminAuditLogs).values({
-          adminUserId: admin.userId,
-          targetUserId: withdrawal.userId,
-          action: "reject_withdrawal", // Reuse existing audit action type
-          reason: reason || "Admin-initiated refund from processing state",
-          targetRef: withdrawal.ref,
-        });
+        await tx.insert(adminAuditLogs).values(
+          adminAuditValues({
+            adminUserId: admin.userId,
+            targetUserId: withdrawal.userId,
+            action: "reject_withdrawal", // Reuse the shipped action vocabulary.
+            reason: reason || "Admin-initiated refund from processing state",
+            targetRef: withdrawal.ref,
+          }),
+        );
 
         // Record in withdrawal audit trail
         await recordWithdrawalEvent(tx, {

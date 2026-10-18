@@ -2011,7 +2011,10 @@ async function main(): Promise<void> {
         supportRoute(
           new Request("http://localhost/api/admin/orders/CO-REVIEW-1/support", {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              origin: "http://localhost",
+            },
             body: JSON.stringify({ action: "delivery_resolved", orderRef: "CO-REVIEW-1", confirm: true, reason: "Confirmed with the provider" }),
           }),
           { params: Promise.resolve({ ref: "CO-REVIEW-1" }) },

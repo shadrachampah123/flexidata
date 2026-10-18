@@ -1,8 +1,9 @@
 import "server-only";
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, lt, or } from "drizzle-orm";
 import { db } from "@/db";
 import { adminAuditLogs, checkoutOrders } from "@/db/schema";
+import { adminAuditValues } from "@/lib/admin/audit-writer";
 import { isSchemaIncompatibleError } from "@/lib/schema-compat";
 
 /**
@@ -234,6 +235,19 @@ export async function applyOrderSupportAction(
         // only fire on an order that is STILL paid-but-unfulfilled in a
         // supportable state. Only the three delivery-status columns are set —
         // never amount / payment_status / paystack_* / provider_* columns.
+        // Repeat the complete eligibility rule in SQL. The pre-read above is
+        // for a useful refusal; this predicate is the race-safe authority. In
+        // particular, a row that changes from `fulfillment_failed` to a fresh
+        // `paid`/`fulfilling` state between the read and UPDATE must not be
+        // marked delivered merely because its status is in the broad set.
+        const supportCutoff = new Date(now.getTime() - SUPPORT_STUCK_AFTER_MS);
+        const stillSupportable = or(
+          eq(checkoutOrders.orderStatus, "fulfillment_failed"),
+          and(
+            inArray(checkoutOrders.orderStatus, ["paid", "fulfilling"]),
+            lt(checkoutOrders.updatedAt, supportCutoff),
+          ),
+        );
         const updated = await tx
           .update(checkoutOrders)
           .set({
@@ -246,19 +260,21 @@ export async function applyOrderSupportAction(
             and(
               eq(checkoutOrders.ref, orderRef),
               eq(checkoutOrders.paymentStatus, "successful"),
-              inArray(checkoutOrders.orderStatus, [...SUPPORTABLE_ORDER_STATUSES]),
+              stillSupportable,
             ),
           )
           .returning({ id: checkoutOrders.id });
 
         if (updated.length > 0) {
-          await tx.insert(adminAuditLogs).values({
-            adminUserId: input.adminUserId,
-            targetUserId: order.userId,
-            action: input.action,
-            reason,
-            targetRef: order.ref,
-          });
+          await tx.insert(adminAuditLogs).values(
+            adminAuditValues({
+              adminUserId: input.adminUserId,
+              targetUserId: order.userId,
+              action: input.action,
+              reason,
+              targetRef: order.ref,
+            }),
+          );
         }
 
         return {
@@ -278,13 +294,15 @@ export async function applyOrderSupportAction(
       // (target_ref, action); a violation means the review is already
       // recorded, which is a successful no-op.
       try {
-        await tx.insert(adminAuditLogs).values({
-          adminUserId: input.adminUserId,
-          targetUserId: order.userId,
-          action: input.action,
-          reason,
-          targetRef: order.ref,
-        });
+        await tx.insert(adminAuditLogs).values(
+          adminAuditValues({
+            adminUserId: input.adminUserId,
+            targetUserId: order.userId,
+            action: input.action,
+            reason,
+            targetRef: order.ref,
+          }),
+        );
       } catch (error) {
         if (isUniqueViolation(error)) {
           return {

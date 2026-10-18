@@ -1,5 +1,6 @@
 import { requireAdminApi } from "@/lib/admin/auth";
 import { adminError, adminJson } from "@/lib/admin/api";
+import { rejectCrossSiteAdminWrite } from "@/lib/admin/request-policy";
 import {
   applyOrderSupportAction,
   normalizeOrderRef,
@@ -50,6 +51,9 @@ export async function POST(
 ) {
   const gate = await requireAdminApi();
   if (!gate.ok) return gate.response;
+
+  const crossSite = rejectCrossSiteAdminWrite(request);
+  if (crossSite) return crossSite;
 
   const { ref } = await params;
   const orderRef = normalizeOrderRef(ref);
