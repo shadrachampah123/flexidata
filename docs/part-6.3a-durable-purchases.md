@@ -1,5 +1,11 @@
 # Part 6.3A — Durable purchases and reconciliation
 
+> **Part 6.4 update:** production verification, the guarded `purchase_attempts`
+> applier, reconciliation `--check` monitoring, and the go/no-go checklist are in
+> [part-6.4-production-readiness.md](part-6.4-production-readiness.md). Live
+> Reloadly fulfillment remains locked. Where that document and this one differ on
+> operational procedure, follow Part 6.4.
+
 Scope: engineering only, 2026-10-17. **Reloadly customer activation remains
 code-locked in all runtimes. No deployment, production migration, real purchase,
 provider/payment API call or production environment change is part of this work.**

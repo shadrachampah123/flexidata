@@ -58,6 +58,9 @@ jobs:
       - name: Verify Reloadly sandbox contract and activation lock (network-free)
         run: npm run verify:reloadly
 
+      - name: Verify Part 6.4 go/no-go automation (provider lock, schema agreement, migration audit; network-free)
+        run: npm run verify:production-readiness
+
       - name: Verify auth recovery and signup flow (in-memory simulator)
         run: npm run verify:auth-flow
 
@@ -76,8 +79,43 @@ jobs:
       - name: Integration suites not run in this DB-free job
         if: always()
         run: |
-          echo "Not run: real-PostgreSQL, live-app, and external-provider phases (including schema baseline, signup DB checks, withdrawal API/database phases, payout reconciliation, and Paystack E2E)."
+          echo "Not run here: live-app and external-provider phases (including schema baseline, signup DB checks, withdrawal API/database phases, payout reconciliation, and Paystack E2E). Real-PostgreSQL purchase and migration suites run in their own jobs."
           echo "Their DB-backed phases are not represented as passing by this workflow."
+
+  migration-postgres:
+    name: Guarded purchase_attempts migration (real PostgreSQL, disposable database)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: flexiData
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: purchase_lifecycle_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d purchase_lifecycle_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: flexiData/package-lock.json
+      - run: npm ci
+      - name: Verify guarded applier, drift refusal, constraint probes and recovery guard
+        run: npm run verify:purchase-attempts-migration
+        env:
+          PURCHASE_TEST_DATABASE_URL: postgresql://test:test@127.0.0.1:5432/purchase_lifecycle_test
+          DRIZZLE_ALLOW_LOCAL_DB: '1'
 
   purchase-postgres:
     name: Durable purchase lifecycle (real PostgreSQL, synthetic provider)

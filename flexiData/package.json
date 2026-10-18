@@ -39,7 +39,10 @@
     "report:wallet-audit": "tsx scripts/report-wallet-audit.ts",
     "verify:reloadly": "tsx --conditions=react-server scripts/verify-reloadly.ts",
     "verify:purchase-lifecycle": "tsx --conditions=react-server scripts/verify-purchase-lifecycle.ts",
-    "reconcile:purchases": "tsx --conditions=react-server scripts/reconcile-purchases.ts"
+    "reconcile:purchases": "tsx --conditions=react-server scripts/reconcile-purchases.ts",
+    "migrate:purchase-attempts": "tsx scripts/apply-purchase-attempts-migration.ts",
+    "verify:purchase-attempts-migration": "tsx scripts/verify-purchase-attempts-migration.ts",
+    "verify:production-readiness": "tsx --conditions=react-server scripts/verify-production-readiness.ts"
   },
   "dependencies": {
     "@fontsource-variable/manrope": "^5.3.0",

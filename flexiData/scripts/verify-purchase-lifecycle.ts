@@ -222,6 +222,62 @@ async function main() {
     assert.equal(summary.pointsEarned, 20);
     assert.equal((await database.query("SELECT count(*) FROM transactions WHERE ref='CHECKOUT-LATE'")).rows[0].count, "1");
     pass("late checkout success updates order/history/summary once without wallet charge or duplicate referral");
+    // --- Part 6.4 operational hardening -------------------------------------
+    const { ReloadlyConfigurationError } = await import("../src/lib/reloadly");
+    const { PurchaseReconcileError, reconcileAttention } = await import("../src/lib/purchase-lifecycle");
+    const { describePurchaseAttemptsCompatibility } = await import("../src/lib/schema-compat");
+    assert.equal(process.env.RELOADLY_MODE, undefined);
+    await database.query(`CREATE FUNCTION fail_iso() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.ref='ISO-A' AND NEW.status='successful' THEN RAISE EXCEPTION 'synthetic settlement failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER fail_iso BEFORE UPDATE ON transactions FOR EACH ROW EXECUTE FUNCTION fail_iso()`);
+    for (const ref of ["ISO-A", "ISO-B"]) {
+      await lifecycle.create(order(ref), ref);
+      await lifecycle.submit(order(ref), async () => result(ref === "ISO-A" ? "112" : "113"));
+      await database.query("UPDATE purchase_attempts SET provider='reloadly' WHERE ref=$1", [ref]);
+    }
+    await assert.rejects(restarted.reconcile(20, async (_, id) => result(id, "delivered")), (error: unknown) =>
+      error instanceof PurchaseReconcileError && error.failed === 1 && error.claimed === 2);
+    assert.equal((await database.query("SELECT state FROM purchase_attempts WHERE ref='ISO-B'")).rows[0].state, "delivered");
+    assert.equal((await database.query("SELECT state FROM purchase_attempts WHERE ref='ISO-A'")).rows[0].state, "pending");
+    await database.query("DROP TRIGGER fail_iso ON transactions; DROP FUNCTION fail_iso()");
+    await database.query("UPDATE purchase_attempts SET lease_until=now()-interval '1 minute',next_poll_at=now() WHERE ref='ISO-A'");
+    assert.equal(await restarted.reconcile(20, async (_, id) => result(id, "delivered")), 1);
+    assert.equal((await database.query("SELECT state FROM purchase_attempts WHERE ref='ISO-A'")).rows[0].state, "delivered");
+    pass("one failed settlement does not stop the batch; failure is reported, and the row settles once after lease expiry");
+    await lifecycle.create(order("POLL-GUARD"), "poll-guard");
+    await lifecycle.submit(order("POLL-GUARD"), async () => result("111"));
+    await database.query("UPDATE purchase_attempts SET provider='reloadly' WHERE ref='POLL-GUARD'");
+    const guardBefore = (await database.query("SELECT poll_count,lease_token,state FROM purchase_attempts WHERE ref='POLL-GUARD'")).rows[0];
+    await assert.rejects(restarted.reconcile(20), ReloadlyConfigurationError);
+    const guardAfter = (await database.query("SELECT poll_count,lease_token,state FROM purchase_attempts WHERE ref='POLL-GUARD'")).rows[0];
+    assert.deepEqual(guardAfter, guardBefore, "misconfigured poll must not claim, consume budget or lease a row");
+    pass("default poll without sandbox configuration refuses before claiming: zero budget consumed, no lease");
+    await lifecycle.create(order("EXHAUST"), "exhaust");
+    await lifecycle.submit(order("EXHAUST"), async () => result("114"));
+    await database.query("UPDATE purchase_attempts SET provider='reloadly',state='unknown',poll_count=12 WHERE ref='EXHAUST'");
+    const opsSummary = await restarted.reportSummary();
+    const attention = reconcileAttention(opsSummary);
+    assert.ok(attention.includes("retry_budget_exhausted"), "exhausted BAD must be visible to monitoring");
+    assert.ok(attention.includes("unresolved_without_provider_reference"), "CRASH without provider ID must be visible to monitoring");
+    assert.equal(opsSummary.truncated, false);
+    assert.equal(typeof opsSummary.byState, "object");
+    pass("monitoring summary counts exhausted and no-reference rows and classifies attention categories");
+    const probe = await describePurchaseAttemptsCompatibility();
+    assert.equal(probe.status, "current");
+    assert.deepEqual(probe.missing, []);
+    pass("health schema probe reports purchase_attempts current");
+    const { spawnSync } = await import("node:child_process");
+    const cli = (...args: string[]) => spawnSync("npx", ["tsx", "--conditions=react-server", "scripts/reconcile-purchases.ts", ...args], {
+      cwd: process.cwd(), env: { ...process.env, DATABASE_URL: url }, encoding: "utf8", timeout: 120_000 });
+    const check = cli("--check");
+    assert.equal(check.status, 2, check.stdout + check.stderr);
+    assert.ok(/retry_budget_exhausted/.test(check.stdout));
+    assert.ok(!check.stdout.includes(url) && !/postgresql:\/\//.test(check.stdout), "CLI output must not echo connection data");
+    const poll = cli("--poll");
+    assert.equal(poll.status, 1, "--poll without sandbox configuration must fail closed");
+    assert.equal((await database.query("SELECT poll_count FROM purchase_attempts WHERE ref='POLL-GUARD'")).rows[0].poll_count, guardBefore.poll_count);
+    assert.equal(cli("--report", "--check").status, 1, "modes are mutually exclusive");
+    pass("CLI: --check exits 2 on attention without echoing connection data; --poll fails closed; ambiguous modes refused");
     console.log(`${checks} real-PostgreSQL scenarios passed; zero provider/payment network calls.`);
   } finally { await database.end(); }
 }
