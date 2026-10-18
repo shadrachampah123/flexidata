@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireAdminApi } from "@/lib/admin/auth";
+import { rejectCrossSiteAdminWrite } from "@/lib/admin/request-policy";
 import { runPayoutReconciliation, fetchReconciliationExceptions } from "@/lib/payout-reconciliation";
 import { db } from "@/db";
 import { payoutReconciliationExceptions } from "@/db/schema";
@@ -53,6 +54,9 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const gate = await requireAdminApi();
   if (!gate.ok) return gate.response;
+
+  const crossSite = rejectCrossSiteAdminWrite(req);
+  if (crossSite) return crossSite;
 
   const { admin } = gate.context;
 

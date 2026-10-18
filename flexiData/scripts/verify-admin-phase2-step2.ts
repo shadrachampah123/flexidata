@@ -556,9 +556,12 @@ async function main(): Promise<void> {
     ["fulfilledAt", "fulfillmentStatus", "orderStatus", "updatedAt"],
   );
   check(
-    "the checkout update is conditional on payment capture and a supportable status",
+    "the checkout update is conditional on payment capture and the complete race-safe support predicate",
     actions.includes(`eq(checkoutOrders.paymentStatus, "successful")`) &&
-      actions.includes("inArray(checkoutOrders.orderStatus, [...SUPPORTABLE_ORDER_STATUSES])"),
+      actions.includes(`eq(checkoutOrders.orderStatus, "fulfillment_failed")`) &&
+      actions.includes(`inArray(checkoutOrders.orderStatus, ["paid", "fulfilling"])`) &&
+      actions.includes("lt(checkoutOrders.updatedAt, supportCutoff)") &&
+      actions.includes("stillSupportable"),
   );
   // Scan CODE, not prose: the module comments about what it must never do use
   // the forbidden words deliberately, so strip comments before the scan.
