@@ -9,7 +9,7 @@ start a scheduler, send an alert, or activate monitoring.
 
 ## Review scope and evidence
 
-Reviewed current `main` at `c66aa21dcff8b12aa095b7f670be66cfbdefd1f7` and the
+Reviewed current `main` at `e48d45a20bcf0efccb755096cd005d3fa65d9256` and the
 repository implementation only. No production database, runtime, alert service,
 credential store, owner roster, or external environment was queried.
 
