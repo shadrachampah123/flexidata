@@ -1,6 +1,7 @@
 # Parts 6.5A / 6.5B verification record
 
-Base fetched and verified: `938313e1e4f353adb4571c5e081fe5ffdee114f6`.
+Historical verification base: `938313e1e4f353adb4571c5e081fe5ffdee114f6`.
+The current checkpoint is `main` at `9175fb6b0e32246dca850b65a34be183a1400f0e`; current Parts 6.5B–6.9 status and recheck evidence are recorded in [the evidence matrix](production-readiness-evidence-2026-10-18.md).
 All commands below ran from `flexiData/` and exited **0** on 2026-10-18.
 
 | Command | Result |

@@ -1,8 +1,8 @@
 # Phases 3–6 — Safe progress, inactive boundaries, and owner decisions
 
 **Evidence date:** 2026-10-18  
-**Baseline verified before this work:** `main` at `c39717591fa235f43e9cf6b08e6e5f4a5c874bc0` (merge of PR #66)  
-**Status:** safe repository work implemented; Phases 3–6 are **not complete** and no owner decision is implied.
+**Current baseline:** `main` at `9175fb6b0e32246dca850b65a34be183a1400f0e` (merge of PR #67)
+**Status:** safe repository work is merged and rechecked; Phases 3–6 are **not complete** and no owner decision is implied.
 
 This record separates what can be hardened against the currently shipped schema from
 what would require a new data model or an authorization/policy decision. It is
@@ -78,7 +78,7 @@ re-confirms that missing or non-`true` values block withdrawals. That existing f
 is not being re-described as the unapproved wallet-funding, purchase, network,
 checkout, or maintenance-control system.
 
-## DB-free evidence added in this change
+## DB-free evidence at the current baseline
 
 `npm run verify:admin-phase3-6` checks:
 
@@ -156,7 +156,8 @@ These are separate from the code-safe work above:
 - no approved non-production database/app pair was supplied for DB-backed admin
   acceptance;
 - no production migration, provider/payment call, payout, restore rehearsal, cleanup,
-  monitoring activation, or deployment verification was performed;
+  or monitoring activation was performed. GitHub/Vercel deployment status is revision-scoped
+  evidence and is not operational approval;
 - CVE-2026-93687 / GHSA-vfj7-8cjw-p6xm remains tracked and was not suppressed or
   force-upgraded;
 - the existing Part 6.5B policy gates, Part 6.6 restore approvals, Part 6.7
