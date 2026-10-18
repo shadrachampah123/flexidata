@@ -73,16 +73,16 @@ jobs:
       - name: Verify admin authorization (in-memory simulator)
         run: npm run verify:admin-access
 
-      - name: Verify admin read-only dashboard (DB-free: masking, guards, source-level, financial invariants)
+      - name: "Verify admin read-only dashboard (DB-free: masking, guards, source-level, financial invariants)"
         run: npm run verify:admin-phase1
 
-      - name: Verify admin customer management (DB-free: suspend/activate source guarantees)
+      - name: "Verify admin customer management (DB-free: suspend/activate source guarantees)"
         run: npm run verify:admin-phase2
 
-      - name: Verify admin support workflow (DB-free: eligibility, write-surface, migration guarantees)
+      - name: "Verify admin support workflow (DB-free: eligibility, write-surface, migration guarantees)"
         run: npm run verify:admin-support
 
-      - name: Verify admin investigation & accountability (DB-free: diagnosis engine, source guarantees)
+      - name: "Verify admin investigation & accountability (DB-free: diagnosis engine, source guarantees)"
         run: npm run verify:admin-ops
 
       - name: Verify withdrawals remain disabled (DB-free phase)
