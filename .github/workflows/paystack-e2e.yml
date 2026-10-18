@@ -34,7 +34,7 @@ on:
 
 jobs:
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -63,7 +63,7 @@ jobs:
       DRIZZLE_ALLOW_LOCAL_DB: "1" # CI database container is intentionally local
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Guard — TEST key only, never live
         run: |
@@ -76,7 +76,7 @@ jobs:
             *) echo "::error::PAYSTACK_TEST_SECRET_KEY is not a TEST key (sk_test_…). Refusing to run."; exit 1 ;;
           esac
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -117,7 +117,7 @@ jobs:
 
       - name: Upload E2E logs (debug aid on failure)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-logs
           path: |
