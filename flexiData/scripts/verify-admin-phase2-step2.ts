@@ -583,7 +583,10 @@ async function main(): Promise<void> {
   // The migration must extend admin_audit_logs only.
   const drizzleDir = path.join(process.cwd(), "drizzle");
   const migrationFiles = readdirSync(drizzleDir).filter((f) => f.endsWith(".sql")).sort();
-  check("migrations present (0000…0003)", migrationFiles.length === 4, migrationFiles);
+  // Original phase expected exactly 0000…0003, but later payout/withdrawal phases added 0004…0011.
+  // Preserve the core guarantee (0000-0003 exist and are untouched) while allowing later additive migrations.
+  check("migrations present include 0000…0003", migrationFiles.filter((f) => f.startsWith("000")).length >= 4, migrationFiles);
+  check("migrations present include expected 0000…0003 set", ["0000_deposit_requests_paystack_audit.sql", "0001_paystack_transaction_id_unique.sql", "0002_customer_management.sql", "0003_support_workflow.sql"].every((n) => migrationFiles.includes(n)), migrationFiles);
   const migration3 = migrationFiles
     .filter((f) => f.startsWith("0003"))
     .map((f) => readFileSync(path.join(drizzleDir, f), "utf8"))
@@ -647,9 +650,14 @@ async function main(): Promise<void> {
     if (writeCalls.test(source)) writes.push(file.replace(process.cwd(), ""));
   }
   equal(
-    "the browser write surfaces are exactly the two confirmation modals",
+    "the browser write surfaces are exactly the expected confirmation modals",
     writes.sort(),
-    ["/src/components/admin/customer-actions.tsx", "/src/components/admin/order-support-actions.tsx"],
+    [
+      "/src/app/admin/payout-reconciliation/explorer.tsx",
+      "/src/components/admin/customer-actions.tsx",
+      "/src/components/admin/order-support-actions.tsx",
+      "/src/components/admin/withdrawals-explorer.tsx",
+    ],
   );
   const supportComponent = readFileSync(
     path.join(process.cwd(), "src/components/admin/order-support-actions.tsx"),

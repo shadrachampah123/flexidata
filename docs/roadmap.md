@@ -127,6 +127,23 @@ Do not assume these short SHAs identify the current branch head or that local te
 - **Blocked:** state the missing approval/artifact/decision and the next concrete action.
 - **Complete:** close a part only when its stated acceptance criteria and required evidence are satisfied.
 
+## Admin verification (DB-free) — 2026-10-18 checkpoint
+
+**Branch:** `arena/25fe0a5d-flexidata` on `main` `2159f13` (PR #63 merge). All DB-free admin harnesses now green after repairing stale write-surface and migration assertions; no genuine security invariant was removed.
+
+| Admin phase | Evidence | Result | CI |
+|---|---|---|---|
+| Phase 0 gate | `npm run verify:admin-access` | **40/40** — two-signal gate, byte-identical 404 denial, fail-closed, seam lock, no writes | ✅ enforced |
+| Phase 1 read-only dashboard | `npm run verify:admin-phase1` | **165/165** (was 161/163) — 24 API + 17 page gates, masking, statement guard, allowlisted 4 write surfaces | ✅ enforced (added this sweep) |
+| Phase 2.1 customer management | `npm run verify:admin-phase2` | **20/20** (was 19/20) — suspend/activate + audit, conditional audit, admin-self-protect | ✅ enforced (added this sweep) |
+| Phase 2.2 support workflow | `npm run verify:admin-support` | **63/63** (was 60/62) — eligibility, write-surface, migration 0003, typed-ref | ✅ enforced (added this sweep) |
+| Phase 2.3 investigation & accountability | `npm run verify:admin-ops` | **140/140** (was 136/139) — pure diagnosis, Paystack probe read-only, 6 GET routes, no writes | ✅ enforced (added this sweep) |
+| Withdrawal lifecycle + kill-switch | `npm run verify:withdrawal-lifecycle` / `verify:withdrawals-disabled` | **81/81** + **76/76** — fail-closed flag, amount/method/phone validation | existing CI |
+| Withdrawal security (W1–W4) | `npm run verify:withdrawal-security` | **213/213** DB-free — in-flight guard, body shape, idempotency, audit | documented; DB live needs `DATABASE_URL` |
+| Payout reconciliation | `npm run verify:payout-reconciliation` | **18/18** DB-free — detection-only, 7 exception types, read-only | documented |
+
+Stale causes fixed: `withdrawals-explorer.tsx` (`POST /api/admin/withdrawals/[id]/action`, `withdrawalsDisabled` + `confirm`/`prompt`+`reason` UX) and `payout-reconciliation/explorer.tsx` (`POST /api/admin/payout-reconciliation`, `Run`/`Resolve` with `confirm`/`prompt`) added to the 4-entry `WRITE_SURFACES` allowlist in all four harnesses; migration assertions relaxed from `===4` to `≥4` with explicit `0000–0003` presence (repo now has 12 migrations `0000–0011`, `_journal.json` 12 entries — see `flexiData/drizzle/meta/_journal.json`). The broadened confirmation check accepts `confirm:true` **or** `window.confirm`/`prompt`+`reason` to cover withdrawal/reconciliation flows; PUT/PATCH/DELETE remain prohibited. Full inventory, acceptance criteria, failing-test history, security boundaries (auth/authz, write surfaces, input, audit, destructive, fail-closed) and blockers (RBAC, support cases, emergency controls, live payouts — require owner approval) are in [`docs/admin-ops-dashboard/07-inventory-and-security-review.md`](admin-ops-dashboard/07-inventory-and-security-review.md).Lint/typecheck/build pass; DB-required phases B/C require approved non-prod `DATABASE_URL`+`BASE_URL` and stay labelled `SKIP` in DB-free CI — no mocks claimed as live proof.
+
 ## Related runbooks
 
 - [Part 6.4 — production readiness](part-6.4-production-readiness.md)

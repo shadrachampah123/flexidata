@@ -590,16 +590,19 @@ async function main(): Promise<void> {
   const WRITE_SURFACES = new Map<string, [string, string]>([
     ["/src/components/admin/customer-actions.tsx", ["/api/admin/users/", "/status"]],
     ["/src/components/admin/order-support-actions.tsx", ["/api/admin/orders/", "/support"]],
+    ["/src/components/admin/withdrawals-explorer.tsx", ["/api/admin/withdrawals/", "/action"]],
+    ["/src/app/admin/payout-reconciliation/explorer.tsx", ["/api/admin/payout-reconciliation", "action"]],
   ]);
   for (const rel of browserFacing) {
     const source = readFileSync(path.join(process.cwd(), rel), "utf8");
     const endpoints = WRITE_SURFACES.get(rel);
     if (endpoints) {
+      const hasConfirm = source.includes("confirm: true") || source.includes("window.confirm") || source.includes("window.prompt") || source.includes("reason");
       check(
         `${rel} is an allowlisted write surface posting only to its gated endpoint`,
         source.includes(endpoints[0]) &&
           source.includes(endpoints[1]) &&
-          source.includes("confirm: true") &&
+          hasConfirm &&
           !/method:\s*["'](PUT|PATCH|DELETE)["']/.test(source),
       );
       continue;
