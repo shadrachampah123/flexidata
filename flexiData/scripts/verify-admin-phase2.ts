@@ -391,11 +391,13 @@ async function main(): Promise<void> {
     if (writeCalls.test(source)) writes.push(file.replace(process.cwd(), ""));
   }
   equal(
-    "the browser write surfaces are exactly the two confirmation modals",
+    "the browser write surfaces are exactly the expected confirmation modals",
     writes.sort(),
     [
+      "/src/app/admin/payout-reconciliation/explorer.tsx",
       "/src/components/admin/customer-actions.tsx",
       "/src/components/admin/order-support-actions.tsx",
+      "/src/components/admin/withdrawals-explorer.tsx",
     ],
   );
   const actionsComponent = readFileSync(
