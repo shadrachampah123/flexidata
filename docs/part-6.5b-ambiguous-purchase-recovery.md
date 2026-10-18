@@ -104,9 +104,11 @@ ambiguous outcomes unresolved and do not implement terminal overrides.
   - **Code fact:** the six persisted states are `created`, `submitted`, `pending`,
     `unknown`, `delivered` and `failed`. Submission commits `submitted` before
     network I/O and never retries the POST. Settlement requires the stored
-    provider reference and a live lease token; terminal states are not eligible
-    for another settlement. `unknown` is nonterminal and is **not** a dedicated
-    persistent hold flag; referenced rows may still receive bounded status reads.
+    provider reference and the matching stored lease token; a later poll claim
+    replaces that token and fences the earlier worker. Terminal states are not
+    eligible for another settlement. `unknown` is nonterminal and is **not** a
+    dedicated persistent hold flag; referenced rows may still receive bounded
+    status reads.
   - **Decision needed:** approve the complete legal transition graph, treatment
     of stale `created` and exhausted/no-reference rows, any future review-hold
     state and poller exclusion, and how late evidence after terminal state is
