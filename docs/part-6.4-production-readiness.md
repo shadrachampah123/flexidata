@@ -438,6 +438,33 @@ Commands run in this repository (see the final report for exact results):
 None of these establishes provider behavior, sandbox purchases, deployment, or
 scheduling. They establish code, schema and gate behavior only.
 
+### Continuous safeguard verification (added 2026-10-18, after Part 6.4)
+
+CI now runs the DB-free Phase A of three existing payout/withdrawal safeguard
+suites on every pull request and `main` push:
+
+| Command | What its Phase A proves |
+| --- | --- |
+| `npm run verify:withdrawal-security` | F1–F8 and W1–W4 rules: destination/method validation, idempotency and exact-money rules, admin reconciliation classification, `successful` remaining unreachable through the admin API, stored-data and malformed-input refusal. |
+| `npm run verify:phase-b` | Payout fail-closed rules P1–P24 and migration ordering M1/M1b: no transfer path without explicit enablement, the mock provider cannot run in production, provider references are stable and single-use, and the journal keeps sequential indices with 0010 and the newest entry correctly ordered. 0008/0009 timestamps are pinned unchanged. |
+| `npm run verify:payout-reconciliation` | R1 invariants: exactly the seven exception types, detection-only/read-only source guarantees, admin-gated API, and no wallet, ledger or withdrawal writes. |
+
+These are synthetic source and rule checks. Their database and live-app phases
+(Phase B/C) still need a disposable PostgreSQL and a locally started app server;
+this workflow does **not** run them and does not represent them as passing. No
+runtime code, migration, journal entry, schema or fail-closed behavior was
+changed to add these steps, and nothing here is provider, production,
+deployment or operational evidence.
+
+Known verification debt: the historical admin acceptance harnesses
+(`verify:admin-phase1`, `verify:admin-phase2`, `verify:admin-support`,
+`verify:admin-ops`) remain outside CI. `verify:admin-phase1` and
+`verify:admin-phase2` still assert a two-file browser-write-surface snapshot
+from 2026-09-05; the withdrawal and payout-reconciliation admin explorers added
+on 2026-09-08/09 legitimately expanded that surface, so those two assertions
+are not green on current `main`. They were not re-run, edited or "fixed" here,
+and they are not evidence of a regression; they need their own reviewed update.
+
 ## Files and migration impact
 
 **Migration impact: none to the repository schema.** No migration file was
