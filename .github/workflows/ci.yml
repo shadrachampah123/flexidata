@@ -55,6 +55,9 @@ jobs:
       - name: Verify production data-provider lock and health safety (in-memory, network-free)
         run: npm run verify:data-provider-safety
 
+      - name: Verify health recovery guidance and response compatibility (DB-free)
+        run: npm run verify:health-recovery
+
       - name: Verify Reloadly sandbox contract and activation lock (network-free)
         run: npm run verify:reloadly
 
