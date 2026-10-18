@@ -79,14 +79,24 @@ jobs:
       - name: Verify withdrawal lifecycle rules (DB-free phase)
         run: npm run verify:withdrawal-lifecycle
 
+      - name: "Verify withdrawal security and accounting invariants (DB-free phase: F1-F8, W1-W4)"
+        run: npm run verify:withdrawal-security
+
+      - name: Verify payout safety invariants and migration ordering (DB-free, network-free phase)
+        run: npm run verify:phase-b
+
+      - name: Verify payout reconciliation is detection-only and read-only (DB-free phase)
+        run: npm run verify:payout-reconciliation
+
       - name: Verify demo-deposit cleanup safety (in-memory simulator)
         run: npm run verify:demo-deposit-cleanup
 
       - name: Integration suites not run in this DB-free job
         if: always()
         run: |
-          echo "Not run here: live-app and external-provider phases (including schema baseline, signup DB checks, withdrawal API/database phases, payout reconciliation, and Paystack E2E). Real-PostgreSQL purchase and migration suites run in their own jobs."
-          echo "Their DB-backed phases are not represented as passing by this workflow."
+          echo "Not run here: database and live-app phases (schema baseline, signup DB checks, withdrawal API/database drives, payout execution and reconciliation against a database and app server, Paystack E2E)."
+          echo "The withdrawal-security, payout safety (phase B) and payout-reconciliation suites run only their DB-free Phase A here; their database and live-app phases are not represented as passing by this workflow."
+          echo "Real-PostgreSQL purchase and migration suites run in their own jobs."
 
   migration-postgres:
     name: Guarded purchase_attempts migration (real PostgreSQL, disposable database)

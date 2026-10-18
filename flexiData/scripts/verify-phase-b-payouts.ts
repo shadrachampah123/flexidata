@@ -38,7 +38,11 @@
  *   P23 admin actions are authenticated, authorized, and audited
  *   P24 existing Paystack deposit/top-up functionality is unchanged
  *   M1  migration 0010 journal `when` is strictly greater than the maximum
- *       existing migration `when` (esp. 0008); 0008/0009 untouched
+ *       migration `when` registered before it (indices < 10), especially 0008;
+ *       0008/0009 are untouched
+ *   M1b journal indices are sequential from 0, and the newest registered entry
+ *       is strictly newer than every earlier entry — so adding migration 0011+
+ *       cannot silently invert ordering or leave a gap
  *   M2  the unique provider-reference index exists after migration and rejects
  *       duplicates while allowing multiple NULLs
  *
@@ -643,7 +647,14 @@ async function phaseA(): Promise<void> {
     };
     check("journal dialect is postgresql", journal.dialect === "postgresql");
     const idxs = journal.entries.map((e) => e.idx);
-    check("journal idx sequential 0..10", JSON.stringify(idxs) === JSON.stringify([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), idxs.join(","));
+    // Drift-proof: the journal may grow, but its indices must always be exactly
+    // 0..N-1 in registration order. Do not hard-code the current entry count.
+    const expectedIdxs = journal.entries.map((_, index) => index);
+    check(
+      "journal idx is sequential 0..N-1 for every registered entry",
+      JSON.stringify(idxs) === JSON.stringify(expectedIdxs),
+      idxs.join(","),
+    );
     let allFiles = true;
     for (const e of journal.entries) {
       if (!existsSync(resolve(process.cwd(), `drizzle/${e.tag}.sql`))) {
@@ -661,10 +672,20 @@ async function phaseA(): Promise<void> {
     check("0009 tag untouched", w9.tag === "0009_withdrawal_payout_system");
     check("0009 when untouched (1741478400000)", w9.when === 1741478400000, String(w9.when));
     check("0010 tag is 0010_withdrawal_provider_ref_unique", w10.tag === "0010_withdrawal_provider_ref_unique");
-    const maxPrev = Math.max(...journal.entries.filter((e) => e.idx !== 10).map((e) => e.when));
-    check("0010 when > maximum previous when", w10.when > maxPrev, `${w10.when} > ${maxPrev}`);
+    const maxPrev = Math.max(...journal.entries.filter((e) => e.idx < 10).map((e) => e.when));
+    check("0010 when > maximum earlier when (idx < 10)", w10.when > maxPrev, `${w10.when} > ${maxPrev}`);
     check("0010 when > 0008 when specifically", w10.when > w8.when);
     check("0010 breakpoints true", w10.breakpoints === true);
+    // Drift-proof ordering guard for everything registered after 0010: the
+    // newest entry must be strictly newer than every earlier entry, so a future
+    // migration cannot be appended behind an already-recorded timestamp.
+    const newest = journal.entries[journal.entries.length - 1]!;
+    const maxEarlier = Math.max(...journal.entries.slice(0, -1).map((e) => e.when));
+    check(
+      "newest journal entry is newer than every earlier entry",
+      newest.when > maxEarlier,
+      `${newest.tag}: ${newest.when} > ${maxEarlier}`,
+    );
 
     const sql0010 = readRepo("drizzle/0010_withdrawal_provider_ref_unique.sql");
     check("0010 creates the unique provider index", /create\s+unique\s+index\s+"withdrawal_requests_provider_ref_idx"/i.test(sql0010));
