@@ -49,6 +49,12 @@ ambiguous outcomes unresolved and do not implement terminal overrides.
     result or customer assertion proves neither delivery nor rejection.
   - **Safe interim:** never retry/resubmit an ambiguous POST; a missing or
     uncorrelated reference remains unresolved.
+  - **Evidence required:** provider contract or dated written support confirmation; sandbox
+    trace for ID creation, lookup by stored ID and `customIdentifier`, uniqueness, no-ID
+    lookup, retention window and empty-result semantics. No live provider call is authorized.
+  - **Acceptance criteria:** both owners sign a versioned correlation/lookup contract that
+    states which outcomes are authoritative and confirms an empty, absent or expired lookup
+    is not proof of failure. Tests preserve an unresolved state when correlation is missing.
   - **Approver:** Reloadly account/provider technical owner and FlexiData
     integration owner. **Status: awaiting decision/evidence.**
 
@@ -66,6 +72,13 @@ ambiguous outcomes unresolved and do not implement terminal overrides.
   - **Safe interim:** keep callbacks refused and use only the existing
     correlated status-read path; conflicting or delayed evidence stays
     unresolved for review. Do not reopen a terminal row by direct mutation.
+  - **Evidence required:** provider documentation/support confirmation of finality and
+    reversal windows; dated examples for late, duplicate and out-of-order outcomes; callback
+    signature, replay and delivery guarantees if callbacks are proposed.
+  - **Acceptance criteria:** owners approve a terminal-evidence matrix for every status/event
+    and a finality window; late/duplicate/conflicting events cannot reopen terminal rows.
+    Callback ingestion remains disabled until its independent authentication/replay gate is
+    proven and reviewed.
   - **Approver:** provider/account technical owner plus FlexiData
     integration/security owner. **Status: awaiting decision/evidence.**
 
@@ -82,6 +95,14 @@ ambiguous outcomes unresolved and do not implement terminal overrides.
   - **Safe interim:** do not infer Reloadly spend from customer retail price;
     do not refund or mark failed on uncertainty, and do not resubmit. Keep
     external checkout refunds outside this purchase path.
+  - **Evidence required:** approved Reloadly denomination/currency and fee schedule;
+    reconciled float examples; Finance/Treasury policy for wallet refunds, partial fulfillment
+    and late success; payment-owner rules for Paystack checkout refunds, reversals and
+    chargebacks.
+  - **Acceptance criteria:** a signed scenario matrix defines funding, ledger/float treatment
+    and who authorizes each wallet or external checkout refund, including partial/duplicate/
+    late outcomes. Synthetic tests demonstrate approved accounting invariants; no real
+    payment or provider operation is part of acceptance.
   - **Approver:** Finance/Treasury owner and provider account owner; Paystack or
     payment owner for checkout refunds. **Status: awaiting decision/evidence.**
 
@@ -97,6 +118,13 @@ ambiguous outcomes unresolved and do not implement terminal overrides.
     incident record; record references/digests and reviewers, not secrets, raw
     provider payloads or unnecessary customer data in GitHub. Missing evidence
     means no terminal decision.
+  - **Evidence required:** named record custodian; approved evidence schema/provenance
+    rules; restricted-store access list; retention/deletion schedule; audit and legal/privacy
+    review; rules for references/digests versus source payloads.
+  - **Acceptance criteria:** the approved process keeps original evidence immutable with
+    timestamps, actor/reviewer and provenance; limits access and retention; preserves an
+    auditable reference from each decision; and forbids secrets/raw customer payloads in
+    GitHub. Missing or unverifiable evidence cannot support terminal resolution.
   - **Approver:** named incident owner plus Security/Privacy/Data owner.
     **Status: awaiting decision/evidence.**
 
@@ -115,6 +143,13 @@ ambiguous outcomes unresolved and do not implement terminal overrides.
     handled.
   - **Safe interim:** no direct SQL/state forcing, no fabricated reference,
     refund or resubmission; preserve the existing guarded transitions only.
+  - **Evidence required:** versioned transition table for every persisted and proposed hold
+    state, including stale `created`, no-reference/exhausted rows, poll eligibility, late
+    evidence and terminal records; reviewed worker-exclusion/lease-fencing design.
+  - **Acceptance criteria:** engineering/data-integrity and release owners approve the legal
+    graph and persistent-hold semantics. A hold survives every poll/worker path, cannot
+    settle or trigger a POST/refund, and can be released only through an approved transition;
+    terminal states remain immutable. Tests cover every allowed and refused edge.
   - **Approver:** FlexiData engineering/data-integrity owner and release owner.
     **Status: awaiting decision/evidence.**
 
@@ -129,6 +164,13 @@ ambiguous outcomes unresolved and do not implement terminal overrides.
   - **Safe interim:** preserve current purchase idempotency; any future resolution
     must make identical retries a no-op/replay and reject changed or competing
     decisions before money moves. Never replay the provider POST.
+  - **Evidence required:** reviewed resolution-event/API design, key/fingerprint rules,
+    expected-state/version fields, lease invalidation order and transaction/locking design;
+    disposable PostgreSQL concurrency and rollback test results.
+  - **Acceptance criteria:** identical retry returns the same recorded decision without
+    repeating money effects; changed payload, stale version or competing opposite decision
+    is rejected before settlement; only one winner can commit; original provider evidence
+    remains immutable. No provider POST or payment API is called.
   - **Approver:** FlexiData engineering/database owner and Finance/Treasury
     owner. **Status: awaiting decision/design approval.**
 
@@ -143,6 +185,14 @@ ambiguous outcomes unresolved and do not implement terminal overrides.
     resolution (requester and approver must differ), with Finance and release
     owner sign-off; no single-person override or direct SQL. This proposal is
     not yet approved.
+  - **Evidence required:** role/threshold matrix for requester, evidence reviewer and
+    money-changing approver; server-side authority model; append-only audit/evidence design;
+    conflict-of-interest and separation rules.
+  - **Acceptance criteria:** a requester cannot approve their own decision; independent
+    approval is enforced server-side and within the mutation transaction; missing/expired
+    authority fails closed; audit history is append-only. Authorization tests cover
+    unauthorized, same-person, revoked-role and stale-session cases. This proposal remains
+    unapproved until the owners sign it.
   - **Approver:** account/release owner, Finance/Treasury owner and Security
     owner. **Status: awaiting decision/owner assignment.**
 
@@ -158,6 +208,14 @@ ambiguous outcomes unresolved and do not implement terminal overrides.
   - **Safe interim:** alert/escalate through an already approved incident
     process if one exists; age, customer pressure or a missed response target
     never turns an unknown outcome into success, failure, refund or resubmission.
+  - **Evidence required:** named primary/backup contacts and response targets; provider,
+    release and Finance escalation paths; escalation thresholds; customer-communication
+    owner; approved message templates and privacy review; synthetic tabletop record if
+    required by the owners.
+  - **Acceptance criteria:** an approved runbook names an accountable owner for each signal
+    and customer update, gives response/escalation deadlines, and states uncertainty without
+    promising delivery/refund or inviting resubmission. Review uses synthetic scenarios only;
+    no live provider/customer message is required for this documentation gate.
   - **Approver:** Operations/incident owner, account/release owner, Finance and
     Customer Support owner. **Status: awaiting owner assignment/decision.**
 
