@@ -839,7 +839,10 @@ async function main(): Promise<void> {
         supportRoute(
           new Request(`http://localhost/api/admin/orders/${encodeURIComponent(ref)}/support`, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              origin: "http://localhost",
+            },
             body: JSON.stringify(body),
           }),
           { params: Promise.resolve({ ref }) },
@@ -918,7 +921,10 @@ async function main(): Promise<void> {
       const malformed = await supportRoute(
         new Request("http://localhost/api/admin/orders/CO%27;%20drop/support", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            origin: "http://localhost",
+          },
           body: JSON.stringify({ action: "delivery_resolved", orderRef: "CO'; drop", confirm: true }),
         }),
         { params: Promise.resolve({ ref: "CO'; drop" }) },

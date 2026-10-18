@@ -48,6 +48,9 @@ export function adminAuditValues(input: {
 }): AdminAuditInsert {
   const adminUserId = positiveInteger(input.adminUserId, "admin user id");
   const targetUserId = positiveInteger(input.targetUserId, "target user id");
+  if (!ADMIN_AUDIT_ACTIONS.includes(input.action)) {
+    throw new Error("[flexidata:admin] invalid audit action");
+  }
 
   const targetRef = input.targetRef === undefined || input.targetRef === null
     ? null

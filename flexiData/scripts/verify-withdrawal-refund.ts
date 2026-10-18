@@ -87,7 +87,12 @@ class Jar {
   async req(base: string, path: string, init: RequestInit = {}): Promise<Response> {
     const res = await fetch(base + path, {
       ...init,
-      headers: { "Content-Type": "application/json", Cookie: this.header(), ...(init.headers ?? {}) },
+      headers: {
+        "Content-Type": "application/json",
+        Origin: new URL(base).origin,
+        Cookie: this.header(),
+        ...(init.headers ?? {}),
+      },
       redirect: "manual",
     });
     this.absorb(res);

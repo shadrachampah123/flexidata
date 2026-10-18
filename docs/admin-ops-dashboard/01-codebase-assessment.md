@@ -585,10 +585,12 @@ be fully impersonated by setting one environment variable — and once `/admin` 
 have the admin gate refuse to honour the seam, or require an additional explicit
 `FLEXIDATA_TEST_ALLOW_ADMIN=1`.
 
-### L-5 — No CSRF defence beyond `sameSite=lax` 🟠
-`lax` blocks cross-site form POSTs, which covers the common case, but there is no token and no
-`Origin`/`Sec-Fetch-Site` validation anywhere. Admin mutations (Phases 4–6) should require
-`content-type: application/json`, a same-origin `Origin`/`Sec-Fetch-Site` check, and `POST`.
+### L-5 — Historical baseline: no CSRF defence beyond `sameSite=lax` 🟠
+At the time of this assessment, `lax` blocked cross-site form POSTs, but there was no token or
+`Origin`/`Sec-Fetch-Site` validation. The current safe-progress control now applies a same-origin
+`Origin`/Fetch Metadata/Referer boundary to the four existing admin POST routes; it still does
+not introduce a CSRF token, broader caller allowlist, RBAC, or Phase 5 step-up policy. Any new
+admin mutation must preserve that route-level check and its fail-closed headerless behavior.
 
 ### L-6 — No rate limiting or lockout anywhere 🟠
 Grep for `rate.?limit|throttle` → zero hits. `/api/auth/login` and `/api/auth/forgot-password` are

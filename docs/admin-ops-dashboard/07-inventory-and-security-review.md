@@ -11,7 +11,7 @@
 
 ## 1. Executive summary
 
-All **DB-free** admin verification now passes (8 suites, 696 checks green). The stale harnesses that failed on `verify:admin-phase1` (161/163), `verify:admin-phase2` (19/20), `verify:admin-support` (60/62) and `verify:admin-ops` (136/139) were **repaired** by allowlisting two legitimate post-Phase-1 write surfaces (withdrawals explorer, payout-reconciliation explorer) and by relaxing migration-count assertions from exact-match to at-least-match while preserving the core guarantee (0000–0003 still present and untouched). No genuine security assertion was removed.
+The historical review suite subtotal was **DB-free green (8 suites, 696 checks)** at the review baseline. The current continuation additionally verifies the safe Phase 3–6 boundary at **33/33** in `verify:admin-phase3-6`; DB-free evidence is revision-scoped and does not prove database-backed behavior. The stale harnesses that failed on `verify:admin-phase1` (161/163), `verify:admin-phase2` (19/20), `verify:admin-support` (60/62) and `verify:admin-ops` (136/139) were **repaired** by allowlisting two legitimate post-Phase-1 write surfaces (withdrawals explorer, payout-reconciliation explorer) and by relaxing migration-count assertions from exact-match to at-least-match while preserving the core guarantee (0000–0003 still present and untouched). No genuine security assertion was removed.
 
 **What is done:** Phases 0 through 2-step3 (the entire read-only + investigation stack) plus the withdrawal-admin stack (approve/reject/refund/retry, payout execution, reconciliation detection) are implemented, gated, audited, and DB-free verified. They run behind the Phase 0 two-signal gate, are idempotent, and are locked behind kill-switches (`WITHDRAWALS_ENABLED=false`, `PAYSTACK_TRANSFERS_ENABLED=false`).
 
@@ -103,7 +103,7 @@ All **DB-free** admin verification now passes (8 suites, 696 checks green). The 
 
 - **No non-GET escapes the allowlist.** `verify:admin-phase1` (and step2/3 harnesses) scan every `.tsx` under `src/app/admin` + `src/components/admin` for `method:"POST"`/`fetch` and assert only the 4 allowlisted surfaces exist.
 - **Client identity never trusted.** `gate.context.admin.userId`/`email` is server-resolved; smuggled `adminUserId`/`admin` in body is ignored (tested in `verify:admin-phase2` C3 spoof, `verify:admin-support` C4 spoof).
-- **CSRF posture:** `sameSite=lax` is the only mitigation; no `Origin`/`Sec-Fetch-Site` token and no per-request CSRF header is enforced. This is consistent with the pre-admin app and documented as L-5 (orange, medium) in `01-codebase-assessment.md §L-5`. **Risk:** low for now (POSTs are JSON `content-type:application/json` which preflight-blocks simple form POSTs), but add explicit `Origin` check when Phase 5 financial surface grows.
+- **Request provenance / CSRF posture:** the existing `SameSite=Lax` cookies remain, and the four current admin POST routes now call `src/lib/admin/request-policy.ts` after `requireAdminApi()`. Same-origin `Origin` is preferred; same-origin Fetch Metadata or Referer is a fallback; explicit cross-site, mismatched/opaque origin, and headerless requests are rejected before body/database work. This is a narrow route-boundary control, not a CSRF token, RBAC, session, or rate-limit implementation. The older L-5 text in `01-codebase-assessment.md` is the pre-control baseline; revisit the policy if an approved external admin caller or broader cross-origin surface is introduced.
 
 ### 4.4 Input validation — PASS
 
@@ -170,7 +170,7 @@ Per strict safety boundaries: no production DB writes, no live provider/payment 
 - **PII concentration risk persists.** Admin lists concentrate emails/phones/balances; mitigation is masking + audited reveal (reveals not yet audited — log every list/detail view once audit logging lands).
 - **In-flight payout double-spend risk is closed in code but relies on the DB unique index `withdrawal_requests_provider_ref_idx` (0009→0010).** A database predating 0010 lacks this arbiter; the code still refuses via `payoutIsInFlight`, but the DB enforcement is the final backstop — apply `0010` via the guarded runner, not `drizzle-kit push` on a drifted DB.
 - **Probe throttling is per-instance.** A multi-instance deployment multiplies the effective ceiling; persisting probes would need a migration (deliberately out of scope for DB-free guarantee).
-- **CSRF is `sameSite:lax` only.** Add `Origin`/`Sec-Fetch-Site` check before exposing Phase 5 money moves to broader admin cohorts.
+- **Request provenance is now checked on the four existing admin POST surfaces.** Keep the helper fail-closed for absent/mismatched provenance; do not treat it as the unapproved Phase 5 maker-checker, step-up, or external-caller policy.
 - **Deployment health is revision-scoped.** Vercel deployment records cited in `docs/roadmap.md` are historical evidence for that SHA, not current health probes.
 
 ---

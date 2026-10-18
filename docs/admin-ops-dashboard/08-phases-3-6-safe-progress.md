@@ -13,28 +13,37 @@ not evidence of database-backed behavior, deployment health, or operational appr
 
 ### Phase 3 — RBAC and audit accountability boundary
 
-1. **Existing admin writes now reject explicit cross-site requests.**
+1. **Existing admin writes now require same-origin request provenance.**
    `src/lib/admin/request-policy.ts` checks `Sec-Fetch-Site: cross-site`, an
-   opaque `Origin`, and an origin mismatch after `requireAdminApi()` has already
-   passed. The four existing admin POST routes use it before parsing request bodies
-   or reaching their write logic:
+   opaque or mismatched `Origin`, and an absent/invalid provenance fallback after
+   `requireAdminApi()` has already passed. The four existing admin POST routes use
+   it before parsing request bodies or reaching their write logic:
    - customer status;
    - order support;
    - payout reconciliation;
    - withdrawal actions.
 
-   Missing headers remain accepted for existing same-origin operational callers;
-   this is a narrow cross-site rejection, not a claim that a complete CSRF policy or
-   an Origin allowlist has been approved.
+   The deployment/caller review found only same-origin browser components in
+   `src/`, with no server-to-server admin write caller or separately documented
+   external admin API contract. Normal POST fetches use `Origin`; same-origin
+   `Sec-Fetch-Site` or a same-origin `Referer` is accepted only as a fallback.
+   Completely headerless requests fail closed with 403. This is still a narrow
+   request-boundary control, not a claim that an RBAC, session, or Origin allowlist
+   has been approved. The existing admin gate remains first and unchanged.
 
 2. **Current audit INSERT values have one typed boundary.**
    `src/lib/admin/audit-writer.ts` is a value builder, not a new writer or schema.
    It uses only the six action values already enforced by the shipped
-   `admin_audit_logs` CHECK, validates server-controlled positive actor/target ids,
-   bounds the existing 240-character reason column, and validates the existing
+   `admin_audit_logs` CHECK, validates the six actions at runtime as well as in
+   TypeScript, validates server-controlled positive actor/target ids, bounds the
+   existing 240-character reason column, and validates the existing
    target-reference shape. The six current central audit inserts now use it.
-   Existing transaction boundaries, append-only behavior, partial uniqueness and
-   idempotency are unchanged.
+   The generated checkout `CO-…` and withdrawal `WDL-…` references fit the
+   existing `varchar(40)`/4–40-character contract; the support normalizer uses the
+   same charset and bounds. Customer/support reasons are clamped before the
+   insert, withdrawal actions reject overlong reasons, and the writer remains the
+   final 240-character boundary. Existing transaction boundaries, append-only
+   behavior, partial uniqueness and idempotency are unchanged.
 
 3. **No new role, permission, read-event, session, rate-limit, or step-up policy was
    invented.** The existing `is_admin` plus `ADMIN_EMAILS` gate remains the outer
@@ -73,9 +82,10 @@ checkout, or maintenance-control system.
 
 `npm run verify:admin-phase3-6` checks:
 
-- same-origin, cross-site, mismatched-origin, opaque-origin and header-absent request
-  decisions;
-- the shipped audit action vocabulary and bounded/validated audit values;
+- same-origin, cross-site, mismatched-origin, opaque-origin, same-origin fallback,
+  and header-absent request decisions;
+- the shipped audit action vocabulary, generated reference formats, and
+  bounded/validated audit values;
 - all six existing central `admin_audit_logs` inserts use the typed value builder;
 - old/fresh/parked/unpaid support eligibility and the SQL race-safe age predicate;
 - the existing withdrawal flag's missing/false/explicit-true behavior;

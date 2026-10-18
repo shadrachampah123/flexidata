@@ -4,7 +4,7 @@
  * This is intentionally not a fake completion suite. It verifies implemented
  * behavior that does not need an owner-approved schema or permission policy:
  *
- *   - existing admin writes reject explicit cross-site requests after the
+ *   - existing admin writes require same-origin request provenance after the
  *     existing two-signal admin gate;
  *   - all current `admin_audit_logs` writers use one typed, bounded value
  *     builder and the shipped action vocabulary;
@@ -68,14 +68,30 @@ section("A. Request-boundary policy");
 const { adminWriteRequestDecision } = await import("@/lib/admin/request-policy");
 
 check(
-  "missing browser headers remain compatible for same-origin operational callers",
-  adminWriteRequestDecision(new Request("https://admin.example/api/admin/orders/CO-1/support")).ok,
+  "headerless admin writes fail closed",
+  adminWriteRequestDecision(new Request("https://admin.example/api/admin/orders/CO-1/support")).ok === false,
 );
 check(
   "same-origin Origin is accepted",
   adminWriteRequestDecision(
     new Request("https://admin.example/api/admin/orders/CO-1/support", {
       headers: { origin: "https://admin.example" },
+    }),
+  ).ok,
+);
+check(
+  "same-origin Fetch Metadata is an accepted Origin fallback",
+  adminWriteRequestDecision(
+    new Request("https://admin.example/api/admin/orders/CO-1/support", {
+      headers: { "sec-fetch-site": "same-origin" },
+    }),
+  ).ok,
+);
+check(
+  "same-origin Referer is an accepted legacy fallback",
+  adminWriteRequestDecision(
+    new Request("https://admin.example/api/admin/orders/CO-1/support", {
+      headers: { referer: "https://admin.example/admin/orders/CO-1" },
     }),
   ).ok,
 );
@@ -92,6 +108,14 @@ check(
   adminWriteRequestDecision(
     new Request("https://admin.example/api/admin/orders/CO-1/support", {
       headers: { origin: "https://evil.example" },
+    }),
+  ).ok === false,
+);
+check(
+  "mismatched Referer is rejected",
+  adminWriteRequestDecision(
+    new Request("https://admin.example/api/admin/orders/CO-1/support", {
+      headers: { referer: "https://evil.example/admin" },
     }),
   ).ok === false,
 );
@@ -130,6 +154,23 @@ const audit = adminAuditValues({
 check("audit actor and target ids are server-side positive integers", audit.adminUserId === 7 && audit.targetUserId === 9);
 check("audit reason is trimmed and bounded to the existing column", audit.reason?.length === 240);
 check("audit target reference is normalized", audit.targetRef === "CO-FAIL-1");
+const { makeRef } = await import("@/lib/format");
+const generatedRefs = [makeRef("CO"), `WDL-${"A".repeat(12)}`];
+check(
+  "checkout and withdrawal reference formats fit the existing audit column contract",
+  generatedRefs.every((targetRef) => {
+    const value = adminAuditValues({
+      adminUserId: 7,
+      targetUserId: 9,
+      action: "refund_review",
+      targetRef,
+    });
+    return value.targetRef === targetRef && targetRef.length <= 40;
+  }),
+  generatedRefs,
+);
+check("audit helper maps blank reasons to NULL", adminAuditValues({ adminUserId: 7, targetUserId: 9, action: "activate", reason: "  " }).reason === null);
+check("audit helper rejects an unknown action at runtime", throws(() => adminAuditValues({ adminUserId: 7, targetUserId: 9, action: "future_action" as never })));
 check("audit helper rejects a non-positive actor", throws(() => adminAuditValues({ adminUserId: 0, targetUserId: 9, action: "activate" })));
 check("audit helper rejects an unsafe target reference", throws(() => adminAuditValues({ adminUserId: 7, targetUserId: 9, action: "activate", targetRef: "bad ref" })));
 
