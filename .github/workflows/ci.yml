@@ -58,6 +58,9 @@ jobs:
       - name: Verify health recovery guidance and response compatibility (DB-free)
         run: npm run verify:health-recovery
 
+      - name: Verify restore-plan preflight refusal and metadata gates (DB-free, no restore path)
+        run: npm run verify:restore-plan-preflight
+
       - name: Verify Reloadly sandbox contract and activation lock (network-free)
         run: npm run verify:reloadly
 
