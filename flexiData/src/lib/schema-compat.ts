@@ -1245,3 +1245,61 @@ export async function describeAdminAuditCompatibility(): Promise<AdminAuditSchem
     return { status: "unknown", table: false, missing: [] };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Durable purchase attempts (migration 0011)
+// ---------------------------------------------------------------------------
+
+/** Every column the durable purchase lifecycle reads or writes. */
+export const PURCHASE_ATTEMPTS_COLUMNS = [
+  "ref", "wallet_id", "request_key", "fingerprint", "request", "float_reserved", "source",
+  "provider", "state", "provider_reference", "poll_count", "next_poll_at", "lease_until",
+  "lease_token", "updated_at",
+] as const;
+
+export type PurchaseAttemptsSchemaReport = {
+  /** `missing` means durable purchases fail closed (no debit without a claim). */
+  status: "current" | "missing" | "drifted" | "unknown";
+  table: boolean;
+  missing: string[];
+  hint?: string;
+};
+
+/**
+ * Migration-readiness probe for `purchase_attempts`, surfaced on `/api/health`.
+ * Its own catalog query (not the shared capability cache) so the report always
+ * reflects the database right now. Read-only; never blocks the health response.
+ */
+export async function describePurchaseAttemptsCompatibility(): Promise<PurchaseAttemptsSchemaReport> {
+  try {
+    const rows = asRows<{ column_name: string }>(
+      await db.execute(sql`
+        select column_name from information_schema.columns
+        where table_schema = current_schema() and table_name = 'purchase_attempts'
+      `),
+    );
+    const columns = new Set(rows.map((row) => row.column_name));
+    if (columns.size === 0) {
+      return {
+        status: "missing",
+        table: false,
+        missing: ["purchase_attempts"],
+        hint:
+          "Apply drizzle/0011_purchase_attempts.sql with the guarded runner " +
+          "`npm run migrate:purchase-attempts -- --dry-run` first. Durable purchases fail closed until it exists.",
+      };
+    }
+    const missing = PURCHASE_ATTEMPTS_COLUMNS.filter((column) => !columns.has(column)).map(
+      (column) => `purchase_attempts.${column}`,
+    );
+    return {
+      status: missing.length > 0 ? "drifted" : "current",
+      table: true,
+      missing,
+      hint: missing.length > 0 ? "purchase_attempts exists but differs from migration 0011; do not apply by hand. Investigate first." : undefined,
+    };
+  } catch (error) {
+    console.warn("[flexidata] purchase attempts schema probe failed", error);
+    return { status: "unknown", table: false, missing: [] };
+  }
+}

@@ -11,6 +11,7 @@ import {
   describeAdminAuditCompatibility,
   describeAuthCompatibility,
   describeCheckoutCompatibility,
+  describePurchaseAttemptsCompatibility,
   describeSchemaCompatibility,
   describeSignupCompatibility,
   describeWithdrawalCompatibility,
@@ -57,6 +58,7 @@ export async function GET() {
   const auth = await describeAuthCompatibility();
   const withdrawal = await describeWithdrawalCompatibility();
   const adminAudit = await describeAdminAuditCompatibility();
+  const purchaseAttempts = await describePurchaseAttemptsCompatibility();
   const degraded = schema.status === "legacy";
   // Sign-up drift is reported separately because it is the one thing the
   // runtime cannot silently work around: missing *required* columns there block
@@ -135,6 +137,15 @@ export async function GET() {
       table: adminAudit.table,
       missing: adminAudit.missing,
       ...(adminAudit.hint ? { hint: adminAudit.hint } : {}),
+    },
+    // Durable purchase claims (migration 0011). Reported, never fatal to the
+    // health response: a missing table makes data purchases fail closed.
+    purchaseAttemptsSchema: {
+      status: purchaseAttempts.status,
+      blocked: purchaseAttempts.status !== "current",
+      table: purchaseAttempts.table,
+      missing: purchaseAttempts.missing,
+      ...(purchaseAttempts.hint ? { hint: purchaseAttempts.hint } : {}),
     },
     auth: {
       // The two operational causes of the orphaned-account incident: a missing
@@ -221,6 +232,13 @@ export async function GET() {
             "drizzle/0007 with `npm run migrate:admin-audit-actions` (targeted, non-destructive) — " +
             "prefer it over `npx drizzle-kit push`, which diffs the whole schema and would also request " +
             "removal of any tables that exist in the database but not in src/db/schema.ts.",
+        }
+      : {}),
+    ...(purchaseAttempts.status !== "current"
+      ? {
+          purchaseAttemptsWarning:
+            "Durable data-purchase tracking is not ready (purchase_attempts is " +
+            `${purchaseAttempts.status}). Data purchases fail closed until migration 0011 is applied and verified.`,
         }
       : {}),
     ...(authBlocked

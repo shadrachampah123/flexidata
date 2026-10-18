@@ -416,6 +416,14 @@ Then check `/api/health`: `gatewaySchema`, `signupSchema` and
 > — see
 > [Applying the PR #38 audit migration to production](#applying-the-pr-38-audit-migration-to-production-non-destructive).
 
+> **Purchase claims (`drizzle/0011_purchase_attempts.sql`) have their own guarded
+> path.** Do not use `drizzle-kit push` or `drizzle-kit migrate` for this table:
+> `push` can request unrelated table drops, and the journal timestamps are not
+> monotonic, so `migrate` can silently skip `0009`. Use
+> `npm run migrate:purchase-attempts -- --dry-run`, then `--apply --expect-database=<name>`,
+> then `--verify-only`. Full procedure, go/no-go checklist and recovery steps:
+> [Part 6.4 production readiness](../docs/part-6.4-production-readiness.md).
+
 > **A migration file can be missing while its snapshot is committed.**
 > `drizzle/meta/_journal.json` lists a tag for every migration, and
 > `drizzle-kit` refuses to run at all when the matching `.sql` is absent

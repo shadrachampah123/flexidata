@@ -4,7 +4,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool } from "@/db";
 import { creditReferralReward } from "@/lib/referrals";
 import { POINTS_RATE } from "@/lib/constants";
-import { lookupReloadlySandbox } from "@/lib/reloadly";
+import { assertReloadlySandboxConfiguration, lookupReloadlySandbox } from "@/lib/reloadly";
 import {
   assertDataProviderRuntimeSafe, DataProviderFloatError, getDataProviderCode, submitDataBundleOrder,
   type DataBundleOrder, type GatewayResult,
@@ -13,6 +13,54 @@ import {
 export type PurchaseState = "created" | "submitted" | "pending" | "unknown" | "delivered" | "failed";
 export class PurchaseConflict extends Error {}
 export class PurchaseFundsError extends Error {}
+
+/** Hard ceiling on automatic status reads per attempt (also enforced by the
+ * `poll_count` CHECK in migration 0011). Exhausted rows are never polled again. */
+export const MAX_PURCHASE_POLLS = 12;
+/** A nonterminal row not polled for this long, or a `created` row older than
+ * this, is an operational alert: the scheduler is absent/late or a crash left
+ * a debited order before submission. */
+export const RECONCILE_ATTENTION_MINUTES = 15;
+/** Report cap; backlog beyond this must be investigated with the database. */
+export const RECONCILE_REPORT_LIMIT = 500;
+
+/** Raised after a batch has been processed when one or more settlements could
+ * not be committed. Rows keep their lease/poll state and are retried later. */
+export class PurchaseReconcileError extends Error {
+  constructor(readonly failed: number, readonly claimed: number) {
+    super(`${failed} of ${claimed} claimed status settlements failed; affected rows remain unresolved.`);
+    this.name = "PurchaseReconcileError";
+  }
+}
+
+export type ReconcileSummary = {
+  unresolved: number;
+  byState: Record<string, number>;
+  /** Provider-referenced rows that the poller may still read. */
+  pollable: number;
+  /** Pollable rows whose next read is more than RECONCILE_ATTENTION_MINUTES late. */
+  overdue: number;
+  /** Nonterminal rows that used all automatic reads; manual investigation only. */
+  exhausted: number;
+  /** submitted/unknown rows with no provider reference: never polled. */
+  withoutProviderReference: number;
+  /** `created` rows (debited, never submitted) older than the attention window. */
+  staleCreated: number;
+  oldestUnresolvedAt: string | null;
+  /** True when the unresolved backlog exceeds the report cap. */
+  truncated: boolean;
+};
+
+/** Operator-facing attention categories. Empty array means nothing needs action. */
+export function reconcileAttention(summary: ReconcileSummary): string[] {
+  const items: string[] = [];
+  if (summary.overdue > 0) items.push("reconciliation_overdue");
+  if (summary.exhausted > 0) items.push("retry_budget_exhausted");
+  if (summary.withoutProviderReference > 0) items.push("unresolved_without_provider_reference");
+  if (summary.staleCreated > 0) items.push("created_not_submitted");
+  if (summary.truncated) items.push("backlog_exceeds_report_cap");
+  return items;
+}
 
 /** Submission success is NOT delivery evidence. Only correlated status lookup
  * may produce a terminal result for a real provider. No generic status contract
@@ -156,26 +204,67 @@ export class PurchaseLifecycle {
     });
   }
 
-  /** Safe callable worker: at most 12 reads/attempt, one leased read per row.
-   * Lease token fences stale workers, even after expiry/reclaim. No-ID orders
-   * and exhausted retries remain visible; NEVER retry a purchase submission. */
+  /** Bounded, leased, fenced status reads. NEVER submits a purchase.
+   * Default lookup requires sandbox configuration; that is checked INSIDE the
+   * claim transaction, so a misconfigured run rolls back its claim and consumes
+   * no poll budget. Each row is isolated: one failed settlement does not stop
+   * the batch, and failures are raised after the batch as PurchaseReconcileError. */
   async reconcile(limit = 20, lookup = lookupReloadlySandbox) {
     const token = randomUUID();
-    const rows = await this.database.query(`WITH due AS (
-      SELECT ref FROM purchase_attempts WHERE provider='reloadly' AND provider_reference IS NOT NULL
-      AND state IN ('submitted','pending','unknown') AND poll_count<12 AND next_poll_at<=now()
-      AND (lease_until IS NULL OR lease_until<now()) ORDER BY next_poll_at FOR UPDATE SKIP LOCKED LIMIT $1
-    ) UPDATE purchase_attempts a SET lease_until=now()+interval '2 minutes',lease_token=$2,
-      poll_count=poll_count+1 FROM due WHERE a.ref=due.ref RETURNING a.*`, [Math.max(1, Math.min(100, limit)), token]);
-    for (const attempt of rows.rows) {
+    const claimed = await this.atomic(async client => {
+      const rows = await client.query(`WITH due AS (
+        SELECT ref FROM purchase_attempts WHERE provider='reloadly' AND provider_reference IS NOT NULL
+        AND state IN ('submitted','pending','unknown') AND poll_count<${MAX_PURCHASE_POLLS} AND next_poll_at<=now()
+        AND (lease_until IS NULL OR lease_until<now()) ORDER BY next_poll_at FOR UPDATE SKIP LOCKED LIMIT $1
+      ) UPDATE purchase_attempts a SET lease_until=now()+interval '2 minutes',lease_token=$2,
+        poll_count=poll_count+1 FROM due WHERE a.ref=due.ref RETURNING a.*`, [Math.max(1, Math.min(100, limit)), token]);
+      if (rows.rowCount && lookup === lookupReloadlySandbox) assertReloadlySandboxConfiguration();
+      return rows.rows;
+    });
+    let failed = 0;
+    for (const attempt of claimed) {
       let state: PurchaseState = "unknown";
       try {
         const result = await lookup(attempt.ref, attempt.provider_reference);
         if (result.providerReference === attempt.provider_reference) state = verifiedState(result);
       } catch { /* conservative unknown, bounded next read */ }
-      await this.settle(attempt.ref, attempt.provider_reference, state, token);
+      try {
+        await this.settle(attempt.ref, attempt.provider_reference, state, token);
+      } catch {
+        // Logged by the CLI as a count only: no ref, provider data or messages.
+        failed += 1;
+      }
     }
-    return rows.rowCount;
+    if (failed > 0) throw new PurchaseReconcileError(failed, claimed.length);
+    return claimed.length;
+  }
+
+  /** Read-only aggregate used by monitoring. Counts only; no provider data. */
+  async reportSummary(): Promise<ReconcileSummary> {
+    const agg = (await this.database.query(`SELECT
+        count(*)::int AS unresolved,
+        count(*) FILTER (WHERE state IN ('submitted','pending','unknown') AND provider_reference IS NOT NULL
+          AND poll_count<${MAX_PURCHASE_POLLS} AND next_poll_at<now() - interval '${RECONCILE_ATTENTION_MINUTES} minutes')::int AS overdue,
+        count(*) FILTER (WHERE state IN ('submitted','pending','unknown') AND provider_reference IS NOT NULL
+          AND poll_count<${MAX_PURCHASE_POLLS})::int AS pollable,
+        count(*) FILTER (WHERE state IN ('submitted','pending','unknown') AND poll_count>=${MAX_PURCHASE_POLLS})::int AS exhausted,
+        count(*) FILTER (WHERE state IN ('submitted','unknown') AND provider_reference IS NULL)::int AS without_reference,
+        count(*) FILTER (WHERE state='created' AND updated_at < now() - interval '${RECONCILE_ATTENTION_MINUTES} minutes')::int AS stale_created,
+        min(updated_at) AS oldest
+      FROM purchase_attempts WHERE state NOT IN ('delivered','failed')`)).rows[0];
+    const states = (await this.database.query(`SELECT state, count(*)::int AS n FROM purchase_attempts
+      WHERE state NOT IN ('delivered','failed') GROUP BY state ORDER BY state`)).rows;
+    return {
+      unresolved: agg.unresolved,
+      byState: Object.fromEntries(states.map(r => [r.state as string, r.n as number])),
+      pollable: agg.pollable,
+      overdue: agg.overdue,
+      exhausted: agg.exhausted,
+      withoutProviderReference: agg.without_reference,
+      staleCreated: agg.stale_created,
+      oldestUnresolvedAt: agg.oldest ? new Date(agg.oldest).toISOString() : null,
+      truncated: agg.unresolved > RECONCILE_REPORT_LIMIT,
+    };
   }
 
   async summary(ref: string) {
@@ -187,6 +276,6 @@ export class PurchaseLifecycle {
 
   async report() {
     return (await this.database.query(`SELECT ref,source,provider,state,provider_reference,poll_count,updated_at
-      FROM purchase_attempts WHERE state NOT IN ('delivered','failed') ORDER BY updated_at LIMIT 500`)).rows;
+      FROM purchase_attempts WHERE state NOT IN ('delivered','failed') ORDER BY updated_at LIMIT ${RECONCILE_REPORT_LIMIT}`)).rows;
   }
 }

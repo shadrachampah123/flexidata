@@ -39,14 +39,17 @@
     "report:wallet-audit": "tsx scripts/report-wallet-audit.ts",
     "verify:reloadly": "tsx --conditions=react-server scripts/verify-reloadly.ts",
     "verify:purchase-lifecycle": "tsx --conditions=react-server scripts/verify-purchase-lifecycle.ts",
-    "reconcile:purchases": "tsx --conditions=react-server scripts/reconcile-purchases.ts"
+    "reconcile:purchases": "tsx --conditions=react-server scripts/reconcile-purchases.ts",
+    "migrate:purchase-attempts": "tsx scripts/apply-purchase-attempts-migration.ts",
+    "verify:purchase-attempts-migration": "tsx scripts/verify-purchase-attempts-migration.ts",
+    "verify:production-readiness": "tsx --conditions=react-server scripts/verify-production-readiness.ts"
   },
   "dependencies": {
     "@fontsource-variable/manrope": "^5.3.0",
     "@fontsource-variable/space-grotesk": "^5.3.0",
     "drizzle-orm": "0.45.2",
     "lucide-react": "^1.37.0",
-    "next": "16.3.3",
+    "next": "16.4.2",
     "pg": "8.20.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",
@@ -60,7 +63,7 @@
     "@types/react-dom": "19.2.3",
     "drizzle-kit": "0.31.10",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.3.3",
+    "eslint-config-next": "16.4.2",
     "postcss": "8.5.26",
     "tailwindcss": "4.1.17",
     "tsx": "^4.20.7",
