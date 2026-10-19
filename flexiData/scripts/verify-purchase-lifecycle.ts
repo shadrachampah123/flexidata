@@ -144,7 +144,12 @@ async function main() {
     // supplied explicitly without broadening the default poller or interpreting
     // raw provider status strings in the lifecycle.
     await lifecycle.create(order("TECHLINK-MOCK"), "techlink-mock");
-    await lifecycle.submit(order("TECHLINK-MOCK"), async () => result("TECHLINK-REF", "accepted", "techlink"));
+    let techlinkSubmissions = 0;
+    await Promise.all(Array.from({ length: 10 }, () => lifecycle.submit(order("TECHLINK-MOCK"), async () => {
+      techlinkSubmissions++;
+      return result("TECHLINK-REF", "accepted", "techlink");
+    })));
+    assert.equal(techlinkSubmissions, 1);
     await database.query("UPDATE purchase_attempts SET provider='techlink',next_poll_at=now() WHERE ref='TECHLINK-MOCK'");
     let techlinkReads = 0;
     assert.equal(await restarted.reconcileProvider({
@@ -160,7 +165,7 @@ async function main() {
     });
     assert.equal((await database.query("SELECT state FROM purchase_attempts WHERE ref='TECHLINK-MOCK'")).rows[0].state, "delivered");
     assert.equal((await database.query("SELECT status FROM transactions WHERE ref='TECHLINK-MOCK'")).rows[0].status, "successful");
-    pass("provider-isolated reconciliation accepts an explicit Techlink fixture adapter without changing the default Reloadly poller");
+    pass("10 concurrent Techlink fixture submissions send once; provider-isolated reconciliation stays separate from the default Reloadly poller");
 
     // Expired lease + stale worker fencing.
     await database.query("UPDATE purchase_attempts SET lease_token='00000000-0000-0000-0000-000000000001',lease_until=now()-interval '1 minute',next_poll_at=now() WHERE ref='BAD'");
