@@ -60,6 +60,7 @@ const ENV_KEYS = [
   "DATA_API_SCHEMA_FALLBACKS",
   "FLEXIDATA_TEST_USER_ID",
   "AUTH_SECRET",
+  "VERCEL_ENV",
   "TECHLINK_MODE",
   "TECHLINK_TEST_API_KEY",
   "TECHLINK_ALLOW_PURCHASES",
@@ -85,6 +86,7 @@ function clearDataProviderEnv() {
   delete env.DATA_MOCK_RESULT;
   delete env.DATA_API_SCHEMA_FALLBACKS;
   delete env.FLEXIDATA_TEST_USER_ID;
+  delete env.VERCEL_ENV;
   delete env.TECHLINK_MODE;
   delete env.TECHLINK_TEST_API_KEY;
   delete env.TECHLINK_ALLOW_PURCHASES;
@@ -324,6 +326,20 @@ async function main() {
       status,
     );
   }
+
+  resetEnv({ nodeEnv: "production", provider: "techlink" });
+  env.VERCEL_ENV = "preview";
+  env.TECHLINK_MODE = "sandbox";
+  env.TECHLINK_TEST_API_KEY = SENTINELS.key;
+  status = gateway.getDataProviderRuntimeStatus();
+  check(
+    "Vercel Preview + NODE_ENV=production allows only the Techlink read-only catalogue",
+    status.safe === false &&
+      status.status === "unavailable" &&
+      status.missing.includes("purchase_opt_in") &&
+      String(status.warning).includes("read-only"),
+    status,
+  );
 
   resetEnv({ nodeEnv: "test", provider: "techlink" });
   env.DATA_API_BASE_URL = "https://api.techlinkgh.com/api/v1";

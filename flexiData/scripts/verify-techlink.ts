@@ -16,6 +16,7 @@ import {
   submitTechlinkPurchase,
   TechlinkApiError,
   TechlinkContractError,
+  getTechlinkRuntimeStatus,
   unresolvedTechlinkStatus,
 } from "../src/lib/techlink";
 import {
@@ -27,6 +28,8 @@ import {
 const env = process.env as Record<string, string | undefined>;
 const saved = {
   nodeEnv: env.NODE_ENV,
+  vercelEnv: env.VERCEL_ENV,
+  provider: env.DATA_API_PROVIDER,
   key: env.TECHLINK_TEST_API_KEY,
   mode: env.TECHLINK_MODE,
   allowPurchases: env.TECHLINK_ALLOW_PURCHASES,
@@ -101,7 +104,46 @@ function fixtureContract(): TechlinkContract {
 }
 
 async function main() {
+  env.DATA_API_PROVIDER = "techlink";
+  env.TECHLINK_MODE = "sandbox";
+  env.TECHLINK_TEST_API_KEY = fixtureKey;
+  delete env.TECHLINK_ALLOW_PURCHASES;
+
+  // Vercel Preview uses NODE_ENV=production. It must permit only the
+  // authenticated read-only catalogue, while ordinary/Production runtimes
+  // remain blocked and missing sandbox variables still fail closed.
+  env.NODE_ENV = "production";
+  env.VERCEL_ENV = "preview";
+  let runtime = getTechlinkRuntimeStatus();
+  assert.equal(runtime.readOnlySafe, true);
+  assert.equal(runtime.safe, false);
+  assert(runtime.missing.includes("purchase_opt_in"));
+  console.log("PASS Vercel Preview with sandbox variables is read-only catalogue-safe despite NODE_ENV=production");
+
+  env.VERCEL_ENV = "production";
+  runtime = getTechlinkRuntimeStatus();
+  assert.equal(runtime.readOnlySafe, false);
+  assert(runtime.missing.includes("rollout_approval"));
+  console.log("PASS Vercel Production remains blocked");
+
+  delete env.VERCEL_ENV;
+  runtime = getTechlinkRuntimeStatus();
+  assert.equal(runtime.readOnlySafe, false);
+  assert(runtime.missing.includes("rollout_approval"));
+  console.log("PASS non-Vercel NODE_ENV=production remains blocked");
+
   env.NODE_ENV = "test";
+  delete env.TECHLINK_MODE;
+  runtime = getTechlinkRuntimeStatus();
+  assert.equal(runtime.readOnlySafe, false);
+  assert(runtime.missing.includes("mode"));
+  env.TECHLINK_MODE = "sandbox";
+  delete env.TECHLINK_TEST_API_KEY;
+  runtime = getTechlinkRuntimeStatus();
+  assert.equal(runtime.readOnlySafe, false);
+  assert(runtime.missing.includes("credentials"));
+  console.log("PASS missing TECHLINK_MODE or TECHLINK_TEST_API_KEY fails closed");
+
   env.TECHLINK_TEST_API_KEY = fixtureKey;
   const calls: TechlinkHttpRequest[] = [];
   const responses: TechlinkHttpResponse[] = [];
@@ -230,7 +272,18 @@ async function main() {
     });
   }) as typeof fetch;
   env.TECHLINK_MODE = "sandbox";
-  env.TECHLINK_ALLOW_PURCHASES = "true";
+  env.NODE_ENV = "production";
+  delete env.VERCEL_ENV;
+  await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
+    error instanceof Error && error.name === "TechlinkConfigurationError",
+  );
+  assert.equal(officialCalls.length, 0);
+  console.log("PASS the reported production-style configuration failure is reproduced without a provider call");
+  // Reproduce the Vercel Preview runtime: NODE_ENV is production, but the
+  // read-only catalogue must still be allowed with the sandbox variables.
+  env.NODE_ENV = "production";
+  env.VERCEL_ENV = "preview";
+  delete env.TECHLINK_ALLOW_PURCHASES;
 
   officialResponses.push({ status: 200, body: {
     success: true,
@@ -242,7 +295,11 @@ async function main() {
   assert.equal(new URL(officialCalls[0].input).pathname, "/api/v1/data/bundles");
   assert.equal(new URL(officialCalls[0].input).searchParams.get("phone"), "233244123456");
   assert.equal(new Headers(officialCalls[0].init?.headers).get("x-api-key"), fixtureKey);
-  console.log("PASS authenticated catalogue uses the confirmed path and exact returned ID");
+  console.log("PASS authenticated Preview catalogue uses sandbox variables despite NODE_ENV=production");
+
+  env.NODE_ENV = "test";
+  delete env.VERCEL_ENV;
+  env.TECHLINK_ALLOW_PURCHASES = "true";
 
   officialResponses.push({ status: 200, body: {
     success: true,
@@ -323,6 +380,8 @@ main()
   })
   .finally(() => {
     if (saved.nodeEnv === undefined) delete env.NODE_ENV; else env.NODE_ENV = saved.nodeEnv;
+    if (saved.vercelEnv === undefined) delete env.VERCEL_ENV; else env.VERCEL_ENV = saved.vercelEnv;
+    if (saved.provider === undefined) delete env.DATA_API_PROVIDER; else env.DATA_API_PROVIDER = saved.provider;
     if (saved.key === undefined) delete env.TECHLINK_TEST_API_KEY; else env.TECHLINK_TEST_API_KEY = saved.key;
     if (saved.mode === undefined) delete env.TECHLINK_MODE; else env.TECHLINK_MODE = saved.mode;
     if (saved.allowPurchases === undefined) delete env.TECHLINK_ALLOW_PURCHASES; else env.TECHLINK_ALLOW_PURCHASES = saved.allowPurchases;

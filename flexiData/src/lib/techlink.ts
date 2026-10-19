@@ -493,9 +493,27 @@ const TECHLINK_CONFIG_WARNING =
   "Techlink requires TECHLINK_MODE=sandbox and a server-side TECHLINK_TEST_API_KEY.";
 const TECHLINK_PURCHASE_WARNING =
   "Techlink catalogue reads are available, but purchase submission requires explicit sandbox opt-in.";
+const TECHLINK_PREVIEW_WARNING =
+  "Techlink Preview is read-only; purchase submission is disabled.";
+
+/**
+ * Vercel Preview functions run with NODE_ENV=production. Treat an explicit
+ * Vercel Preview deployment as sandbox read-only, while keeping ordinary
+ * production runtimes and Vercel Production deployments fail-closed.
+ */
+export function isTechlinkPreviewRuntime(): boolean {
+  return process.env.VERCEL_ENV?.trim().toLowerCase() === "preview";
+}
+
+export function isTechlinkProductionRuntime(): boolean {
+  const vercelEnvironment = process.env.VERCEL_ENV?.trim().toLowerCase();
+  return vercelEnvironment === "production" ||
+    (process.env.NODE_ENV === "production" && vercelEnvironment !== "preview");
+}
 
 export function getTechlinkRuntimeStatus(): TechlinkRuntimeStatus {
-  if (process.env.NODE_ENV === "production") {
+  const preview = isTechlinkPreviewRuntime();
+  if (isTechlinkProductionRuntime()) {
     return {
       safe: false,
       readOnlySafe: false,
@@ -511,9 +529,15 @@ export function getTechlinkRuntimeStatus(): TechlinkRuntimeStatus {
   if (!readOnlySafe) {
     return { safe: false, readOnlySafe: false, mode: "unavailable", missing, warning: TECHLINK_CONFIG_WARNING };
   }
-  if (process.env.TECHLINK_ALLOW_PURCHASES?.trim().toLowerCase() !== "true") {
+  if (preview || process.env.TECHLINK_ALLOW_PURCHASES?.trim().toLowerCase() !== "true") {
     missing.push("purchase_opt_in");
-    return { safe: false, readOnlySafe: true, mode: "sandbox", missing, warning: TECHLINK_PURCHASE_WARNING };
+    return {
+      safe: false,
+      readOnlySafe: true,
+      mode: "sandbox",
+      missing,
+      warning: preview ? TECHLINK_PREVIEW_WARNING : TECHLINK_PURCHASE_WARNING,
+    };
   }
   return { safe: true, readOnlySafe: true, mode: "sandbox", missing: [], warning: "" };
 }

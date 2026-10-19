@@ -59,9 +59,14 @@ credentials are not returned to clients or stored in raw form.
   Techlink because no documented callback signature, replay, or authenticity
   contract has been supplied.
 - The provider runtime is enabled only when `TECHLINK_MODE=sandbox` and
-  `TECHLINK_TEST_API_KEY` are present. Purchase submission additionally requires
-  the explicit non-production `TECHLINK_ALLOW_PURCHASES=true` opt-in. Production
-  always fails closed. No key value is printed, logged, committed, or returned.
+  `TECHLINK_TEST_API_KEY` are present. Vercel Preview runs with
+  `NODE_ENV=production`, so the adapter uses the Vercel system variable
+  `VERCEL_ENV=preview` to permit the read-only catalogue only. Vercel Production
+  and ordinary production runtimes still fail closed. Purchase submission
+  additionally requires the explicit non-production
+  `TECHLINK_ALLOW_PURCHASES=true` opt-in; Preview remains read-only even if that
+  flag is accidentally set. No key value is printed, logged, committed, or
+  returned.
 - `mock`, Reloadly, Paystack, wallet accounting, float projection, idempotency,
   attempt leasing, audit rows, and generic-provider isolation remain intact.
 

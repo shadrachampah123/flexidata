@@ -6,7 +6,7 @@
  * present, sandbox mode is selected, and a test phone is supplied. It checks
  * only key presence; it never prints the key.
  */
-import { fetchTechlinkCatalogue } from "../src/lib/techlink";
+import { fetchTechlinkCatalogue, isTechlinkProductionRuntime } from "../src/lib/techlink";
 import { normalizeGhanaMobileStrict } from "../src/lib/ghana-mobile";
 
 const env = process.env;
@@ -24,7 +24,7 @@ async function main(): Promise<void> {
     skip("TECHLINK_TEST_API_KEY is absent");
     return;
   }
-  if (env.NODE_ENV === "production") {
+  if (isTechlinkProductionRuntime()) {
     skip("production runtime is never eligible");
     return;
   }
