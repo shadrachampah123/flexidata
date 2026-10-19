@@ -187,6 +187,9 @@ const INCOMPLETE_REAL_PROVIDER_WARNING =
   "The configured data provider is missing required configuration. Set DATA_API_BASE_URL " +
   "and valid DATA_API_AUTH_TYPE credentials.";
 
+const TECHLINK_ADAPTER_WARNING =
+  "Techlink fulfillment is disabled until its documented adapter contract, test access and catalogue mapping are verified.";
+
 /**
  * Resolve the data provider's runtime safety WITHOUT contacting the provider and
  * WITHOUT exposing any configuration values.
@@ -243,6 +246,22 @@ export function getDataProviderRuntimeStatus(): DataProviderRuntimeStatus {
       ...base, safe: false, status: "unavailable",
       missing: ["rollout_approval"],
       warning: "Reloadly customer fulfillment is disabled pending verified Ghana data catalogue, sandbox access and durable settlement/reconciliation review.",
+    };
+  }
+
+  // Techlink must never fall through the generic HTTP adapter. Its endpoint,
+  // request/response contract, catalogue identifiers and terminal-status rules
+  // have not been verified in this repository; the generic normalizer can treat
+  // an HTTP 200 or success flag as delivery evidence, which is unsafe for an
+  // asynchronous provider. Keep every spelling of the intended provider slug
+  // explicitly unavailable until a dedicated, tested adapter is added.
+  if (["techlink", "techlink_gh", "techlink-gh", "techlinkgh"].includes(providerCode)) {
+    return {
+      ...base,
+      safe: false,
+      status: "unavailable",
+      missing: ["rollout_approval"],
+      warning: TECHLINK_ADAPTER_WARNING,
     };
   }
 

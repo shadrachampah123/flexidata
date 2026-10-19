@@ -301,6 +301,64 @@ async function main() {
     status,
   );
 
+  for (const provider of ["techlink", "techlink_gh", "techlink-gh", "techlinkgh"]) {
+    resetEnv({ nodeEnv: "test", provider });
+    env.DATA_API_BASE_URL = "https://api.techlinkgh.com/api/v1";
+    env.DATA_API_AUTH_TYPE = "headers";
+    env.DATA_API_KEY = SENTINELS.key;
+    status = gateway.getDataProviderRuntimeStatus();
+    check(
+      `${provider} never falls through the generic adapter before an explicit verified adapter exists`,
+      status.provider === provider &&
+        status.safe === false &&
+        status.status === "unavailable" &&
+        status.missing.includes("rollout_approval") &&
+        String(status.warning).includes("documented adapter contract"),
+      status,
+    );
+  }
+
+  resetEnv({ nodeEnv: "test", provider: "techlink" });
+  env.DATA_API_BASE_URL = "https://api.techlinkgh.com/api/v1";
+  env.DATA_API_AUTH_TYPE = "headers";
+  env.DATA_API_KEY = SENTINELS.key;
+  let techlinkGuardError: unknown = null;
+  try {
+    gateway.assertDataProviderRuntimeSafe();
+  } catch (error) {
+    techlinkGuardError = error;
+  }
+  check(
+    "techlink generic activation fails closed before any request",
+    techlinkGuardError instanceof gateway.DataProviderConfigError &&
+      (techlinkGuardError as Error).message.includes("documented adapter contract") &&
+      serializedContainsSecrets((techlinkGuardError as Error).message).length === 0,
+    techlinkGuardError instanceof Error ? techlinkGuardError.message : techlinkGuardError,
+  );
+
+  setWalletBalance("100.00");
+  const txBeforeTechlink = txCount();
+  const techlinkRouteFetch = installFetchStub((url) => failFetch(url));
+  const techlinkRoute = await purchaseRoute.POST(jsonRequest("/api/purchase", purchaseBody()));
+  const techlinkRouteBody = await techlinkRoute.json();
+  techlinkRouteFetch.restore();
+  check(
+    "techlink purchase route rejects before wallet debit, ledger write or provider call",
+    techlinkRoute.status === 503 &&
+      techlinkRouteBody.code === "provider_unavailable" &&
+      wallet().balance === "100.00" &&
+      txCount() === txBeforeTechlink &&
+      techlinkRouteFetch.calls.length === 0 &&
+      serializedContainsSecrets(techlinkRouteBody).length === 0,
+    {
+      status: techlinkRoute.status,
+      body: techlinkRouteBody,
+      wallet: wallet().balance,
+      txCount: txCount(),
+      fetchCalls: techlinkRouteFetch.calls.length,
+    },
+  );
+
   for (const nodeEnv of ["development", "test"]) {
     resetEnv({ nodeEnv, provider: "mock" });
     status = gateway.getDataProviderRuntimeStatus();
@@ -840,6 +898,30 @@ async function main() {
       health.body.dataGateway.providerStatus === "unavailable" &&
       health.body.dataGateway.providerMissing.includes("base_url"),
     health.body.dataGateway,
+  );
+
+  health = await healthFor(
+    { nodeEnv: "test", provider: "techlink" },
+    () => {
+      env.DATA_API_BASE_URL = "https://api.techlinkgh.com/api/v1";
+      env.DATA_API_AUTH_TYPE = "headers";
+      env.DATA_API_KEY = SENTINELS.key;
+    },
+  );
+  check(
+    "health techlink: explicitly unavailable rather than generic-ready",
+    health.body.dataGateway.provider === "techlink" &&
+      health.body.dataGateway.providerMode === "live" &&
+      health.body.dataGateway.providerSafe === false &&
+      health.body.dataGateway.providerStatus === "unavailable" &&
+      health.body.dataGateway.providerMissing.includes("rollout_approval") &&
+      String(health.body.dataGateway.providerWarning ?? "").includes("documented adapter contract"),
+    health.body.dataGateway,
+  );
+  check(
+    "health techlink: no key/token/secret/account/webhook secret",
+    serializedContainsSecrets(health.body).length === 0,
+    serializedContainsSecrets(health.body),
   );
 
   health = await healthFor(
