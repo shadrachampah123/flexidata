@@ -63,14 +63,25 @@ export function reconcileAttention(summary: ReconcileSummary): string[] {
 }
 
 /** Submission success is NOT delivery evidence. Only correlated status lookup
- * may produce a terminal result for a real provider. No generic status contract
- * has been verified, so generic purchases remain unknown for operator review. */
-export function verifiedState(result: GatewayResult): PurchaseState {
-  if (result.providerCode !== "reloadly") return "unknown";
+ * may produce a terminal result for a real provider. Provider-specific adapters
+ * normalize their documented terminal evidence into these internal states; raw
+ * provider statuses are never interpreted here. */
+export function verifiedState(result: GatewayResult, providerCode = "reloadly"): PurchaseState {
+  if (result.providerCode !== providerCode) return "unknown";
   if (result.providerStatus === "delivered" && result.status === "successful") return "delivered";
   if (result.providerStatus === "rejected" && result.status === "failed") return "failed";
   return result.providerStatus === "accepted" ? "pending" : "unknown";
 }
+
+export type ProviderStatusLookup = (reference: string, providerReference: string) => Promise<GatewayResult>;
+export type ProviderStateVerifier = (result: GatewayResult) => PurchaseState;
+export type ReconcileProviderOptions = {
+  /** Exact provider identity used in the claim query; never inferred from a response. */
+  provider: string;
+  lookup: ProviderStatusLookup;
+  verify?: ProviderStateVerifier;
+  assertConfiguration?: () => void;
+};
 
 export class PurchaseLifecycle {
   constructor(private readonly database: Pool = pool) {}
@@ -205,20 +216,32 @@ export class PurchaseLifecycle {
   }
 
   /** Bounded, leased, fenced status reads. NEVER submits a purchase.
-   * Default lookup requires sandbox configuration; that is checked INSIDE the
-   * claim transaction, so a misconfigured run rolls back its claim and consumes
-   * no poll budget. Each row is isolated: one failed settlement does not stop
-   * the batch, and failures are raised after the batch as PurchaseReconcileError. */
-  async reconcile(limit = 20, lookup = lookupReloadlySandbox) {
+   * The provider is an explicit claim-query parameter and the lookup/verifier
+   * are supplied by that provider's adapter. Default lookup requires sandbox
+   * configuration; that is checked INSIDE the claim transaction, so a
+   * misconfigured run rolls back its claim and consumes no poll budget. Each
+   * row is isolated: one failed settlement does not stop the batch, and
+   * failures are raised after the batch as PurchaseReconcileError. */
+  async reconcile(
+    limit = 20,
+    lookup: ProviderStatusLookup = lookupReloadlySandbox,
+    options: Omit<ReconcileProviderOptions, "lookup" | "provider"> & { provider?: string } = {},
+  ) {
+    const provider = options.provider ?? "reloadly";
+    if (!/^[a-z0-9_-]{1,40}$/.test(provider)) throw new PurchaseConflict("Invalid reconciliation provider");
+    const verify = options.verify ?? ((result: GatewayResult) => verifiedState(result, provider));
+    const assertConfiguration = options.assertConfiguration ??
+      (lookup === lookupReloadlySandbox ? assertReloadlySandboxConfiguration : undefined);
     const token = randomUUID();
     const claimed = await this.atomic(async client => {
       const rows = await client.query(`WITH due AS (
-        SELECT ref FROM purchase_attempts WHERE provider='reloadly' AND provider_reference IS NOT NULL
+        SELECT ref FROM purchase_attempts WHERE provider=$3 AND provider_reference IS NOT NULL
         AND state IN ('submitted','pending','unknown') AND poll_count<${MAX_PURCHASE_POLLS} AND next_poll_at<=now()
         AND (lease_until IS NULL OR lease_until<now()) ORDER BY next_poll_at FOR UPDATE SKIP LOCKED LIMIT $1
       ) UPDATE purchase_attempts a SET lease_until=now()+interval '2 minutes',lease_token=$2,
-        poll_count=poll_count+1 FROM due WHERE a.ref=due.ref RETURNING a.*`, [Math.max(1, Math.min(100, limit)), token]);
-      if (rows.rowCount && lookup === lookupReloadlySandbox) assertReloadlySandboxConfiguration();
+        poll_count=poll_count+1 FROM due WHERE a.ref=due.ref RETURNING a.*`,
+      [Math.max(1, Math.min(100, limit)), token, provider]);
+      if (rows.rowCount && assertConfiguration) assertConfiguration();
       return rows.rows;
     });
     let failed = 0;
@@ -226,7 +249,7 @@ export class PurchaseLifecycle {
       let state: PurchaseState = "unknown";
       try {
         const result = await lookup(attempt.ref, attempt.provider_reference);
-        if (result.providerReference === attempt.provider_reference) state = verifiedState(result);
+        if (result.providerReference === attempt.provider_reference) state = verify(result);
       } catch { /* conservative unknown, bounded next read */ }
       try {
         await this.settle(attempt.ref, attempt.provider_reference, state, token);
@@ -237,6 +260,10 @@ export class PurchaseLifecycle {
     }
     if (failed > 0) throw new PurchaseReconcileError(failed, claimed.length);
     return claimed.length;
+  }
+
+  async reconcileProvider(options: ReconcileProviderOptions, limit = 20) {
+    return this.reconcile(limit, options.lookup, options);
   }
 
   /** Read-only aggregate used by monitoring. Counts only; no provider data. */

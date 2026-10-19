@@ -39,8 +39,8 @@ async function main() {
     const order = (ref: string) => ({ reference: ref, walletId: 1, network: "MTN" as const,
       recipient: "0244123456", planLabel: "1GB", category: "test", providerProductCode: "fixture", amount: 10 });
     const balance = async () => Number((await database.query("SELECT balance FROM wallets WHERE id=1")).rows[0].balance);
-    const result = (id: string | null, state = "accepted") => ({
-      providerCode: "reloadly", providerReference: id, providerStatus: state,
+    const result = (id: string | null, state = "accepted", providerCode = "reloadly") => ({
+      providerCode, providerReference: id, providerStatus: state,
       status: state === "delivered" ? "successful" as const : state === "rejected" ? "failed" as const : "pending" as const,
       fulfillmentStatus: "processing" as const, providerMessage: null, floatBalance: null, rawRequest: {}, rawResponse: {},
     });
@@ -139,6 +139,29 @@ async function main() {
     assert.equal(await balance(), 970);
     for (const status of ["future", "SUCCESSFUL", "FAILED", "not delivered"]) assert.equal(verifiedState(result("104", status)), "unknown");
     pass("mismatched IDs and unknown statuses cannot deliver/refund");
+
+    // Provider-isolated reconciliation fixture: a non-Reloadly adapter can be
+    // supplied explicitly without broadening the default poller or interpreting
+    // raw provider status strings in the lifecycle.
+    await lifecycle.create(order("TECHLINK-MOCK"), "techlink-mock");
+    await lifecycle.submit(order("TECHLINK-MOCK"), async () => result("TECHLINK-REF", "accepted", "techlink"));
+    await database.query("UPDATE purchase_attempts SET provider='techlink',next_poll_at=now() WHERE ref='TECHLINK-MOCK'");
+    let techlinkReads = 0;
+    assert.equal(await restarted.reconcileProvider({
+      provider: "techlink",
+      lookup: async (_, id) => { techlinkReads++; return result(id, "accepted", "techlink"); },
+    }), 1);
+    assert.equal(techlinkReads, 1);
+    assert.equal((await database.query("SELECT state FROM purchase_attempts WHERE ref='TECHLINK-MOCK'")).rows[0].state, "pending");
+    await database.query("UPDATE purchase_attempts SET next_poll_at=now() WHERE ref='TECHLINK-MOCK'");
+    await restarted.reconcileProvider({
+      provider: "techlink",
+      lookup: async (_, id) => result(id, "delivered", "techlink"),
+    });
+    assert.equal((await database.query("SELECT state FROM purchase_attempts WHERE ref='TECHLINK-MOCK'")).rows[0].state, "delivered");
+    assert.equal((await database.query("SELECT status FROM transactions WHERE ref='TECHLINK-MOCK'")).rows[0].status, "successful");
+    pass("provider-isolated reconciliation accepts an explicit Techlink fixture adapter without changing the default Reloadly poller");
+
     // Expired lease + stale worker fencing.
     await database.query("UPDATE purchase_attempts SET lease_token='00000000-0000-0000-0000-000000000001',lease_until=now()-interval '1 minute',next_poll_at=now() WHERE ref='BAD'");
     await restarted.reconcile(20, async (_, id) => result(id));

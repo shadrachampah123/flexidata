@@ -64,6 +64,9 @@ jobs:
       - name: Verify Reloadly sandbox contract and activation lock (network-free)
         run: npm run verify:reloadly
 
+      - name: Verify Techlink contract boundary and mocked lifecycle rules (network-free)
+        run: npm run verify:techlink
+
       - name: Verify Part 6.4 go/no-go automation (provider lock, schema agreement, migration audit; network-free)
         run: npm run verify:production-readiness
 

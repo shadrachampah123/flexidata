@@ -132,6 +132,10 @@ export function getDataProviderCode(): string {
   return env("DATA_API_PROVIDER")?.toLowerCase() ?? "mock";
 }
 
+export function isTechlinkProviderCode(value: string): boolean {
+  return ["techlink", "techlink_gh", "techlink-gh", "techlinkgh"].includes(value.trim().toLowerCase());
+}
+
 /**
  * Missing *kinds* of configuration. Deliberately categories, never the values:
  * health output and errors must never include a key, token, secret, URL, or any
@@ -255,7 +259,7 @@ export function getDataProviderRuntimeStatus(): DataProviderRuntimeStatus {
   // an HTTP 200 or success flag as delivery evidence, which is unsafe for an
   // asynchronous provider. Keep every spelling of the intended provider slug
   // explicitly unavailable until a dedicated, tested adapter is added.
-  if (["techlink", "techlink_gh", "techlink-gh", "techlinkgh"].includes(providerCode)) {
+  if (isTechlinkProviderCode(providerCode)) {
     return {
       ...base,
       safe: false,

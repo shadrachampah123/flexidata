@@ -7,6 +7,7 @@ import { requireAccount } from "@/lib/api-auth";
 import { creditReferralReward } from "@/lib/referrals";
 import {
   getDataProviderCode,
+  isTechlinkProviderCode,
   DataProviderConfigError,
   DataProviderFloatError,
   DataProviderRequestError,
@@ -19,6 +20,7 @@ import {
   upsertProviderFloatBalance,
 } from "@/lib/data-gateway";
 import { estimateDeliverySeconds } from "@/lib/fulfillment";
+import { lookupTechlinkProductCode } from "@/lib/provider-catalogue";
 import {
   BUNDLE_PLAN_INSERT_FIELDS,
   buildCompatInsert,
@@ -57,10 +59,22 @@ type FoundPlan = {
 };
 
 /**
- * Plan lookup that tolerates a database without `provider_product_code`: the
- * aggregator SKU is then derived from the plan identity instead of failing the
- * whole purchase.
+ * Generic legacy providers may use the existing derived fallback. Techlink is
+ * different: its supplier bundle ID must come from an exact, verified catalogue
+ * entry and can never be inferred from the FlexiData plan identity.
  */
+function resolvePlanProductCode(
+  network: string,
+  category: string,
+  label: string,
+  storedCode: string | null | undefined,
+): string | null {
+  if (isTechlinkProviderCode(getDataProviderCode())) {
+    return lookupTechlinkProductCode({ network, category, label });
+  }
+  return storedCode?.trim() || deriveProviderProductCode(network, category, label);
+}
+
 async function findBundlePlan(
   network: string,
   category: string,
@@ -89,11 +103,9 @@ async function findBundlePlan(
 
     const row = rows[0];
     if (!row) return null;
-    return {
-      ...row,
-      providerProductCode:
-        row.providerProductCode?.trim() || deriveProviderProductCode(network, category, label),
-    };
+    const providerProductCode = resolvePlanProductCode(network, category, label, row.providerProductCode);
+    if (!providerProductCode) return null;
+    return { ...row, providerProductCode };
   }
 
   const rows = await db
@@ -110,7 +122,9 @@ async function findBundlePlan(
 
   const row = rows[0];
   if (!row) return null;
-  return { ...row, providerProductCode: deriveProviderProductCode(network, category, label) };
+  const providerProductCode = resolvePlanProductCode(network, category, label, null);
+  if (!providerProductCode) return null;
+  return { ...row, providerProductCode };
 }
 
 function clampText(value: string | null | undefined, max = 200): string {

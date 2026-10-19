@@ -39,6 +39,7 @@
     "report:paystack-transactions": "tsx scripts/report-paystack-transactions.ts",
     "report:wallet-audit": "tsx scripts/report-wallet-audit.ts",
     "verify:reloadly": "tsx --conditions=react-server scripts/verify-reloadly.ts",
+    "verify:techlink": "tsx --conditions=react-server scripts/verify-techlink.ts",
     "verify:purchase-lifecycle": "tsx --conditions=react-server scripts/verify-purchase-lifecycle.ts",
     "reconcile:purchases": "tsx --conditions=react-server scripts/reconcile-purchases.ts",
     "migrate:purchase-attempts": "tsx scripts/apply-purchase-attempts-migration.ts",
