@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { scheduledTopups } from "@/db/schema";
 import { requireAccount } from "@/lib/api-auth";
 import { isValidPhone } from "@/lib/format";
+import { getDataProviderCode, isTechlinkProviderCode } from "@/lib/data-gateway";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,13 @@ export async function POST(req: Request) {
     const auth = await requireAccount();
     if (!auth.ok) return auth.response;
     const { wallet } = auth;
+
+    // Scheduled top-ups persist only the legacy label/price shape and have no
+    // live provider-ID or revalidation seam. Do not create stale Techlink
+    // schedules until the scheduler can use the authenticated catalogue.
+    if (isTechlinkProviderCode(getDataProviderCode())) {
+      return Response.json({ ok: false, error: "Recurring Techlink top-ups are unavailable until live catalogue scheduling is implemented" }, { status: 503 });
+    }
 
     const body = (await req.json()) as CreateBody;
     const { network, planLabel } = body;

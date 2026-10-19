@@ -1,12 +1,13 @@
 import "server-only";
+import { toGhanaMsisdn } from "@/lib/format";
+import { normalizeGhanaMobileStrict } from "@/lib/ghana-mobile";
 import type { DataBundleOrder, GatewayResult } from "@/lib/data-gateway";
 
 /**
- * Techlink is intentionally contract-injected. This module contains the
- * provider boundary and conservative lifecycle rules, but no endpoint paths,
- * payload fields, status strings, product IDs or callback rules. Those values
- * must come from an approved official Techlink contract before a production
- * contract object is added or the provider runtime guard is unlocked.
+ * Techlink's verified server-only boundary. The official paths and payloads
+ * below are limited to the contract supplied for this integration. Provider
+ * status vocabulary and callback authenticity remain deliberately unresolved;
+ * neither is guessed by this module.
  */
 export const TECHLINK_PROVIDER_CODE = "techlink" as const;
 
@@ -465,4 +466,411 @@ export function createTechlinkTestAdapter(input: {
   }
 
   return { providerCode: TECHLINK_PROVIDER_CODE, submit, lookup, verifyCallback };
+}
+
+// ---------------------------------------------------------------------------
+// Verified endpoint transport from the official contract supplied for this
+// integration. The status vocabulary is intentionally not guessed: the
+// Postman summary available to this runtime names the `status` field but does
+// not provide its terminal values. Until those values are independently
+// captured, verify responses remain unresolved.
+// ---------------------------------------------------------------------------
+
+export const TECHLINK_API_BASE_URL = "https://api.techlinkgh.com/api/v1";
+export const TECHLINK_MODE = "sandbox" as const;
+
+export type TechlinkRuntimeStatus = {
+  safe: boolean;
+  readOnlySafe: boolean;
+  mode: "sandbox" | "unavailable";
+  missing: Array<"mode" | "credentials" | "purchase_opt_in" | "rollout_approval">;
+  warning: string;
+};
+
+const TECHLINK_PRODUCTION_WARNING =
+  "Techlink fulfillment is disabled in production pending sandbox verification and rollout approval.";
+const TECHLINK_CONFIG_WARNING =
+  "Techlink requires TECHLINK_MODE=sandbox and a server-side TECHLINK_TEST_API_KEY.";
+const TECHLINK_PURCHASE_WARNING =
+  "Techlink catalogue reads are available, but purchase submission requires explicit sandbox opt-in.";
+
+export function getTechlinkRuntimeStatus(): TechlinkRuntimeStatus {
+  if (process.env.NODE_ENV === "production") {
+    return {
+      safe: false,
+      readOnlySafe: false,
+      mode: "unavailable",
+      missing: ["rollout_approval"],
+      warning: TECHLINK_PRODUCTION_WARNING,
+    };
+  }
+  const missing: TechlinkRuntimeStatus["missing"] = [];
+  if (process.env.TECHLINK_MODE?.trim().toLowerCase() !== TECHLINK_MODE) missing.push("mode");
+  if (!process.env.TECHLINK_TEST_API_KEY?.trim()) missing.push("credentials");
+  const readOnlySafe = missing.length === 0;
+  if (!readOnlySafe) {
+    return { safe: false, readOnlySafe: false, mode: "unavailable", missing, warning: TECHLINK_CONFIG_WARNING };
+  }
+  if (process.env.TECHLINK_ALLOW_PURCHASES?.trim().toLowerCase() !== "true") {
+    missing.push("purchase_opt_in");
+    return { safe: false, readOnlySafe: true, mode: "sandbox", missing, warning: TECHLINK_PURCHASE_WARNING };
+  }
+  return { safe: true, readOnlySafe: true, mode: "sandbox", missing: [], warning: "" };
+}
+
+type TechlinkConfigured = {
+  baseUrl: string;
+  apiKey: string;
+};
+
+function configuredTechlink(readOnly: boolean): TechlinkConfigured {
+  const status = getTechlinkRuntimeStatus();
+  if ((!readOnly && !status.safe) || (readOnly && !status.readOnlySafe)) {
+    throw new TechlinkConfigurationError(status.warning);
+  }
+  const apiKey = process.env.TECHLINK_TEST_API_KEY?.trim();
+  if (!apiKey) throw new TechlinkConfigurationError(TECHLINK_CONFIG_WARNING);
+  return { baseUrl: `${TECHLINK_API_BASE_URL}/`, apiKey };
+}
+
+export class TechlinkApiError extends Error {
+  constructor(readonly httpStatus: number, message: string) {
+    super(message);
+    this.name = "TechlinkApiError";
+  }
+}
+
+export class TechlinkCatalogueError extends Error {
+  constructor(message = "The current Techlink catalogue does not contain the requested bundle.") {
+    super(message);
+    this.name = "TechlinkCatalogueError";
+  }
+}
+
+export type TechlinkBundle = {
+  id: string;
+  name: string;
+  size: string;
+  price: number;
+  validity: string;
+};
+
+export type TechlinkCatalogue = {
+  provider: string;
+  bundles: TechlinkBundle[];
+};
+
+function apiObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function apiString(value: unknown, max: number): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= max ? trimmed : null;
+}
+
+function apiNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value.replace(/,/g, ""));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function apiBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function isTechlinkNetwork(value: unknown): value is DataBundleOrder["network"] {
+  return value === "MTN" || value === "TELECEL";
+}
+
+function normalizeTechlinkPhone(value: string): string {
+  const normalized = normalizeGhanaMobileStrict(value);
+  if (!normalized.ok) throw new TechlinkCatalogueError("A valid Ghana mobile number is required for Techlink.");
+  return toGhanaMsisdn(normalized.msisdn10);
+}
+
+function requestPath(path: string, query?: Record<string, string>): string {
+  const relativePath = path.replace(/^\/+/, "");
+  const url = new URL(relativePath, TECHLINK_API_BASE_URL.endsWith("/") ? TECHLINK_API_BASE_URL : `${TECHLINK_API_BASE_URL}/`);
+  for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
+  return `${url.pathname}${url.search}`;
+}
+
+async function officialRequest(
+  config: TechlinkConfigured,
+  method: "GET" | "POST",
+  path: string,
+  body?: unknown,
+): Promise<TechlinkHttpResponse> {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "x-api-key": config.apiKey,
+  };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  try {
+    return await fetchTechlinkTransport({ method, path, headers, body }, config.baseUrl, DEFAULT_TIMEOUT_MS);
+  } catch (error) {
+    if (error instanceof TechlinkConfigurationError) throw error;
+    throw new TechlinkTransportError();
+  }
+}
+
+function responseObject(response: TechlinkHttpResponse): Record<string, unknown> {
+  const body = apiObject(response.body);
+  if (!body) throw new TechlinkContractError();
+  return body;
+}
+
+function ensureSuccessEnvelope(response: TechlinkHttpResponse): Record<string, unknown> {
+  const body = responseObject(response);
+  if (!isSuccessHttpStatus(response.status)) {
+    throw new TechlinkApiError(response.status, response.status === 401
+      ? "Techlink authentication was rejected."
+      : "Techlink request was not accepted.");
+  }
+  if (apiBoolean(body.success) !== true) {
+    throw new TechlinkApiError(response.status, "Techlink returned an unsuccessful response.");
+  }
+  return body;
+}
+
+function parseCatalogue(response: TechlinkHttpResponse): TechlinkCatalogue {
+  const body = ensureSuccessEnvelope(response);
+  if (!Array.isArray(body.bundles) || !apiString(body.provider, 80)) throw new TechlinkContractError();
+  const bundles: TechlinkBundle[] = [];
+  for (const raw of body.bundles) {
+    const item = apiObject(raw);
+    const id = apiString(item?.id, MAX_REFERENCE_LENGTH);
+    const name = apiString(item?.name, 120);
+    const size = apiString(item?.size, 80);
+    const price = apiNumber(item?.price);
+    const validity = apiString(item?.validity, 80);
+    if (!id || !name || !size || price === null || price < 0 || !validity) throw new TechlinkContractError();
+    bundles.push({ id, name, size, price, validity });
+  }
+  return { provider: apiString(body.provider, 80)!, bundles };
+}
+
+/** Read-only live catalogue call. It never creates an order. */
+export async function fetchTechlinkCatalogue(network: DataBundleOrder["network"], phone: string): Promise<TechlinkCatalogue> {
+  if (!isTechlinkNetwork(network)) throw new TechlinkCatalogueError("Unsupported Techlink network.");
+  const config = configuredTechlink(true);
+  const response = await officialRequest(config, "GET", requestPath("/data/bundles", {
+    network,
+    phone: normalizeTechlinkPhone(phone),
+  }));
+  return parseCatalogue(response);
+}
+
+/** Resolve only an exact ID returned by the current live catalogue. */
+export async function fetchTechlinkBundle(
+  network: DataBundleOrder["network"],
+  phone: string,
+  bundleId: string,
+): Promise<TechlinkBundle> {
+  const wanted = apiString(bundleId, MAX_REFERENCE_LENGTH);
+  if (!wanted) throw new TechlinkCatalogueError();
+  const catalogue = await fetchTechlinkCatalogue(network, phone);
+  const bundle = catalogue.bundles.find((candidate) => candidate.id === wanted);
+  if (!bundle) throw new TechlinkCatalogueError();
+  return bundle;
+}
+
+export type TechlinkOrderEnvelope = {
+  httpStatus: number;
+  body: Record<string, unknown>;
+};
+
+/** Read-only order history for operator/reconciliation tooling. */
+export async function fetchTechlinkOrderHistory(page = 1, limit = 25): Promise<TechlinkOrderEnvelope> {
+  const safePage = Number.isInteger(page) && page >= 1 ? page : 1;
+  const safeLimit = Number.isInteger(limit) && limit >= 1 && limit <= 100 ? limit : 25;
+  const config = configuredTechlink(true);
+  const response = await officialRequest(config, "GET", requestPath("/orders", {
+    page: String(safePage),
+    limit: String(safeLimit),
+  }));
+  if (!isSuccessHttpStatus(response.status)) throw new TechlinkApiError(response.status, "Techlink order history request was not accepted.");
+  return { httpStatus: response.status, body: responseObject(response) };
+}
+
+/** Read-only single-order lookup. */
+export async function fetchTechlinkOrder(orderId: string): Promise<TechlinkOrderEnvelope> {
+  const id = apiString(orderId, MAX_REFERENCE_LENGTH);
+  if (!id) throw new TechlinkCatalogueError("A valid Techlink order ID is required.");
+  const config = configuredTechlink(true);
+  const response = await officialRequest(config, "GET", requestPath(`/orders/${encodeURIComponent(id)}`));
+  if (!isSuccessHttpStatus(response.status)) throw new TechlinkApiError(response.status, "Techlink order lookup was not accepted.");
+  return { httpStatus: response.status, body: responseObject(response) };
+}
+
+export type TechlinkVerification = {
+  orderId: string;
+  status: string;
+  changed: boolean | null;
+  message: string | null;
+  success: boolean | null;
+};
+
+/**
+ * Verify an order with the documented POST endpoint. No request body is added:
+ * the documented contract identifies the order in the path and does not define
+ * additional POST fields.
+ */
+export async function verifyTechlinkOrder(orderId: string): Promise<TechlinkVerification> {
+  const id = apiString(orderId, MAX_REFERENCE_LENGTH);
+  if (!id) throw new TechlinkCatalogueError("A valid Techlink order ID is required.");
+  const config = configuredTechlink(true);
+  const response = await officialRequest(config, "POST", requestPath(`/orders/${encodeURIComponent(id)}/verify`));
+  if (!isSuccessHttpStatus(response.status)) throw new TechlinkApiError(response.status, "Techlink order verification was not accepted.");
+  const body = responseObject(response);
+  const responseOrderId = apiString(body.orderId, MAX_REFERENCE_LENGTH);
+  const status = apiString(body.status, MAX_STATUS_LENGTH);
+  const changed = apiBoolean(body.changed);
+  const success = apiBoolean(body.success);
+  const message = apiString(body.message, MAX_MESSAGE_LENGTH);
+  if (!responseOrderId || responseOrderId !== id || !status || changed === null || success === null || !message) {
+    throw new TechlinkContractError();
+  }
+  return {
+    orderId: responseOrderId,
+    status,
+    changed,
+    message,
+    success,
+  };
+}
+
+export type TechlinkStatusClassification = "delivered" | "failed" | "pending" | "unknown";
+export type TechlinkStatusClassifier = (providerStatus: string) => TechlinkStatusClassification;
+
+/**
+ * The status strings are deliberately supplied by the verified contract rather
+ * than guessed here. Until the exact Postman status vocabulary is captured,
+ * this default keeps every verify response unresolved.
+ */
+export const unresolvedTechlinkStatus: TechlinkStatusClassifier = () => "unknown";
+
+export function techlinkVerificationResult(
+  reference: string,
+  verification: TechlinkVerification,
+  classify: TechlinkStatusClassifier = unresolvedTechlinkStatus,
+): GatewayResult {
+  const classification = verification.success === true ? classify(verification.status) : "unknown";
+  const common = {
+    providerCode: TECHLINK_PROVIDER_CODE,
+    providerReference: verification.orderId,
+    providerStatus: verification.status.slice(0, MAX_STATUS_LENGTH),
+    providerMessage: verification.message,
+    floatBalance: null,
+    rawRequest: {},
+    rawResponse: cleanAudit({
+      orderId: verification.orderId,
+      status: verification.status,
+      changed: verification.changed,
+      message: verification.message,
+      success: verification.success,
+    }),
+  } satisfies Pick<GatewayResult, "providerCode" | "providerReference" | "providerStatus" | "providerMessage" | "floatBalance" | "rawRequest" | "rawResponse">;
+  if (classification === "delivered") return { ...common, status: "successful", fulfillmentStatus: "delivered" };
+  if (classification === "failed") return { ...common, status: "failed", fulfillmentStatus: "failed" };
+  return { ...common, status: "pending", fulfillmentStatus: "processing" };
+}
+
+/** Reconciliation lookup with conservative unresolved default. */
+export async function lookupTechlinkSandbox(
+  reference: string,
+  providerReference: string,
+  classify: TechlinkStatusClassifier = unresolvedTechlinkStatus,
+): Promise<GatewayResult> {
+  const verification = await verifyTechlinkOrder(providerReference);
+  if (verification.orderId !== providerReference) {
+    return {
+      status: "pending",
+      fulfillmentStatus: "processing",
+      providerCode: TECHLINK_PROVIDER_CODE,
+      providerReference,
+      providerStatus: "unknown",
+      providerMessage: "Techlink order correlation could not be verified.",
+      floatBalance: null,
+      rawRequest: {},
+      rawResponse: {},
+    };
+  }
+  return techlinkVerificationResult(reference, verification, classify);
+}
+
+/**
+ * Submit exactly one purchase request. HTTP 201 + success/orderId means
+ * accepted/pending, never delivered. A response with no authoritative order ID
+ * remains unresolved so the lifecycle will not resubmit it.
+ */
+export async function submitTechlinkPurchase(order: DataBundleOrder): Promise<GatewayResult> {
+  const config = configuredTechlink(false);
+  if (!isTechlinkNetwork(order.network) || !apiString(order.providerProductCode, MAX_REFERENCE_LENGTH)) {
+    throw new TechlinkContractError();
+  }
+  const phone = normalizeTechlinkPhone(order.recipient);
+  let response: TechlinkHttpResponse;
+  try {
+    response = await officialRequest(config, "POST", requestPath("/data/purchase"), {
+      network: order.network,
+      phone: phone,
+      bundleId: order.providerProductCode,
+    });
+  } catch {
+    return {
+      status: "pending",
+      fulfillmentStatus: "processing",
+      providerCode: TECHLINK_PROVIDER_CODE,
+      providerReference: null,
+      providerStatus: "unknown",
+      providerMessage: "Techlink submission outcome is unresolved; do not resubmit automatically.",
+      floatBalance: null,
+      rawRequest: {},
+      rawResponse: {},
+    };
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = responseObject(response);
+  } catch {
+    return {
+      status: "pending", fulfillmentStatus: "processing", providerCode: TECHLINK_PROVIDER_CODE,
+      providerReference: null, providerStatus: "unknown",
+      providerMessage: "Techlink submission response could not be verified.", floatBalance: null,
+      rawRequest: {}, rawResponse: {},
+    };
+  }
+  const success = apiBoolean(body.success);
+  const orderId = apiString(body.orderId, MAX_REFERENCE_LENGTH);
+  const message = apiString(body.message, MAX_MESSAGE_LENGTH);
+  const newBalance = apiNumber(body.newBalance);
+  const audit = cleanAudit({ success, message, orderId, newBalance });
+  if (response.status === 201 && success === true && orderId && message && newBalance !== null) {
+    return {
+      status: "pending", fulfillmentStatus: "processing", providerCode: TECHLINK_PROVIDER_CODE,
+      providerReference: orderId, providerStatus: "accepted", providerMessage: message ?? "Techlink accepted the order; delivery is not confirmed.",
+      floatBalance: null, rawRequest: { network: order.network, phone: phone, bundleId: order.providerProductCode }, rawResponse: audit,
+    };
+  }
+  if (success === false && !orderId && response.status >= 400 && response.status < 500) {
+    return {
+      status: "failed", fulfillmentStatus: "failed", providerCode: TECHLINK_PROVIDER_CODE,
+      providerReference: null, providerStatus: "rejected", providerMessage: message ?? "Techlink rejected the order.",
+      floatBalance: null, rawRequest: { network: order.network, phone: phone, bundleId: order.providerProductCode }, rawResponse: audit,
+    };
+  }
+  return {
+    status: "pending", fulfillmentStatus: "processing", providerCode: TECHLINK_PROVIDER_CODE,
+    providerReference: orderId, providerStatus: "unknown",
+    providerMessage: "Techlink submission outcome is unresolved; do not resubmit automatically.",
+    floatBalance: null, rawRequest: { network: order.network, phone: phone, bundleId: order.providerProductCode }, rawResponse: audit,
+  };
 }

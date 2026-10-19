@@ -7,6 +7,7 @@ import { insertTransactionRow } from "@/lib/data";
 import { creditReferralReward } from "@/lib/referrals";
 import {
   getDataProviderCode,
+  isTechlinkProviderCode,
   assertDataProviderRuntimeSafe,
   deriveProviderProductCode,
   getStoredProviderFloatBalance,
@@ -26,6 +27,7 @@ import { repairCheckoutOrdersSchema } from "@/lib/seed";
 import { resolveAppBaseUrl } from "@/lib/notifications";
 import { POINTS_RATE } from "@/lib/constants";
 import { groupPhone, isValidPhone, makeRef } from "@/lib/format";
+import { fetchTechlinkBundle } from "@/lib/techlink";
 
 /**
  * Paystack checkout orders for data bundles.
@@ -108,8 +110,23 @@ async function findBundlePlan(
   network: string,
   category: string,
   label: string,
+  recipient: string,
+  requestedProviderProductCode: string | undefined,
   compat: SchemaCapabilities,
 ): Promise<FoundPlan | null> {
+  if (isTechlinkProviderCode(getDataProviderCode())) {
+    const bundleId = requestedProviderProductCode?.trim();
+    if (!bundleId) return null;
+    const bundle = await fetchTechlinkBundle(network as "MTN" | "TELECEL", recipient, bundleId);
+    return {
+      network,
+      category: "techlink",
+      label: bundle.name,
+      price: bundle.price.toFixed(2),
+      providerProductCode: bundle.id,
+    };
+  }
+
   const where = and(
     eq(bundlePlans.network, network),
     eq(bundlePlans.category, category),
@@ -166,6 +183,8 @@ export async function createCheckoutOrder(params: {
   category: string;
   planLabel: string;
   recipient: string;
+  /** Exact ID returned by the authenticated live catalogue, when Techlink is active. */
+  providerProductCode?: string;
   requestOrigin: string | null;
 }): Promise<{ ref: string; authorizationUrl: string; amount: number; planLabel: string }> {
   // This is a real Paystack charge path, so the data provider must be able to
@@ -187,9 +206,18 @@ export async function createCheckoutOrder(params: {
     throw new CheckoutInputError("Choose a data bundle.");
   }
 
-  // The ONLY price source is the catalog row — never the client.
+  // The ONLY price source is the server-side catalogue: a seeded row for
+  // legacy providers, or a fresh authenticated Techlink response — never the
+  // client.
   const plan = await withSchemaFallback(
-    (compat) => findBundlePlan(network, category, planLabel, compat),
+    (compat) => findBundlePlan(
+      network,
+      category,
+      planLabel,
+      recipient,
+      params.providerProductCode,
+      compat,
+    ),
     "bundle plan lookup",
   );
   if (!plan) throw new CheckoutInputError("Bundle not found.");
@@ -412,11 +440,49 @@ export async function reconcileCheckoutOrder(ref: string): Promise<CheckoutOrder
  * affected rows and returns without touching the provider, so duplicate
  * webhooks can never double-send a bundle.
  */
+async function parkTechlinkCheckout(ref: string, providerStatus: string, providerMessage: string): Promise<void> {
+  await db
+    .update(checkoutOrders)
+    .set({
+      orderStatus: "fulfillment_failed",
+      fulfillmentStatus: "failed",
+      providerStatus,
+      providerMessage,
+      failedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(and(eq(checkoutOrders.ref, ref), eq(checkoutOrders.orderStatus, "paid")))
+    .catch(() => undefined);
+}
+
 async function fulfillPaidOrder(ref: string): Promise<void> {
-  assertDataProviderRuntimeSafe();
+  const techlink = isTechlinkProviderCode(getDataProviderCode());
+  try {
+    assertDataProviderRuntimeSafe();
+  } catch (error) {
+    if (techlink) {
+      await parkTechlinkCheckout(ref, "provider_unavailable", "Techlink fulfillment is unavailable and needs manual review.");
+      return;
+    }
+    throw error;
+  }
   if (getDataProviderCode() !== "mock") {
     const order = await getCheckoutOrder(ref);
     if (!order || order.orderStatus !== "paid") return;
+    if (techlink) {
+      try {
+        const current = await fetchTechlinkBundle(order.network as "MTN" | "TELECEL", order.recipient, order.providerProductCode);
+        const currentCents = Math.round(current.price * 100);
+        const paidCents = Math.round(Number(order.amount) * 100);
+        if (!Number.isInteger(currentCents) || currentCents <= 0 || currentCents !== paidCents) {
+          await parkTechlinkCheckout(ref, "catalogue_changed", "Techlink catalogue price changed; manual payment review is required.");
+          return;
+        }
+      } catch {
+        await parkTechlinkCheckout(ref, "catalogue_unavailable", "Techlink catalogue could not be verified; manual payment review is required.");
+        return;
+      }
+    }
     const lifecycle = new PurchaseLifecycle();
     const submission = { reference: order.ref, walletId: order.walletId,
       network: order.network as "MTN" | "TELECEL", recipient: order.recipient,

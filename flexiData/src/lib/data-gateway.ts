@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { providerFloatBalances } from "@/db/schema";
 import { toGhanaMsisdn } from "@/lib/format";
 import { PROVIDER_FLOAT_TABLE, getSchemaCapabilities, isMissingRelationError } from "@/lib/schema-compat";
+import { getTechlinkRuntimeStatus, submitTechlinkPurchase } from "@/lib/techlink";
 
 export type GatewayTxStatus = "successful" | "pending" | "failed" | "reversed";
 export type GatewayFulfillmentStatus =
@@ -147,6 +148,8 @@ export type DataProviderMissingConfig =
   | "base_url"
   | "auth_type"
   | "credentials"
+  | "mode"
+  | "purchase_opt_in"
   | "rollout_approval";
 
 export type DataProviderRuntimeStatus = {
@@ -190,9 +193,6 @@ const DEVELOPMENT_MOCK_WARNING =
 const INCOMPLETE_REAL_PROVIDER_WARNING =
   "The configured data provider is missing required configuration. Set DATA_API_BASE_URL " +
   "and valid DATA_API_AUTH_TYPE credentials.";
-
-const TECHLINK_ADAPTER_WARNING =
-  "Techlink fulfillment is disabled until its documented adapter contract, test access and catalogue mapping are verified.";
 
 /**
  * Resolve the data provider's runtime safety WITHOUT contacting the provider and
@@ -253,19 +253,19 @@ export function getDataProviderRuntimeStatus(): DataProviderRuntimeStatus {
     };
   }
 
-  // Techlink must never fall through the generic HTTP adapter. Its endpoint,
-  // request/response contract, catalogue identifiers and terminal-status rules
-  // have not been verified in this repository; the generic normalizer can treat
-  // an HTTP 200 or success flag as delivery evidence, which is unsafe for an
-  // asynchronous provider. Keep every spelling of the intended provider slug
-  // explicitly unavailable until a dedicated, tested adapter is added.
+  // Techlink must never fall through the generic HTTP adapter. The dedicated
+  // server-only adapter owns its confirmed paths and response validation; the
+  // generic normalizer could treat an HTTP 200 or success flag as delivery
+  // evidence. The adapter remains sandbox/configuration locked and its
+  // undocumented terminal status vocabulary is unresolved by default.
   if (isTechlinkProviderCode(providerCode)) {
+    const techlink = getTechlinkRuntimeStatus();
     return {
       ...base,
-      safe: false,
-      status: "unavailable",
-      missing: ["rollout_approval"],
-      warning: TECHLINK_ADAPTER_WARNING,
+      safe: techlink.safe,
+      status: techlink.safe ? "ready" : "unavailable",
+      missing: techlink.missing,
+      warning: techlink.warning || null,
     };
   }
 
@@ -669,6 +669,7 @@ export async function submitDataBundleOrder(order: DataBundleOrder): Promise<Gat
   // before this can fail.
   assertDataProviderRuntimeSafe();
   const config = getGatewayConfig();
+  if (isTechlinkProviderCode(config.provider)) return submitTechlinkPurchase(order);
   const payload = buildPurchasePayload(order, config);
 
   if (config.provider === "mock") {

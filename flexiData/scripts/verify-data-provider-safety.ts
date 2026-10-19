@@ -60,6 +60,9 @@ const ENV_KEYS = [
   "DATA_API_SCHEMA_FALLBACKS",
   "FLEXIDATA_TEST_USER_ID",
   "AUTH_SECRET",
+  "TECHLINK_MODE",
+  "TECHLINK_TEST_API_KEY",
+  "TECHLINK_ALLOW_PURCHASES",
 ] as const;
 
 const savedEnv: Record<string, string | undefined> = {};
@@ -82,6 +85,9 @@ function clearDataProviderEnv() {
   delete env.DATA_MOCK_RESULT;
   delete env.DATA_API_SCHEMA_FALLBACKS;
   delete env.FLEXIDATA_TEST_USER_ID;
+  delete env.TECHLINK_MODE;
+  delete env.TECHLINK_TEST_API_KEY;
+  delete env.TECHLINK_ALLOW_PURCHASES;
 }
 
 function resetEnv(options: { nodeEnv: string; provider?: string | null }) {
@@ -312,8 +318,9 @@ async function main() {
       status.provider === provider &&
         status.safe === false &&
         status.status === "unavailable" &&
-        status.missing.includes("rollout_approval") &&
-        String(status.warning).includes("documented adapter contract"),
+        status.missing.includes("credentials") &&
+        status.missing.includes("mode") &&
+        String(status.warning).includes("TECHLINK_TEST_API_KEY"),
       status,
     );
   }
@@ -329,9 +336,9 @@ async function main() {
     techlinkGuardError = error;
   }
   check(
-    "techlink generic activation fails closed before any request",
+    "techlink activation fails closed before any request when sandbox config is absent",
     techlinkGuardError instanceof gateway.DataProviderConfigError &&
-      (techlinkGuardError as Error).message.includes("documented adapter contract") &&
+      (techlinkGuardError as Error).message.includes("TECHLINK_TEST_API_KEY") &&
       serializedContainsSecrets((techlinkGuardError as Error).message).length === 0,
     techlinkGuardError instanceof Error ? techlinkGuardError.message : techlinkGuardError,
   );
@@ -914,8 +921,9 @@ async function main() {
       health.body.dataGateway.providerMode === "live" &&
       health.body.dataGateway.providerSafe === false &&
       health.body.dataGateway.providerStatus === "unavailable" &&
-      health.body.dataGateway.providerMissing.includes("rollout_approval") &&
-      String(health.body.dataGateway.providerWarning ?? "").includes("documented adapter contract"),
+      health.body.dataGateway.providerMissing.includes("credentials") &&
+      health.body.dataGateway.providerMissing.includes("mode") &&
+      String(health.body.dataGateway.providerWarning ?? "").includes("TECHLINK_TEST_API_KEY"),
     health.body.dataGateway,
   );
   check(

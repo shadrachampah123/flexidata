@@ -20,7 +20,7 @@ import {
   upsertProviderFloatBalance,
 } from "@/lib/data-gateway";
 import { estimateDeliverySeconds } from "@/lib/fulfillment";
-import { lookupTechlinkProductCode } from "@/lib/provider-catalogue";
+import { fetchTechlinkBundle, TechlinkApiError, TechlinkCatalogueError, TechlinkConfigurationError } from "@/lib/techlink";
 import {
   BUNDLE_PLAN_INSERT_FIELDS,
   buildCompatInsert,
@@ -40,6 +40,8 @@ type Body = {
   planLabel?: string;
   amount?: number;
   recipient?: string;
+  /** Exact ID returned by the authenticated live provider catalogue. */
+  providerProductCode?: string;
 };
 
 function rollLocalStatus(): "successful" | "pending" | "failed" {
@@ -60,27 +62,31 @@ type FoundPlan = {
 
 /**
  * Generic legacy providers may use the existing derived fallback. Techlink is
- * different: its supplier bundle ID must come from an exact, verified catalogue
- * entry and can never be inferred from the FlexiData plan identity.
+ * different: the exact ID and price must be re-read from the authenticated
+ * catalogue immediately before a purchase, so no cached seeded row can act as
+ * a supplier mapping.
  */
-function resolvePlanProductCode(
-  network: string,
-  category: string,
-  label: string,
-  storedCode: string | null | undefined,
-): string | null {
-  if (isTechlinkProviderCode(getDataProviderCode())) {
-    return lookupTechlinkProductCode({ network, category, label });
-  }
-  return storedCode?.trim() || deriveProviderProductCode(network, category, label);
-}
-
 async function findBundlePlan(
   network: string,
   category: string,
   label: string,
+  recipient: string,
+  requestedProviderProductCode: string | undefined,
   compat: SchemaCapabilities,
 ): Promise<FoundPlan | null> {
+  if (isTechlinkProviderCode(getDataProviderCode())) {
+    const bundleId = requestedProviderProductCode?.trim();
+    if (!bundleId) return null;
+    const bundle = await fetchTechlinkBundle(network as "MTN" | "TELECEL", recipient, bundleId);
+    return {
+      id: 0,
+      network,
+      category: "techlink",
+      label: bundle.name,
+      price: bundle.price.toFixed(2),
+      providerProductCode: bundle.id,
+    };
+  }
   const where = and(
     eq(bundlePlans.network, network),
     eq(bundlePlans.category, category),
@@ -103,8 +109,7 @@ async function findBundlePlan(
 
     const row = rows[0];
     if (!row) return null;
-    const providerProductCode = resolvePlanProductCode(network, category, label, row.providerProductCode);
-    if (!providerProductCode) return null;
+    const providerProductCode = row.providerProductCode?.trim() || deriveProviderProductCode(network, category, label);
     return { ...row, providerProductCode };
   }
 
@@ -122,9 +127,7 @@ async function findBundlePlan(
 
   const row = rows[0];
   if (!row) return null;
-  const providerProductCode = resolvePlanProductCode(network, category, label, null);
-  if (!providerProductCode) return null;
-  return { ...row, providerProductCode };
+  return { ...row, providerProductCode: deriveProviderProductCode(network, category, label) };
 }
 
 function clampText(value: string | null | undefined, max = 200): string {
@@ -171,7 +174,14 @@ export async function POST(req: Request) {
 
     if (kind === "data") {
       const plan = await withSchemaFallback(
-        (compat) => findBundlePlan(network, body.category ?? "", body.planLabel ?? "", compat),
+        (compat) => findBundlePlan(
+          network,
+          body.category ?? "",
+          body.planLabel ?? "",
+          recipient,
+          body.providerProductCode,
+          compat,
+        ),
         "bundle plan lookup",
       );
       if (!plan) return Response.json({ ok: false, error: "Bundle not found" }, { status: 404 });
@@ -454,6 +464,15 @@ export async function POST(req: Request) {
   } catch (error) {
     if (error instanceof PurchaseConflict) return Response.json({ ok: false, error: error.message }, { status: 409 });
     if (error instanceof PurchaseFundsError) return Response.json({ ok: false, error: "insufficient_funds" }, { status: 402 });
+    if (error instanceof TechlinkCatalogueError) {
+      return Response.json({ ok: false, error: "Bundle is no longer available in the live catalogue", code: "catalogue_mismatch" }, { status: 409 });
+    }
+    if (error instanceof TechlinkConfigurationError) {
+      return Response.json({ ok: false, error: "Techlink is not configured for this environment", code: "provider_unavailable" }, { status: 503 });
+    }
+    if (error instanceof TechlinkApiError) {
+      return Response.json({ ok: false, error: "Techlink catalogue could not be verified", code: "provider_request_failed" }, { status: error.httpStatus === 401 ? 503 : 502 });
+    }
     if (error instanceof DataProviderConfigError) {
       return Response.json({ ok: false, error: error.message, code: "provider_unavailable" }, { status: 503 });
     }

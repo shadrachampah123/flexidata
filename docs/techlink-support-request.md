@@ -1,68 +1,74 @@
-# Techlink GH API contract and test-access request
+# Techlink GH contract questions before rollout
 
-**Subject:** Request for official Techlink GH test API contract and read-only sandbox access
+**Subject:** Confirm Techlink GH sandbox status vocabulary, callbacks, and test access
 
 Hello Techlink GH support,
 
-We are integrating Techlink GH mobile-data fulfilment into FlexiData. We will
-not make customer purchases or fund an account while qualifying the integration.
-Please provide the official, current **test/sandbox** contract and a test
-credential through your approved secure channel. Please do not send secrets in
-email or a public ticket.
+FlexiData has implemented a server-only, fail-closed sandbox adapter from the
+contract supplied with the official Postman collection. We will not create live
+orders, fund an account, or enable production fulfillment while qualifying it.
+Please provide any answers and test credentials only through your approved
+secure channel; do not send secrets in email or a public ticket.
 
-We need confirmation of the following items:
+## Contract facts already supplied
 
-1. **Environment and authentication**
-   - Official test base URL and production base URL, including whether the
-     referenced `api.techlinkgh.com` host is correct.
-   - Exact authentication mechanism: header/query name, required prefix or
-     token exchange, key activation/scope, expiry and IP allow-list rules.
-   - A safe read-only credential check, catalogue request, or health endpoint
-     that does not create an order. Please explain the expected response for an
-     invalid, inactive or wrong-environment key; an earlier unaudited attempt
-     returned HTTP 401.
-2. **Catalogue and Ghana network identifiers**
-   - Official catalogue endpoint and response schema.
-   - Exact network/operator identifiers for MTN and Telecel Ghana, if both are
-     supported for mobile data.
-   - The authoritative bundle/product ID field, denomination/price fields,
-     currency, validity and category fields, and whether IDs are stable.
-   - A current test catalogue export or representative read-only response. We
-     will map every FlexiData plan to an explicit provider ID; we will not derive
-     IDs from labels, network names or amounts.
-3. **Order submission**
-   - Exact HTTP method, path, headers and JSON/body schema.
-   - Required recipient format and whether Ghana numbers must include `233`.
-   - Provider order/reference fields and the correlation field echoed in later
-     lookup responses.
-   - Duplicate/custom-reference semantics, idempotency guarantees, rate limits,
-     timeout behavior and whether an accepted order can be safely looked up
-     after a client timeout.
-4. **Authoritative status and finality**
-   - Exact lookup method/path and required identifiers.
-   - Complete documented status vocabulary and terminal-state rules, including
-     accepted, queued, pending, delivered/successful, failed, reversed and
-     unknown/inconsistent responses.
-   - The exact evidence that confirms delivery and the rules for delayed,
-     duplicate, mismatched or malformed responses.
-   - Whether a rejected order is definitive and whether any reversal/refund
-     notification can arrive after acceptance.
-5. **Callbacks/webhooks, if supported**
-   - Event schema and correlation fields.
-   - Signature algorithm, signed bytes, header names, secret provisioning,
-     timestamp/nonce window, replay protection and retry behavior.
-   - Whether callback authenticity can be verified server-to-server and whether
-     lookup remains authoritative over callbacks.
-6. **Test operation**
-   - Test account/wallet limits, supported networks/products, sandbox reset
-     behavior and support escalation contact.
-   - Confirmation that catalogue reads and status lookups are safe for
-     qualification and do not create or charge orders.
+- Base URL: `https://api.techlinkgh.com/api/v1`
+- Authentication: server-side `x-api-key`
+- Catalogue: `GET /data/bundles?network={network}&phone={phone}` with
+  `success`, `provider`, and `bundles[]` fields `id`, `name`, `size`, `price`,
+  and `validity`
+- Purchase: `POST /data/purchase` with `{ network, phone, bundleId }`; documented
+  success is HTTP 201 with `success`, `message`, `orderId`, and `newBalance`
+- History: `GET /orders?page=1&limit=25`
+- Verification: `POST /orders/:orderId/verify` with `success`, `orderId`,
+  `status`, `changed`, and `message`
+- Single order: `GET /orders/:id`
 
-Please identify the document version/date and the support owner who can confirm
-these details. Once verified, we can share our non-secret correlation test cases
-and complete a mocked contract suite before any sandbox request. Until the
-contract and test credential are verified, our integration remains disabled.
+The implementation validates these fields, re-fetches the current catalogue before
+purchase, uses only an exact returned bundle ID, and keeps an accepted order
+pending until authoritative verification. It does not use the generic provider
+normalizer or accept callbacks.
+
+## Remaining questions
+
+1. **Sandbox access and authentication**
+   - Please provide a sandbox/test key through the secure channel and confirm
+     the expected HTTP 401 behavior for an invalid, inactive, or wrong-environment
+     key. We will check only key presence in our environment and will not print
+     or return its value.
+   - Confirm key scope, expiry, IP allow-list, rate limit, and whether the
+     documented base URL is also the sandbox host.
+2. **Phone and catalogue semantics**
+   - Confirm whether `phone` must be a Ghana `233...` MSISDN or may be a local
+     `0...` number.
+   - Confirm the network identifiers accepted for MTN and Telecel Ghana, the
+     price currency/denomination, and whether bundle IDs are stable.
+   - Confirm whether `name` is the customer-facing label and whether any
+     category field exists. FlexiData will not infer a category or an ID.
+3. **Order finality**
+   - Please provide the complete `status` vocabulary returned by
+     `/orders/:orderId/verify` and `/orders/:id`.
+   - Identify which exact status values are terminal delivered, terminal failed,
+     pending/queued, or unresolved, and whether `success`/`changed` can conflict
+     with `status`.
+   - Confirm correlation rules when the order ID is missing, duplicated, delayed,
+     or differs between purchase and verification.
+   - Confirm duplicate submission, timeout, reversal, and eventual-consistency
+     behavior. FlexiData will never blindly retry an ambiguous purchase POST.
+4. **Callbacks/webhooks**
+   - If callbacks exist, provide the event schema, signed bytes, signature header,
+     secret provisioning, timestamp/nonce window, replay protection, and retry
+     behavior. Callbacks remain disabled until these rules are documented.
+5. **Read-only qualification**
+   - Confirm that catalogue reads, order history, single-order lookup, and verify
+     calls used against known test orders are safe and do not create or charge an
+     order.
+   - Provide sandbox limits, supported test networks, reset behavior, and the
+     escalation contact for a stuck test order.
+
+Once these details and a sandbox key are verified, FlexiData can add an exact
+status classifier and run a read-only catalogue smoke test. We will not run a
+live purchase or change production configuration as part of that qualification.
 
 Regards,
 

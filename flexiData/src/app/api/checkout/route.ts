@@ -7,6 +7,7 @@ import { DataProviderConfigError } from "@/lib/data-gateway";
 import { requestOrigin } from "@/lib/notifications";
 import { isPaystackConfigured, PaystackConfigError, PaystackRequestError } from "@/lib/paystack";
 import { isMissingRelationError } from "@/lib/schema-compat";
+import { TechlinkApiError, TechlinkCatalogueError, TechlinkConfigurationError } from "@/lib/techlink";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,7 @@ type Body = {
   category?: string;
   planLabel?: string;
   recipient?: string;
+  providerProductCode?: string;
 };
 
 /**
@@ -56,6 +58,7 @@ export async function POST(req: Request) {
       category: body.category ?? "",
       planLabel: body.planLabel ?? "",
       recipient: body.recipient ?? "",
+      providerProductCode: body.providerProductCode,
       requestOrigin: requestOrigin(req),
     });
 
@@ -70,6 +73,15 @@ export async function POST(req: Request) {
   } catch (error) {
     if (error instanceof CheckoutInputError) {
       return Response.json({ ok: false, error: error.message }, { status: 400 });
+    }
+    if (error instanceof TechlinkCatalogueError) {
+      return Response.json({ ok: false, error: "Bundle is no longer available in the live catalogue", code: "catalogue_mismatch" }, { status: 409 });
+    }
+    if (error instanceof TechlinkConfigurationError) {
+      return Response.json({ ok: false, error: "Techlink is not configured for this environment", code: "provider_unavailable" }, { status: 503 });
+    }
+    if (error instanceof TechlinkApiError) {
+      return Response.json({ ok: false, error: "Techlink catalogue could not be verified", code: "provider_request_failed" }, { status: error.httpStatus === 401 ? 503 : 502 });
     }
     if (error instanceof DataProviderConfigError) {
       // Safe, actionable operator message only — no provider config values,

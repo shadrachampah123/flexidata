@@ -67,6 +67,9 @@ jobs:
       - name: Verify Techlink contract boundary and mocked lifecycle rules (network-free)
         run: npm run verify:techlink
 
+      - name: Optional Techlink sandbox catalogue read (skips without explicit test configuration)
+        run: npm run verify:techlink-sandbox
+
       - name: Verify Part 6.4 go/no-go automation (provider lock, schema agreement, migration audit; network-free)
         run: npm run verify:production-readiness
 

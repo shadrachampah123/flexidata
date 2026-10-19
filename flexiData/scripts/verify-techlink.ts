@@ -1,7 +1,8 @@
 /**
- * Contract-injected Techlink adapter tests. Every response and request is a
- * local fixture; no Techlink host, database, payment provider or wallet is
- * contacted. The fixture names are not Techlink API fields or statuses.
+ * Techlink adapter tests. Every response and request is a local fixture; no
+ * Techlink host, database, payment provider or wallet is contacted. The first
+ * section exercises the contract-injected lifecycle seam; the second section
+ * exercises the confirmed HTTP adapter through a local fetch queue.
  */
 import assert from "node:assert/strict";
 import {
@@ -9,6 +10,13 @@ import {
   type TechlinkContract,
   type TechlinkHttpRequest,
   type TechlinkHttpResponse,
+  fetchTechlinkCatalogue,
+  fetchTechlinkBundle,
+  lookupTechlinkSandbox,
+  submitTechlinkPurchase,
+  TechlinkApiError,
+  TechlinkContractError,
+  unresolvedTechlinkStatus,
 } from "../src/lib/techlink";
 import {
   TECHLINK_CATALOGUE,
@@ -17,7 +25,13 @@ import {
 } from "../src/lib/provider-catalogue";
 
 const env = process.env as Record<string, string | undefined>;
-const saved = { nodeEnv: env.NODE_ENV, key: env.TECHLINK_TEST_API_KEY };
+const saved = {
+  nodeEnv: env.NODE_ENV,
+  key: env.TECHLINK_TEST_API_KEY,
+  mode: env.TECHLINK_MODE,
+  allowPurchases: env.TECHLINK_ALLOW_PURCHASES,
+};
+const savedFetch = globalThis.fetch;
 const fixtureKey = "fixture-key-never-sent-to-a-provider";
 const order = {
   reference: "FIXTURE-ORDER-1",
@@ -201,7 +215,101 @@ async function main() {
   assert.equal(lookupExplicitProviderProductCode(fixtureCatalogue, { ...fixtureCatalogue[0], label: "different" }), null);
   console.log("PASS catalogue resolver accepts only exact explicit entries; Techlink catalogue remains empty");
 
+  // Exercise the confirmed HTTP contract through the real server-only adapter,
+  // but replace fetch with a local queue. No Techlink host is contacted.
+  const officialResponses: Array<{ status: number; body: unknown }> = [];
+  const officialCalls: Array<{ input: string; init: RequestInit | undefined }> = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    officialCalls.push({ input: String(input), init });
+    const next = officialResponses.shift();
+    if (!next) throw new Error("official fixture transport exhausted");
+    return new Response(JSON.stringify(next.body), {
+      status: next.status,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  env.TECHLINK_MODE = "sandbox";
+  env.TECHLINK_ALLOW_PURCHASES = "true";
+
+  officialResponses.push({ status: 200, body: {
+    success: true,
+    provider: "fixture-techlink",
+    bundles: [{ id: "live-bundle-1", name: "Fixture 1GB", size: "1GB", price: 12.5, validity: "7 days" }],
+  } });
+  const liveCatalogue = await fetchTechlinkCatalogue("MTN", order.recipient);
+  assert.equal(liveCatalogue.bundles[0].id, "live-bundle-1");
+  assert.equal(new URL(officialCalls[0].input).pathname, "/api/v1/data/bundles");
+  assert.equal(new URL(officialCalls[0].input).searchParams.get("phone"), "233244123456");
+  assert.equal(new Headers(officialCalls[0].init?.headers).get("x-api-key"), fixtureKey);
+  console.log("PASS authenticated catalogue uses the confirmed path and exact returned ID");
+
+  officialResponses.push({ status: 200, body: {
+    success: true,
+    provider: "fixture-techlink",
+    bundles: [{ id: "live-bundle-1", name: "Fixture 1GB", size: "1GB", price: 12.5, validity: "7 days" }],
+  } });
+  assert.equal((await fetchTechlinkBundle("MTN", order.recipient, "live-bundle-1")).price, 12.5);
+  console.log("PASS purchase resolution rechecks the exact ID against a fresh catalogue");
+
+  officialResponses.push({ status: 200, body: { success: true, provider: "fixture-techlink", bundles: [{ id: "x" }] } });
+  await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), TechlinkContractError);
+  console.log("PASS malformed catalogue response fails closed");
+
+  officialResponses.push({ status: 401, body: { success: false, message: "unauthorized fixture" } });
+  await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
+    error instanceof TechlinkApiError && error.httpStatus === 401,
+  );
+  console.log("PASS HTTP 401 is treated as failed authentication");
+
+  officialResponses.push({ status: 201, body: {
+    success: true, message: "accepted fixture", orderId: "techlink-order-1", newBalance: 98.5,
+  } });
+  const acceptedOfficial = await submitTechlinkPurchase(order);
+  assert.equal(acceptedOfficial.status, "pending");
+  assert.equal(acceptedOfficial.providerReference, "techlink-order-1");
+  assert.equal(acceptedOfficial.fulfillmentStatus, "processing");
+  const purchaseCall = officialCalls[officialCalls.length - 1];
+  assert.equal(new URL(purchaseCall.input).pathname, "/api/v1/data/purchase");
+  assert.deepEqual(JSON.parse(String(purchaseCall.init?.body)), {
+    network: "MTN",
+    phone: "233244123456",
+    bundleId: "fixture-product-id",
+  });
+  console.log("PASS HTTP 201 plus success is accepted evidence, never delivery; purchase body is exact");
+
+  officialResponses.push({ status: 400, body: { success: false, message: "insufficient balance" } });
+  const insufficientOfficial = await submitTechlinkPurchase({ ...order, reference: "INSUFFICIENT" });
+  assert.equal(insufficientOfficial.status, "failed");
+  assert.equal(insufficientOfficial.providerStatus, "rejected");
+  console.log("PASS explicit insufficient-balance rejection is surfaced without retry");
+
+  globalThis.fetch = (async () => { throw new Error("synthetic timeout"); }) as typeof fetch;
+  const timedOutOfficial = await submitTechlinkPurchase({ ...order, reference: "TIMEOUT" });
+  assert.equal(timedOutOfficial.status, "pending");
+  assert.equal(timedOutOfficial.providerReference, null);
+  console.log("PASS purchase timeout remains ambiguous and is not blindly retried");
+
+  globalThis.fetch = previousFetch;
+  officialResponses.push({ status: 200, body: {
+    success: true, orderId: "techlink-order-1", status: "fixture-final-status", changed: true, message: "verified fixture",
+  } });
+  // Reinstall the fixture fetch only for the verification read.
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    officialCalls.push({ input: String(input), init });
+    const next = officialResponses.shift();
+    if (!next) throw new Error("official fixture transport exhausted");
+    return new Response(JSON.stringify(next.body), { status: next.status, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const finalStatus = await lookupTechlinkSandbox("FIXTURE-ORDER-1", "techlink-order-1");
+  assert.equal(finalStatus.status, "pending");
+  assert.equal(unresolvedTechlinkStatus("fixture-final-status"), "unknown");
+  console.log("PASS undocumented final-status vocabulary remains unresolved");
+  globalThis.fetch = previousFetch;
+
   delete env.TECHLINK_TEST_API_KEY;
+  delete env.TECHLINK_MODE;
+  delete env.TECHLINK_ALLOW_PURCHASES;
   assert.throws(() => createTechlinkTestAdapter({
     baseUrl: "https://fixture.invalid", contract: fixtureContract(), transport,
   }), /TECHLINK_TEST_API_KEY/);
@@ -216,4 +324,7 @@ main()
   .finally(() => {
     if (saved.nodeEnv === undefined) delete env.NODE_ENV; else env.NODE_ENV = saved.nodeEnv;
     if (saved.key === undefined) delete env.TECHLINK_TEST_API_KEY; else env.TECHLINK_TEST_API_KEY = saved.key;
+    if (saved.mode === undefined) delete env.TECHLINK_MODE; else env.TECHLINK_MODE = saved.mode;
+    if (saved.allowPurchases === undefined) delete env.TECHLINK_ALLOW_PURCHASES; else env.TECHLINK_ALLOW_PURCHASES = saved.allowPurchases;
+    globalThis.fetch = savedFetch;
   });

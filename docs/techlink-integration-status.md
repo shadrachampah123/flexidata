@@ -1,105 +1,100 @@
 # Techlink GH mobile-data integration status
 
-**Review checkpoint:** `main` at `e25dd547d7b0654cec8383f639a23e8faf8dd585`  
-**Status:** **BLOCKED before adapter implementation; fail-closed guard added.**  
-**Scope:** repository/code review and networkless safety work only.
+**Review checkpoint:** `arena/2616853a-flexidata` at the current working commit
+**Status:** **Sandbox adapter and live-catalogue seam implemented; production and live
+fulfillment remain disabled.**
+**Scope:** server-only adapter, authenticated read-only catalogue path, durable
+purchase wiring, conservative reconciliation, and networkless verification.
 
-## What was verified locally
+## Contract supplied for this implementation
 
-- The checkout was clean before work began on `arena/2616853a-flexidata`.
-- Before this review, the current source had no Techlink adapter, Techlink-specific
-  endpoint contract, catalogue mapping, status verifier, callback verifier, or
-  Techlink test suite. This review adds only a contract-injected disabled boundary
-  and synthetic fixtures; it does not add a verified provider contract.
-- `src/lib/data-gateway.ts` has a generic HTTP adapter with heuristic response
-  normalization. Before this change, an arbitrary `DATA_API_PROVIDER=techlink`
-  value could reach that generic path if a base URL and generic credentials were
-  supplied. That was unsafe for an unverified asynchronous provider because an
-  HTTP 200 or generic success flag must not be treated as delivery evidence.
-- The default reconciliation CLI remains Reloadly-specific. The lifecycle now
-  has an explicit provider/lookup/verifier seam for a future Techlink adapter,
-  but no Techlink lookup is registered or enabled.
-- The existing `bundle_plans.provider_product_code` is a single generic field.
-  No verified Techlink product-ID mapping is present, and deriving a code from a
-  FlexiData label is not safe for Techlink.
+The implementation uses only the provider facts supplied with the official
+Postman contract request. The base URL is fixed to
+`https://api.techlinkgh.com/api/v1` and the key is sent only server-side as
+`x-api-key`.
 
-## Safe work completed in this review
+Implemented paths:
 
-`DATA_API_PROVIDER` values `techlink`, `techlink_gh`, `techlink-gh`, and
-`techlinkgh` now fail closed in the shared runtime guard with
-`missing: ["rollout_approval"]`. They cannot fall through the generic adapter,
-reach a Techlink endpoint, debit a wallet, initialize checkout fulfillment, or
-be treated as delivered. The guard message contains no credentials or provider
-response data.
+| Operation | Contract used by the adapter |
+| --- | --- |
+| Catalogue | `GET /data/bundles?network={network}&phone={phone}`; validates `success`, `provider`, and each `bundles[]` entry's `id`, `name`, `size`, `price`, and `validity`. |
+| Purchase | `POST /data/purchase` with exactly `{ network, phone, bundleId }`; HTTP 201 plus `success`, `message`, `orderId`, and `newBalance` is accepted/submitted evidence only. |
+| History | `GET /orders?page=1&limit=25`, exposed as a validated JSON envelope for operator/reconciliation tooling. |
+| Single order | `GET /orders/:id`, exposed as a validated JSON envelope. |
+| Verification | `POST /orders/:orderId/verify`; validates `success`, `orderId`, `status`, `changed`, and `message`, then requires a separate status classifier before a terminal state can be produced. |
 
-The new `src/lib/techlink.ts` is a contract-injected, test-only adapter boundary:
+No generic provider response normalizer handles Techlink. `data-gateway.ts`
+directs Techlink submissions to `src/lib/techlink.ts`, which uses one HTTPS
+request, a timeout, no redirects, and no automatic retry. Provider error text and
+credentials are not returned to clients or stored in raw form.
 
-- no endpoint, payload, provider status, product ID or callback rule is embedded;
-- a future official contract must supply request builders and response parsers;
-- submissions are always pending/unknown unless the documented response is an
-  explicit rejection; acceptance can never deliver;
-- lookup delivery/failure requires a trusted parser result and exact client and
-  provider-reference correlation;
-- transport performs one HTTPS-origin request with a timeout, no redirects and
-  no automatic retry; malformed, mismatched and transport-error outcomes remain
-  unresolved;
-- callbacks are refused when no documented authenticity verifier is supplied;
-- only `TECHLINK_TEST_API_KEY` is read by the test adapter, and its value is
-  never returned or logged.
+## Catalogue and purchase boundary
 
-Catalogue resolution is exact-only through `provider-catalogue.ts`; the
-Techlink catalogue is intentionally empty until official IDs are verified. The
-purchase route cannot derive a Techlink ID from network/category/label. Durable
-reconciliation now accepts an explicit provider/lookup/verifier tuple, while
-the default CLI path remains Reloadly-only. Synthetic Techlink adapter and
-provider-isolation fixtures cover these boundaries without any provider call.
+- `/api/data/catalogue` is authenticated and read-only. It uses the wallet's
+  selected recipient phone and never exposes the API key.
+- The data selector uses current catalogue rows when `DATA_API_PROVIDER` is a
+  Techlink alias. Each displayed plan carries the exact `id` returned by that
+  authenticated catalogue response; the local numeric UI ID is only a display
+  key.
+- Before wallet or Paystack fulfillment, the server fetches the current
+  authenticated catalogue again and requires an exact `bundleId` match. It uses
+  the live provider price and rejects a stale/missing ID; it never derives an ID
+  from network, category, label, size, or price.
+- Seeded `bundle_plans.provider_product_code` values and fixed FlexiData bundle
+  categories are not treated as Techlink mappings. If a live catalogue cannot be
+  read, the Techlink UI has no purchasable fallback.
+- The same exact-ID/live-price resolution is used by the Paystack checkout path.
+  Checkout still refuses to initialize when the provider runtime is not safely
+  configured.
 
-Existing `mock`, Reloadly, and generic-provider compatibility behavior was not
-changed. No schema or migration was added.
+## Lifecycle and safety guarantees
 
-## External blockers
+- `PurchaseLifecycle` still creates the durable attempt and wallet debit before
+  the one provider POST, marks the attempt submitted before network I/O, and
+  never blindly retries an ambiguous timeout or malformed response.
+- A Techlink HTTP 201/`success` response becomes `pending` with the correlated
+  `orderId`; it is never marked delivered from submission evidence.
+- Reconciliation uses the authenticated `/orders/:orderId/verify` endpoint and
+  exact order-ID correlation. Callback processing is explicitly refused for
+  Techlink because no documented callback signature, replay, or authenticity
+  contract has been supplied.
+- The provider runtime is enabled only when `TECHLINK_MODE=sandbox` and
+  `TECHLINK_TEST_API_KEY` are present. Purchase submission additionally requires
+  the explicit non-production `TECHLINK_ALLOW_PURCHASES=true` opt-in. Production
+  always fails closed. No key value is printed, logged, committed, or returned.
+- `mock`, Reloadly, Paystack, wallet accounting, float projection, idempotency,
+  attempt leasing, audit rows, and generic-provider isolation remain intact.
 
-1. **Official documentation could not be verified in this workspace.** The
-   requested documentation host is outside the sandbox's permitted outbound
-   hosts. The supplied endpoint list is therefore treated as unverified input,
-   not as an implementation contract. No endpoint method, body, response shape,
-   status value, order-ID rule, catalogue field, or callback mechanism has been
-   guessed.
-2. **`TECHLINK_TEST_API_KEY` was absent at runtime.** Only an environment
-   presence check was performed; no key value was printed, stored, or logged.
-   Therefore no authenticated GET request was made.
-3. **No Techlink purchase or wallet funding was performed.** No provider
-   network request of any kind was made by this review.
+## Remaining provider unknowns and deliberate conservative behavior
 
-## Required evidence before implementing the adapter
+The supplied contract summary names the verification `status` field but does
+not provide its exact status vocabulary or terminal semantics. The adapter
+therefore preserves the provider status as an audit field and classifies it as
+`unknown` by default. A terminal `delivered` or `failed` result can be enabled
+only by passing an explicitly reviewed status classifier; no common words such
+as `completed`, `successful`, or `failed` are guessed as Techlink facts.
 
-The integration owner must provide access to the official Techlink contract and
-an approved test secret through the runtime environment. A ready-to-send,
-non-secret support request is in [techlink-support-request.md](techlink-support-request.md).
-The adapter review then needs the documented values for:
+Callback security, duplicate/idempotency semantics beyond FlexiData's durable
+attempt lock, reversal behavior, and the denomination/business meaning of
+`newBalance` are also not asserted beyond the fields in the supplied contract.
+No callback has been enabled, no live order has been created, no wallet has
+been funded, and no purchase has been sent from this workspace. The repository
+still contains no Techlink secret.
 
-- test base URL and environment/credential rules;
-- exact catalogue request, network identifiers, product/bundle ID field, price
-  and denomination semantics;
-- purchase request fields and the provider's actual order/reference field;
-- accepted, queued, pending, successful, failed, reversed and unknown status
-  values, including inconsistent-response behavior;
-- authoritative order lookup/verification method and correlation requirements;
-- callback signature/replay mechanism, if callbacks exist;
-- timeout, duplicate-submission, idempotency and reversal semantics.
+## Verification performed
 
-Only after that evidence is available should the contract-injected boundary be
-populated with a dedicated official adapter contract, explicit provider-specific
-catalogue mapping and a registered server-to-server reconciliation path. The
-mocked boundary tests are design evidence only, not provider qualification.
-Until then, keeping Techlink unavailable is the safe behavior.
+- `npm run verify:techlink`: networkless contract fixtures plus a local-fetch
+  simulation of catalogue success, exact-ID revalidation, malformed response,
+  HTTP 401, HTTP 201 acceptance, insufficient-balance rejection, timeout, and
+  unresolved final status.
+- `npm run verify:data-provider-safety`: provider isolation, fail-closed config,
+  no-debit preflight, callback refusal, secret-safety, and existing generic/mock
+  behavior.
+- The opt-in adapter test uses only a local fetch queue. It does not run unless
+  invoked by a test command and does not contact Techlink. A future sandbox
+  catalogue smoke test must check only key presence and skip when
+  `TECHLINK_TEST_API_KEY` is absent; it must never create an order.
 
-## Verification boundary
-
-The Techlink guard checks remain part of
-`npm run verify:data-provider-safety`. Contract-injected adapter fixtures run
-with `npm run verify:techlink`; they are network-free and do not prove Techlink
-connectivity, catalogue validity, delivery, database-backed acceptance, or
-operational readiness. The real PostgreSQL lifecycle suite additionally covers
-provider-isolated reconciliation with a synthetic Techlink adapter when its CI
-database is available.
+See [techlink-support-request.md](techlink-support-request.md) for the remaining
+questions to send to Techlink before any production rollout. Do not merge PR #72
+or enable production Techlink from this change.

@@ -6,9 +6,10 @@ import { creditReferralReward } from "@/lib/referrals";
 import { POINTS_RATE } from "@/lib/constants";
 import { assertReloadlySandboxConfiguration, lookupReloadlySandbox } from "@/lib/reloadly";
 import {
-  assertDataProviderRuntimeSafe, DataProviderFloatError, getDataProviderCode, submitDataBundleOrder,
+  assertDataProviderRuntimeSafe, DataProviderFloatError, getDataProviderCode, isTechlinkProviderCode, submitDataBundleOrder,
   type DataBundleOrder, type GatewayResult,
 } from "@/lib/data-gateway";
+import { getTechlinkRuntimeStatus, lookupTechlinkSandbox, TECHLINK_PROVIDER_CODE, TechlinkConfigurationError } from "@/lib/techlink";
 
 export type PurchaseState = "created" | "submitted" | "pending" | "unknown" | "delivered" | "failed";
 export class PurchaseConflict extends Error {}
@@ -227,11 +228,22 @@ export class PurchaseLifecycle {
     lookup: ProviderStatusLookup = lookupReloadlySandbox,
     options: Omit<ReconcileProviderOptions, "lookup" | "provider"> & { provider?: string } = {},
   ) {
-    const provider = options.provider ?? "reloadly";
+    const provider = options.provider ?? (isTechlinkProviderCode(getDataProviderCode()) ? getDataProviderCode() : "reloadly");
     if (!/^[a-z0-9_-]{1,40}$/.test(provider)) throw new PurchaseConflict("Invalid reconciliation provider");
-    const verify = options.verify ?? ((result: GatewayResult) => verifiedState(result, provider));
+    const selectedLookup = lookup === lookupReloadlySandbox && isTechlinkProviderCode(provider)
+      ? lookupTechlinkSandbox
+      : lookup;
+    const verify = options.verify ?? ((result: GatewayResult) =>
+      verifiedState(result, isTechlinkProviderCode(provider) ? TECHLINK_PROVIDER_CODE : provider));
     const assertConfiguration = options.assertConfiguration ??
-      (lookup === lookupReloadlySandbox ? assertReloadlySandboxConfiguration : undefined);
+      (selectedLookup === lookupReloadlySandbox
+        ? assertReloadlySandboxConfiguration
+        : selectedLookup === lookupTechlinkSandbox
+          ? () => {
+              const status = getTechlinkRuntimeStatus();
+              if (!status.readOnlySafe) throw new TechlinkConfigurationError(status.warning);
+            }
+          : undefined);
     const token = randomUUID();
     const claimed = await this.atomic(async client => {
       const rows = await client.query(`WITH due AS (
@@ -248,7 +260,7 @@ export class PurchaseLifecycle {
     for (const attempt of claimed) {
       let state: PurchaseState = "unknown";
       try {
-        const result = await lookup(attempt.ref, attempt.provider_reference);
+        const result = await selectedLookup(attempt.ref, attempt.provider_reference);
         if (result.providerReference === attempt.provider_reference) state = verify(result);
       } catch { /* conservative unknown, bounded next read */ }
       try {
