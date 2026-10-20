@@ -117,8 +117,25 @@ export class TechlinkTransportError extends Error {
   }
 }
 
+export type TechlinkContractFailureReason =
+  | "response_invalid"
+  | "response_not_object"
+  | "provider_field_invalid"
+  | "bundles_field_invalid"
+  | "bundle_item_invalid"
+  | "bundle_id_invalid"
+  | "bundle_name_invalid"
+  | "bundle_size_invalid"
+  | "bundle_price_invalid"
+  | "bundle_validity_invalid"
+  | "verification_fields_invalid"
+  | "adapter_request_invalid";
+
 export class TechlinkContractError extends Error {
-  constructor(readonly httpStatus: number | null = null) {
+  constructor(
+    readonly httpStatus: number | null = null,
+    readonly reason: TechlinkContractFailureReason = "response_invalid",
+  ) {
     // Contract/parser failures are deliberately generic and nonterminal.
     super("Techlink response could not be verified.");
     this.name = "TechlinkContractError";
@@ -322,7 +339,7 @@ export function createTechlinkTestAdapter(input: {
     try {
       request = input.contract.buildSubmissionRequest(order, { clientReference: order.reference, apiKey });
     } catch {
-      throw new TechlinkContractError();
+      throw new TechlinkContractError(null, "adapter_request_invalid");
     }
     let response: TechlinkHttpResponse;
     try {
@@ -679,6 +696,7 @@ export type TechlinkContractFailureDiagnostic = {
   category: "contract";
   code: "techlink_response_invalid";
   message: "Techlink catalogue response could not be verified";
+  schemaCheck: TechlinkContractFailureReason;
   upstreamStatus: number | null;
   responseStatus: 502;
 };
@@ -688,6 +706,7 @@ export function describeTechlinkContractError(error: TechlinkContractError): Tec
     category: "contract",
     code: "techlink_response_invalid",
     message: "Techlink catalogue response could not be verified",
+    schemaCheck: error.reason,
     upstreamStatus: error.httpStatus,
     responseStatus: 502,
   };
@@ -776,7 +795,7 @@ async function officialRequest(
 
 function responseObject(response: TechlinkHttpResponse): Record<string, unknown> {
   const body = apiObject(response.body);
-  if (!body) throw new TechlinkContractError(response.status);
+  if (!body) throw new TechlinkContractError(response.status, "response_not_object");
   return body;
 }
 
@@ -806,16 +825,22 @@ function ensureSuccessEnvelope(response: TechlinkHttpResponse): Record<string, u
 
 function parseCatalogue(response: TechlinkHttpResponse): TechlinkCatalogue {
   const body = ensureSuccessEnvelope(response);
-  if (!Array.isArray(body.bundles) || !apiString(body.provider, 80)) throw new TechlinkContractError(response.status);
+  if (!apiString(body.provider, 80)) throw new TechlinkContractError(response.status, "provider_field_invalid");
+  if (!Array.isArray(body.bundles)) throw new TechlinkContractError(response.status, "bundles_field_invalid");
   const bundles: TechlinkBundle[] = [];
   for (const raw of body.bundles) {
     const item = apiObject(raw);
-    const id = apiString(item?.id, MAX_REFERENCE_LENGTH);
-    const name = apiString(item?.name, 120);
-    const size = apiString(item?.size, 80);
-    const price = apiNumber(item?.price);
-    const validity = apiString(item?.validity, 80);
-    if (!id || !name || !size || price === null || price < 0 || !validity) throw new TechlinkContractError(response.status);
+    if (!item) throw new TechlinkContractError(response.status, "bundle_item_invalid");
+    const id = apiString(item.id, MAX_REFERENCE_LENGTH);
+    const name = apiString(item.name, 120);
+    const size = apiString(item.size, 80);
+    const price = apiNumber(item.price);
+    const validity = apiString(item.validity, 80);
+    if (!id) throw new TechlinkContractError(response.status, "bundle_id_invalid");
+    if (!name) throw new TechlinkContractError(response.status, "bundle_name_invalid");
+    if (!size) throw new TechlinkContractError(response.status, "bundle_size_invalid");
+    if (price === null || price < 0) throw new TechlinkContractError(response.status, "bundle_price_invalid");
+    if (!validity) throw new TechlinkContractError(response.status, "bundle_validity_invalid");
     bundles.push({ id, name, size, price, validity });
   }
   return { provider: apiString(body.provider, 80)!, bundles };
@@ -900,7 +925,7 @@ export async function verifyTechlinkOrder(orderId: string): Promise<TechlinkVeri
   const success = apiBoolean(body.success);
   const message = apiString(body.message, MAX_MESSAGE_LENGTH);
   if (!responseOrderId || responseOrderId !== id || !status || changed === null || success === null || !message) {
-    throw new TechlinkContractError(response.status);
+    throw new TechlinkContractError(response.status, "verification_fields_invalid");
   }
   return {
     orderId: responseOrderId,
@@ -978,7 +1003,7 @@ export async function lookupTechlinkSandbox(
 export async function submitTechlinkPurchase(order: DataBundleOrder): Promise<GatewayResult> {
   const config = configuredTechlink(false);
   if (!isTechlinkNetwork(order.network) || !apiString(order.providerProductCode, MAX_REFERENCE_LENGTH)) {
-    throw new TechlinkContractError();
+    throw new TechlinkContractError(null, "adapter_request_invalid");
   }
   const phone = normalizeTechlinkPhone(order.recipient);
   let response: TechlinkHttpResponse;

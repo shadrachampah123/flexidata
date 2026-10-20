@@ -321,12 +321,15 @@ async function main() {
 
   officialResponses.push({ status: 200, body: { success: true, provider: "fixture-techlink", bundles: [{ id: "x" }] } });
   await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
-    error instanceof TechlinkContractError && error.httpStatus === 200,
+    error instanceof TechlinkContractError &&
+      error.httpStatus === 200 &&
+      error.reason === "bundle_name_invalid",
   );
-  assert.deepEqual(describeTechlinkContractError(new TechlinkContractError(200)), {
+  assert.deepEqual(describeTechlinkContractError(new TechlinkContractError(200, "bundle_name_invalid")), {
     category: "contract",
     code: "techlink_response_invalid",
     message: "Techlink catalogue response could not be verified",
+    schemaCheck: "bundle_name_invalid",
     upstreamStatus: 200,
     responseStatus: 502,
   });
