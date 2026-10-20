@@ -319,6 +319,33 @@ async function main() {
   assert.equal((await fetchTechlinkBundle("MTN", order.recipient, "live-bundle-1")).price, 12.5);
   console.log("PASS purchase resolution rechecks the exact ID against a fresh catalogue");
 
+  officialResponses.push({ status: 200, body: {
+    success: true,
+    provider: { name: "fixture-provider" },
+    bundles: [],
+  } });
+  await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
+    error instanceof TechlinkContractError &&
+      error.httpStatus === 200 &&
+      error.reason === "provider_field_invalid" &&
+      error.providerField?.present === true &&
+      error.providerField.type === "object",
+  );
+  assert.deepEqual(describeTechlinkContractError(new TechlinkContractError(
+    200,
+    "provider_field_invalid",
+    { present: true, type: "object" },
+  )), {
+    category: "contract",
+    code: "techlink_response_invalid",
+    message: "Techlink catalogue response could not be verified",
+    schemaCheck: "provider_field_invalid",
+    providerField: { present: true, type: "object" },
+    upstreamStatus: 200,
+    responseStatus: 502,
+  });
+  console.log("PASS invalid provider field exposes only presence/type diagnostics");
+
   officialResponses.push({ status: 200, body: { success: true, provider: "fixture-techlink", bundles: [{ id: "x" }] } });
   await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
     error instanceof TechlinkContractError &&
@@ -330,6 +357,7 @@ async function main() {
     code: "techlink_response_invalid",
     message: "Techlink catalogue response could not be verified",
     schemaCheck: "bundle_name_invalid",
+    providerField: null,
     upstreamStatus: 200,
     responseStatus: 502,
   });

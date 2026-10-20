@@ -72,6 +72,7 @@ export async function GET(req: Request) {
       console.warn("[flexidata] Techlink catalogue response contract failure", {
         category: diagnostic.category,
         schemaCheck: diagnostic.schemaCheck,
+        providerField: diagnostic.providerField,
         upstreamStatus: diagnostic.upstreamStatus,
       });
       return Response.json(
@@ -80,6 +81,7 @@ export async function GET(req: Request) {
           error: diagnostic.message,
           code: diagnostic.code,
           schemaCheck: diagnostic.schemaCheck,
+          providerField: diagnostic.providerField,
           upstreamStatus: diagnostic.upstreamStatus,
         },
         { status: diagnostic.responseStatus },
