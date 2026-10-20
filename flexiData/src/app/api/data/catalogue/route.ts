@@ -1,6 +1,12 @@
 import { requireAccount } from "@/lib/api-auth";
 import { isTechlinkProviderCode, getDataProviderCode } from "@/lib/data-gateway";
-import { fetchTechlinkCatalogue, TechlinkApiError, TechlinkCatalogueError, TechlinkConfigurationError } from "@/lib/techlink";
+import {
+  describeTechlinkApiError,
+  fetchTechlinkCatalogue,
+  TechlinkApiError,
+  TechlinkCatalogueError,
+  TechlinkConfigurationError,
+} from "@/lib/techlink";
 import { normalizeGhanaMobileStrict } from "@/lib/ghana-mobile";
 
 export const dynamic = "force-dynamic";
@@ -40,7 +46,22 @@ export async function GET(req: Request) {
       return Response.json({ ok: false, error: "Techlink catalogue could not be verified" }, { status: 502 });
     }
     if (error instanceof TechlinkApiError) {
-      return Response.json({ ok: false, error: "Techlink catalogue request was not accepted" }, { status: error.httpStatus === 401 ? 503 : 502 });
+      const diagnostic = describeTechlinkApiError(error);
+      // Safe diagnostics only: category and upstream status. Never log the
+      // provider body, request URL, recipient phone, or API key.
+      console.warn("[flexidata] Techlink catalogue upstream failure", {
+        category: diagnostic.category,
+        upstreamStatus: diagnostic.upstreamStatus,
+      });
+      return Response.json(
+        {
+          ok: false,
+          error: diagnostic.message,
+          code: diagnostic.code,
+          upstreamStatus: diagnostic.upstreamStatus,
+        },
+        { status: diagnostic.responseStatus },
+      );
     }
     return Response.json({ ok: false, error: "Techlink catalogue is temporarily unavailable" }, { status: 503 });
   }

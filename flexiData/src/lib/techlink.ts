@@ -557,10 +557,86 @@ function configuredTechlink(readOnly: boolean): TechlinkConfigured {
   return { baseUrl: `${TECHLINK_API_BASE_URL}/`, apiKey };
 }
 
+export type TechlinkApiFailureCategory =
+  | "authentication"
+  | "authorization"
+  | "rate_limited"
+  | "http_status"
+  | "provider_rejected";
+
 export class TechlinkApiError extends Error {
-  constructor(readonly httpStatus: number, message: string) {
+  constructor(
+    readonly httpStatus: number,
+    message: string,
+    readonly category: TechlinkApiFailureCategory = "http_status",
+  ) {
     super(message);
     this.name = "TechlinkApiError";
+  }
+}
+
+export type TechlinkApiFailureDiagnostic = {
+  category: TechlinkApiFailureCategory;
+  code:
+    | "techlink_authentication_failed"
+    | "techlink_authorization_failed"
+    | "techlink_rate_limited"
+    | "techlink_http_error"
+    | "techlink_provider_rejected";
+  message: string;
+  upstreamStatus: number;
+  /** HTTP status exposed by FlexiData for this upstream failure. */
+  responseStatus: 502 | 503;
+};
+
+/**
+ * Convert provider failure metadata into a safe operator/client diagnostic.
+ * This intentionally contains only a category and HTTP status: never provider
+ * response text, the request URL, the recipient phone, or the API key.
+ */
+export function describeTechlinkApiError(error: TechlinkApiError): TechlinkApiFailureDiagnostic {
+  const responseStatus: 502 | 503 = error.httpStatus === 401 ? 503 : 502;
+  switch (error.category) {
+    case "authentication":
+      return {
+        category: error.category,
+        code: "techlink_authentication_failed",
+        message: "Techlink authentication failed",
+        upstreamStatus: error.httpStatus,
+        responseStatus,
+      };
+    case "authorization":
+      return {
+        category: error.category,
+        code: "techlink_authorization_failed",
+        message: "Techlink authorization failed",
+        upstreamStatus: error.httpStatus,
+        responseStatus,
+      };
+    case "rate_limited":
+      return {
+        category: error.category,
+        code: "techlink_rate_limited",
+        message: "Techlink rate limit reached",
+        upstreamStatus: error.httpStatus,
+        responseStatus,
+      };
+    case "provider_rejected":
+      return {
+        category: error.category,
+        code: "techlink_provider_rejected",
+        message: "Techlink rejected the catalogue request",
+        upstreamStatus: error.httpStatus,
+        responseStatus,
+      };
+    case "http_status":
+      return {
+        category: error.category,
+        code: "techlink_http_error",
+        message: "Techlink returned an upstream HTTP error",
+        upstreamStatus: error.httpStatus,
+        responseStatus,
+      };
   }
 }
 
@@ -651,15 +727,23 @@ function responseObject(response: TechlinkHttpResponse): Record<string, unknown>
   return body;
 }
 
+function categoryForTechlinkHttpStatus(status: number): TechlinkApiFailureCategory {
+  if (status === 401) return "authentication";
+  if (status === 403) return "authorization";
+  if (status === 429) return "rate_limited";
+  return "http_status";
+}
+
 function ensureSuccessEnvelope(response: TechlinkHttpResponse): Record<string, unknown> {
   const body = responseObject(response);
   if (!isSuccessHttpStatus(response.status)) {
+    const category = categoryForTechlinkHttpStatus(response.status);
     throw new TechlinkApiError(response.status, response.status === 401
       ? "Techlink authentication was rejected."
-      : "Techlink request was not accepted.");
+      : "Techlink request was not accepted.", category);
   }
   if (apiBoolean(body.success) !== true) {
-    throw new TechlinkApiError(response.status, "Techlink returned an unsuccessful response.");
+    throw new TechlinkApiError(response.status, "Techlink returned an unsuccessful response.", "provider_rejected");
   }
   return body;
 }

@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import {
   createTechlinkTestAdapter,
+  describeTechlinkApiError,
   type TechlinkContract,
   type TechlinkHttpRequest,
   type TechlinkHttpResponse,
@@ -317,7 +318,28 @@ async function main() {
   await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
     error instanceof TechlinkApiError && error.httpStatus === 401,
   );
-  console.log("PASS HTTP 401 is treated as failed authentication");
+  const authenticationError = new TechlinkApiError(401, "provider detail is never returned", "authentication");
+  assert.deepEqual(describeTechlinkApiError(authenticationError), {
+    category: "authentication",
+    code: "techlink_authentication_failed",
+    message: "Techlink authentication failed",
+    upstreamStatus: 401,
+    responseStatus: 503,
+  });
+  officialResponses.push({ status: 200, body: { success: false, message: "provider rejection fixture" } });
+  await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
+    error instanceof TechlinkApiError &&
+      error.httpStatus === 200 &&
+      error.category === "provider_rejected",
+  );
+  const rejectedEnvelope = new TechlinkApiError(200, "provider detail is never returned", "provider_rejected");
+  const rejectedDiagnostic = describeTechlinkApiError(rejectedEnvelope);
+  assert.equal(rejectedDiagnostic.category, "provider_rejected");
+  assert.equal(rejectedDiagnostic.upstreamStatus, 200);
+  assert.equal(rejectedDiagnostic.responseStatus, 502);
+  assert.equal(JSON.stringify(rejectedDiagnostic).includes(fixtureKey), false);
+  assert.equal(JSON.stringify(rejectedDiagnostic).includes(order.recipient), false);
+  console.log("PASS HTTP 401 and HTTP 200 provider rejection retain safe category/status diagnostics without secrets or phone");
 
   officialResponses.push({ status: 201, body: {
     success: true, message: "accepted fixture", orderId: "techlink-order-1", newBalance: 98.5,
