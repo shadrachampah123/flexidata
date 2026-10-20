@@ -319,18 +319,25 @@ async function main() {
   assert.equal((await fetchTechlinkBundle("MTN", order.recipient, "live-bundle-1")).price, 12.5);
   console.log("PASS purchase resolution rechecks the exact ID against a fresh catalogue");
 
-  officialResponses.push({ status: 200, body: {
-    success: true,
-    provider: { name: "fixture-provider" },
-    bundles: [],
-  } });
-  await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
-    error instanceof TechlinkContractError &&
-      error.httpStatus === 200 &&
-      error.reason === "provider_field_invalid" &&
-      error.providerField?.present === true &&
-      error.providerField.type === "object",
-  );
+  const invalidProviderFixtures = [
+    { label: "missing", body: { success: true, bundles: [] }, present: false, type: "missing" },
+    { label: "null", body: { success: true, provider: null, bundles: [] }, present: true, type: "null" },
+    { label: "number", body: { success: true, provider: 7, bundles: [] }, present: true, type: "number" },
+    { label: "boolean", body: { success: true, provider: false, bundles: [] }, present: true, type: "boolean" },
+    { label: "object", body: { success: true, provider: { name: "fixture-provider" }, bundles: [] }, present: true, type: "object" },
+    { label: "array", body: { success: true, provider: [], bundles: [] }, present: true, type: "array" },
+    { label: "empty string", body: { success: true, provider: "", bundles: [] }, present: true, type: "string" },
+  ] as const;
+  for (const fixture of invalidProviderFixtures) {
+    officialResponses.push({ status: 200, body: fixture.body });
+    await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
+      error instanceof TechlinkContractError &&
+        error.httpStatus === 200 &&
+        error.reason === "provider_field_invalid" &&
+        error.providerField?.present === fixture.present &&
+        error.providerField.type === fixture.type,
+    );
+  }
   assert.deepEqual(describeTechlinkContractError(new TechlinkContractError(
     200,
     "provider_field_invalid",
@@ -344,7 +351,7 @@ async function main() {
     upstreamStatus: 200,
     responseStatus: 502,
   });
-  console.log("PASS invalid provider field exposes only presence/type diagnostics");
+  console.log("PASS documented provider string and invalid provider types expose only presence/type diagnostics");
 
   officialResponses.push({ status: 200, body: { success: true, provider: "fixture-techlink", bundles: [{ id: "x" }] } });
   await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
