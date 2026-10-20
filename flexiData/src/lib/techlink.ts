@@ -124,7 +124,32 @@ export type TechlinkProviderFieldDiagnostic = {
   type: TechlinkSafeFieldType;
 };
 
-export type TechlinkBundleSizeFieldDiagnostic = TechlinkProviderFieldDiagnostic;
+export const TECHLINK_SIZE_RELATED_FIELD_ALLOWLIST = [
+  "data",
+  "dataSize",
+  "dataAmount",
+  "volume",
+  "quantity",
+  "unit",
+  "bundleSize",
+  "sizeMb",
+  "sizeGb",
+  "sizeInMb",
+  "sizeInGb",
+] as const;
+
+export type TechlinkSizeRelatedFieldName = (typeof TECHLINK_SIZE_RELATED_FIELD_ALLOWLIST)[number];
+
+export type TechlinkBundleSizeFieldDiagnostic = {
+  index: number;
+  present: boolean;
+  type: TechlinkSafeFieldType;
+  relatedFields: Array<{
+    name: TechlinkSizeRelatedFieldName;
+    present: boolean;
+    type: TechlinkSafeFieldType;
+  }>;
+};
 
 function safeFieldType(value: unknown, present: boolean): TechlinkSafeFieldType {
   if (!present) return "missing";
@@ -142,9 +167,17 @@ function providerFieldDiagnostic(body: Record<string, unknown>): TechlinkProvide
   return { present, type: safeFieldType(body.provider, present) };
 }
 
-function bundleSizeFieldDiagnostic(item: Record<string, unknown>): TechlinkBundleSizeFieldDiagnostic {
+function bundleSizeFieldDiagnostic(item: Record<string, unknown>, index: number): TechlinkBundleSizeFieldDiagnostic {
   const present = Object.prototype.hasOwnProperty.call(item, "size");
-  return { present, type: safeFieldType(item.size, present) };
+  return {
+    index,
+    present,
+    type: safeFieldType(item.size, present),
+    relatedFields: TECHLINK_SIZE_RELATED_FIELD_ALLOWLIST.map((name) => {
+      const relatedPresent = Object.prototype.hasOwnProperty.call(item, name);
+      return { name, present: relatedPresent, type: safeFieldType(item[name], relatedPresent) };
+    }),
+  };
 }
 
 export type TechlinkContractFailureReason =
@@ -871,7 +904,7 @@ function parseCatalogue(response: TechlinkHttpResponse): TechlinkCatalogue {
   }
   if (!Array.isArray(body.bundles)) throw new TechlinkContractError(response.status, "bundles_field_invalid");
   const bundles: TechlinkBundle[] = [];
-  for (const raw of body.bundles) {
+  for (const [index, raw] of body.bundles.entries()) {
     const item = apiObject(raw);
     if (!item) throw new TechlinkContractError(response.status, "bundle_item_invalid");
     const id = apiString(item.id, MAX_REFERENCE_LENGTH);
@@ -886,7 +919,7 @@ function parseCatalogue(response: TechlinkHttpResponse): TechlinkCatalogue {
         response.status,
         "bundle_size_invalid",
         null,
-        bundleSizeFieldDiagnostic(item),
+        bundleSizeFieldDiagnostic(item, index),
       );
     }
     if (price === null || price < 0) throw new TechlinkContractError(response.status, "bundle_price_invalid");

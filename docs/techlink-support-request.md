@@ -46,6 +46,10 @@ normalizer or accept callbacks.
      price currency/denomination, and whether bundle IDs are stable.
    - Confirm whether `name` is the customer-facing label and whether any
      category field exists. FlexiData will not infer a category or an ID.
+   - Confirm whether `bundles[].size` is required, whether null is permitted,
+     its JSON type and unit, and whether any documented alternate field supplies
+     the data amount. A current authenticated Preview response contained a null
+     size on one bundle; FlexiData will not invent or convert it.
 3. **Order finality**
    - Please provide the complete `status` vocabulary returned by
      `/orders/:orderId/verify` and `/orders/:id`.

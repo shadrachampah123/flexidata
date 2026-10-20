@@ -356,7 +356,37 @@ async function main() {
         error.bundleSizeField.type === fixture.type,
     );
   }
-  console.log("PASS bundle size diagnostics expose only allowlisted shape metadata");
+  officialResponses.push({ status: 200, body: {
+    success: true,
+    bundles: [
+      { id: "valid-id", name: "Valid fixture", size: "1GB", price: 12.5, validity: "7 days" },
+      {
+        id: "null-size-id",
+        name: "Null size fixture",
+        size: null,
+        data: 1,
+        dataSize: "1GB",
+        volume: null,
+        unit: "GB",
+        price: 12.5,
+        validity: "7 days",
+      },
+    ],
+  } });
+  await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
+    error instanceof TechlinkContractError &&
+      error.reason === "bundle_size_invalid" &&
+      error.bundleSizeField?.index === 1 &&
+      error.bundleSizeField.present === true &&
+      error.bundleSizeField.type === "null" &&
+      error.bundleSizeField.relatedFields.find((field) => field.name === "data")?.type === "number" &&
+      error.bundleSizeField.relatedFields.find((field) => field.name === "dataSize")?.type === "string" &&
+      error.bundleSizeField.relatedFields.find((field) => field.name === "unit")?.type === "string" &&
+      error.bundleSizeField.relatedFields.every((field) =>
+        ["data", "dataSize", "dataAmount", "volume", "quantity", "unit", "bundleSize", "sizeMb", "sizeGb", "sizeInMb", "sizeInGb"].includes(field.name),
+      ),
+  );
+  console.log("PASS bundle size diagnostics expose only allowlisted index, shape, and related-field metadata");
 
   const invalidProviderFixtures = [
     { label: "null", body: { success: true, provider: null, bundles: [] }, present: true, type: "null" },

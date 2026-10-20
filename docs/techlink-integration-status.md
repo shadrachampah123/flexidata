@@ -33,6 +33,13 @@ malformed provider when the optional field is present, and derives the internal
 provider identity from the trusted `TECHLINK_PROVIDER_CODE` constant rather than
 from an upstream value.
 
+The authenticated Preview response has since shown `bundles[].size` present with
+an allowlisted `null` type on at least one bundle. The supplied contract does not
+say whether null is permitted or define another size field, so the parser remains
+fail-closed for null and reports only the affected bundle index plus types for a
+small diagnostic-only allowlist of related field names. It does not invent a size
+or accept an alternate field until the official contract confirms its meaning.
+
 No generic provider response normalizer handles Techlink. `data-gateway.ts`
 directs Techlink submissions to `src/lib/techlink.ts`, which uses one HTTPS
 request, a timeout, no redirects, and no automatic retry. Provider error text and
