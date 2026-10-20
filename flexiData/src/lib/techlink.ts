@@ -735,13 +735,16 @@ function categoryForTechlinkHttpStatus(status: number): TechlinkApiFailureCatego
 }
 
 function ensureSuccessEnvelope(response: TechlinkHttpResponse): Record<string, unknown> {
-  const body = responseObject(response);
+  // Classify the HTTP response before parsing the body. An upstream 401/403/
+  // other error may be HTML or empty, but its status is still safe and useful
+  // diagnostic evidence; it must not be downgraded to a generic schema error.
   if (!isSuccessHttpStatus(response.status)) {
     const category = categoryForTechlinkHttpStatus(response.status);
     throw new TechlinkApiError(response.status, response.status === 401
       ? "Techlink authentication was rejected."
       : "Techlink request was not accepted.", category);
   }
+  const body = responseObject(response);
   if (apiBoolean(body.success) !== true) {
     throw new TechlinkApiError(response.status, "Techlink returned an unsuccessful response.", "provider_rejected");
   }

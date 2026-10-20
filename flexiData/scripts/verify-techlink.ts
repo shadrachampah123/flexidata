@@ -326,6 +326,13 @@ async function main() {
     upstreamStatus: 401,
     responseStatus: 503,
   });
+  officialResponses.push({ status: 403, body: null });
+  await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
+    error instanceof TechlinkApiError &&
+      error.httpStatus === 403 &&
+      error.category === "authorization",
+  );
+  assert.equal(describeTechlinkApiError(new TechlinkApiError(403, "provider detail is never returned", "authorization")).upstreamStatus, 403);
   officialResponses.push({ status: 200, body: { success: false, message: "provider rejection fixture" } });
   await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
     error instanceof TechlinkApiError &&
