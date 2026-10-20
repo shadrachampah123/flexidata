@@ -17,11 +17,21 @@ Implemented paths:
 
 | Operation | Contract used by the adapter |
 | --- | --- |
-| Catalogue | `GET /data/bundles?network={network}&phone={phone}`; validates `success`, `provider`, and each `bundles[]` entry's `id`, `name`, `size`, `price`, and `validity`. |
+| Catalogue | `GET /data/bundles?network={network}&phone={phone}`; validates `success` and each `bundles[]` entry's `id`, `name`, `size`, `price`, and `validity`. A top-level upstream `provider` field is optional; the adapter uses its trusted internal `techlink` identity instead. |
 | Purchase | `POST /data/purchase` with exactly `{ network, phone, bundleId }`; HTTP 201 plus `success`, `message`, `orderId`, and `newBalance` is accepted/submitted evidence only. |
 | History | `GET /orders?page=1&limit=25`, exposed as a validated JSON envelope for operator/reconciliation tooling. |
 | Single order | `GET /orders/:id`, exposed as a validated JSON envelope. |
 | Verification | `POST /orders/:orderId/verify`; validates `success`, `orderId`, `status`, `changed`, and `message`, then requires a separate status classifier before a terminal state can be produced. |
+
+The first implementation incorrectly made `provider` a required catalogue
+field. The available contract record identifies the `success` envelope and the
+`bundles[]` fields below, but does not provide an independently captured
+response example requiring a top-level provider value. The authenticated
+read-only Preview diagnostic then returned HTTP 200 with `success` accepted and
+`provider` absent. The parser now accepts that documented shape, still rejects a
+malformed provider when the optional field is present, and derives the internal
+provider identity from the trusted `TECHLINK_PROVIDER_CODE` constant rather than
+from an upstream value.
 
 No generic provider response normalizer handles Techlink. `data-gateway.ts`
 directs Techlink submissions to `src/lib/techlink.ts`, which uses one HTTPS

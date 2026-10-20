@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import {
   createTechlinkTestAdapter,
+  TECHLINK_PROVIDER_CODE,
   describeTechlinkApiError,
   describeTechlinkContractError,
   describeTechlinkTransportError,
@@ -292,10 +293,10 @@ async function main() {
 
   officialResponses.push({ status: 200, body: {
     success: true,
-    provider: "fixture-techlink",
     bundles: [{ id: "live-bundle-1", name: "Fixture 1GB", size: "1GB", price: 12.5, validity: "7 days" }],
   } });
   const liveCatalogue = await fetchTechlinkCatalogue("MTN", "0240940228");
+  assert.equal(liveCatalogue.provider, TECHLINK_PROVIDER_CODE);
   assert.equal(liveCatalogue.bundles[0].id, "live-bundle-1");
   const catalogueCall = officialCalls[0];
   const catalogueUrl = new URL(catalogueCall.input);
@@ -313,14 +314,31 @@ async function main() {
 
   officialResponses.push({ status: 200, body: {
     success: true,
-    provider: "fixture-techlink",
     bundles: [{ id: "live-bundle-1", name: "Fixture 1GB", size: "1GB", price: 12.5, validity: "7 days" }],
   } });
   assert.equal((await fetchTechlinkBundle("MTN", order.recipient, "live-bundle-1")).price, 12.5);
   console.log("PASS purchase resolution rechecks the exact ID against a fresh catalogue");
 
+  const invalidBundleFixtures = [
+    { reason: "bundles_field_invalid", body: { success: true } },
+    { reason: "bundle_item_invalid", body: { success: true, bundles: [null] } },
+    { reason: "bundle_id_invalid", body: { success: true, bundles: [{ name: "Fixture", size: "1GB", price: 12.5, validity: "7 days" }] } },
+    { reason: "bundle_name_invalid", body: { success: true, bundles: [{ id: "fixture-id", size: "1GB", price: 12.5, validity: "7 days" }] } },
+    { reason: "bundle_size_invalid", body: { success: true, bundles: [{ id: "fixture-id", name: "Fixture", price: 12.5, validity: "7 days" }] } },
+    { reason: "bundle_price_invalid", body: { success: true, bundles: [{ id: "fixture-id", name: "Fixture", size: "1GB", price: -1, validity: "7 days" }] } },
+    { reason: "bundle_validity_invalid", body: { success: true, bundles: [{ id: "fixture-id", name: "Fixture", size: "1GB", price: 12.5 }] } },
+  ] as const;
+  for (const fixture of invalidBundleFixtures) {
+    officialResponses.push({ status: 200, body: fixture.body });
+    await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
+      error instanceof TechlinkContractError &&
+        error.httpStatus === 200 &&
+        error.reason === fixture.reason,
+    );
+  }
+  console.log("PASS documented bundle field and item validation remains strict without provider metadata");
+
   const invalidProviderFixtures = [
-    { label: "missing", body: { success: true, bundles: [] }, present: false, type: "missing" },
     { label: "null", body: { success: true, provider: null, bundles: [] }, present: true, type: "null" },
     { label: "number", body: { success: true, provider: 7, bundles: [] }, present: true, type: "number" },
     { label: "boolean", body: { success: true, provider: false, bundles: [] }, present: true, type: "boolean" },
@@ -351,7 +369,7 @@ async function main() {
     upstreamStatus: 200,
     responseStatus: 502,
   });
-  console.log("PASS documented provider string and invalid provider types expose only presence/type diagnostics");
+  console.log("PASS documented catalogue without provider and invalid optional provider types preserve safe validation");
 
   officialResponses.push({ status: 200, body: { success: true, provider: "fixture-techlink", bundles: [{ id: "x" }] } });
   await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>

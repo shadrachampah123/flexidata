@@ -15,8 +15,9 @@ secure channel; do not send secrets in email or a public ticket.
 - Base URL: `https://api.techlinkgh.com/api/v1`
 - Authentication: server-side `x-api-key`
 - Catalogue: `GET /data/bundles?network={network}&phone={phone}` with
-  `success`, `provider`, and `bundles[]` fields `id`, `name`, `size`, `price`,
-  and `validity`
+  `success` and `bundles[]` fields `id`, `name`, `size`, `price`, and
+  `validity`; the authenticated Preview response omitted a top-level
+  `provider` field
 - Purchase: `POST /data/purchase` with `{ network, phone, bundleId }`; documented
   success is HTTP 201 with `success`, `message`, `orderId`, and `newBalance`
 - History: `GET /orders?page=1&limit=25`

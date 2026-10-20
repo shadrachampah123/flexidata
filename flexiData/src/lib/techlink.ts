@@ -754,7 +754,8 @@ export type TechlinkBundle = {
 };
 
 export type TechlinkCatalogue = {
-  provider: string;
+  /** Internal provider identity; upstream catalogue responses need not include it. */
+  provider: typeof TECHLINK_PROVIDER_CODE;
   bundles: TechlinkBundle[];
 };
 
@@ -851,7 +852,11 @@ function ensureSuccessEnvelope(response: TechlinkHttpResponse): Record<string, u
 
 function parseCatalogue(response: TechlinkHttpResponse): TechlinkCatalogue {
   const body = ensureSuccessEnvelope(response);
-  if (!apiString(body.provider, 80)) {
+  // The documented catalogue shape and the authenticated Preview response do
+  // not require a top-level provider field. If an upstream response includes
+  // one anyway, keep validating it rather than accepting an arbitrary value;
+  // the internal provider identity comes from this trusted adapter constant.
+  if (Object.prototype.hasOwnProperty.call(body, "provider") && !apiString(body.provider, 80)) {
     throw new TechlinkContractError(response.status, "provider_field_invalid", providerFieldDiagnostic(body));
   }
   if (!Array.isArray(body.bundles)) throw new TechlinkContractError(response.status, "bundles_field_invalid");
@@ -871,7 +876,7 @@ function parseCatalogue(response: TechlinkHttpResponse): TechlinkCatalogue {
     if (!validity) throw new TechlinkContractError(response.status, "bundle_validity_invalid");
     bundles.push({ id, name, size, price, validity });
   }
-  return { provider: apiString(body.provider, 80)!, bundles };
+  return { provider: TECHLINK_PROVIDER_CODE, bundles };
 }
 
 /** Read-only live catalogue call. It never creates an order. */
