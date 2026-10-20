@@ -336,7 +336,27 @@ async function main() {
         error.reason === fixture.reason,
     );
   }
-  console.log("PASS documented bundle field and item validation remains strict without provider metadata");
+  const sizeShapeFixtures = [
+    { size: 1, type: "number" },
+    { size: { value: 1, unit: "GB" }, type: "object" },
+    { size: ["1GB"], type: "array" },
+    { size: null, type: "null" },
+    { size: true, type: "boolean" },
+    { size: "", type: "string" },
+  ] as const;
+  for (const fixture of sizeShapeFixtures) {
+    officialResponses.push({ status: 200, body: {
+      success: true,
+      bundles: [{ id: "fixture-id", name: "Fixture", size: fixture.size, price: 12.5, validity: "7 days" }],
+    } });
+    await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
+      error instanceof TechlinkContractError &&
+        error.reason === "bundle_size_invalid" &&
+        error.bundleSizeField?.present === true &&
+        error.bundleSizeField.type === fixture.type,
+    );
+  }
+  console.log("PASS bundle size diagnostics expose only allowlisted shape metadata");
 
   const invalidProviderFixtures = [
     { label: "null", body: { success: true, provider: null, bundles: [] }, present: true, type: "null" },
@@ -366,6 +386,7 @@ async function main() {
     message: "Techlink catalogue response could not be verified",
     schemaCheck: "provider_field_invalid",
     providerField: { present: true, type: "object" },
+    bundleSizeField: null,
     upstreamStatus: 200,
     responseStatus: 502,
   });
@@ -383,6 +404,7 @@ async function main() {
     message: "Techlink catalogue response could not be verified",
     schemaCheck: "bundle_name_invalid",
     providerField: null,
+    bundleSizeField: null,
     upstreamStatus: 200,
     responseStatus: 502,
   });

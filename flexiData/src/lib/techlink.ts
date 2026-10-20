@@ -124,6 +124,8 @@ export type TechlinkProviderFieldDiagnostic = {
   type: TechlinkSafeFieldType;
 };
 
+export type TechlinkBundleSizeFieldDiagnostic = TechlinkProviderFieldDiagnostic;
+
 function safeFieldType(value: unknown, present: boolean): TechlinkSafeFieldType {
   if (!present) return "missing";
   if (value === null) return "null";
@@ -138,6 +140,11 @@ function safeFieldType(value: unknown, present: boolean): TechlinkSafeFieldType 
 function providerFieldDiagnostic(body: Record<string, unknown>): TechlinkProviderFieldDiagnostic {
   const present = Object.prototype.hasOwnProperty.call(body, "provider");
   return { present, type: safeFieldType(body.provider, present) };
+}
+
+function bundleSizeFieldDiagnostic(item: Record<string, unknown>): TechlinkBundleSizeFieldDiagnostic {
+  const present = Object.prototype.hasOwnProperty.call(item, "size");
+  return { present, type: safeFieldType(item.size, present) };
 }
 
 export type TechlinkContractFailureReason =
@@ -159,6 +166,7 @@ export class TechlinkContractError extends Error {
     readonly httpStatus: number | null = null,
     readonly reason: TechlinkContractFailureReason = "response_invalid",
     readonly providerField: TechlinkProviderFieldDiagnostic | null = null,
+    readonly bundleSizeField: TechlinkBundleSizeFieldDiagnostic | null = null,
   ) {
     // Contract/parser failures are deliberately generic and nonterminal.
     super("Techlink response could not be verified.");
@@ -722,6 +730,7 @@ export type TechlinkContractFailureDiagnostic = {
   message: "Techlink catalogue response could not be verified";
   schemaCheck: TechlinkContractFailureReason;
   providerField: TechlinkProviderFieldDiagnostic | null;
+  bundleSizeField: TechlinkBundleSizeFieldDiagnostic | null;
   upstreamStatus: number | null;
   responseStatus: 502;
 };
@@ -733,6 +742,7 @@ export function describeTechlinkContractError(error: TechlinkContractError): Tec
     message: "Techlink catalogue response could not be verified",
     schemaCheck: error.reason,
     providerField: error.providerField,
+    bundleSizeField: error.bundleSizeField,
     upstreamStatus: error.httpStatus,
     responseStatus: 502,
   };
@@ -871,7 +881,14 @@ function parseCatalogue(response: TechlinkHttpResponse): TechlinkCatalogue {
     const validity = apiString(item.validity, 80);
     if (!id) throw new TechlinkContractError(response.status, "bundle_id_invalid");
     if (!name) throw new TechlinkContractError(response.status, "bundle_name_invalid");
-    if (!size) throw new TechlinkContractError(response.status, "bundle_size_invalid");
+    if (!size) {
+      throw new TechlinkContractError(
+        response.status,
+        "bundle_size_invalid",
+        null,
+        bundleSizeFieldDiagnostic(item),
+      );
+    }
     if (price === null || price < 0) throw new TechlinkContractError(response.status, "bundle_price_invalid");
     if (!validity) throw new TechlinkContractError(response.status, "bundle_validity_invalid");
     bundles.push({ id, name, size, price, validity });

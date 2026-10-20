@@ -73,6 +73,7 @@ export async function GET(req: Request) {
         category: diagnostic.category,
         schemaCheck: diagnostic.schemaCheck,
         providerField: diagnostic.providerField,
+        bundleSizeField: diagnostic.bundleSizeField,
         upstreamStatus: diagnostic.upstreamStatus,
       });
       return Response.json(
@@ -82,6 +83,7 @@ export async function GET(req: Request) {
           code: diagnostic.code,
           schemaCheck: diagnostic.schemaCheck,
           providerField: diagnostic.providerField,
+          bundleSizeField: diagnostic.bundleSizeField,
           upstreamStatus: diagnostic.upstreamStatus,
         },
         { status: diagnostic.responseStatus },
