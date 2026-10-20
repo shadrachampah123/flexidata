@@ -291,12 +291,17 @@ async function main() {
     provider: "fixture-techlink",
     bundles: [{ id: "live-bundle-1", name: "Fixture 1GB", size: "1GB", price: 12.5, validity: "7 days" }],
   } });
-  const liveCatalogue = await fetchTechlinkCatalogue("MTN", order.recipient);
+  const liveCatalogue = await fetchTechlinkCatalogue("MTN", "0240940228");
   assert.equal(liveCatalogue.bundles[0].id, "live-bundle-1");
-  assert.equal(new URL(officialCalls[0].input).pathname, "/api/v1/data/bundles");
-  assert.equal(new URL(officialCalls[0].input).searchParams.get("phone"), "233244123456");
-  assert.equal(new Headers(officialCalls[0].init?.headers).get("x-api-key"), fixtureKey);
-  console.log("PASS authenticated Preview catalogue uses sandbox variables despite NODE_ENV=production");
+  const catalogueCall = officialCalls[0];
+  const catalogueUrl = new URL(catalogueCall.input);
+  assert.equal(catalogueUrl.origin, "https://api.techlinkgh.com");
+  assert.equal(catalogueUrl.pathname, "/api/v1/data/bundles");
+  assert.equal(catalogueUrl.search, "?network=MTN&phone=233240940228");
+  const catalogueHeaders = new Headers(catalogueCall.init?.headers);
+  assert.equal(catalogueHeaders.get("accept"), "application/json");
+  assert.equal(catalogueHeaders.get("x-api-key"), fixtureKey);
+  console.log("PASS Preview catalogue uses the documented /data/bundles path, MTN/233 query, and x-api-key header");
 
   env.NODE_ENV = "test";
   delete env.VERCEL_ENV;
