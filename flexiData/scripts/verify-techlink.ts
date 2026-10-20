@@ -8,6 +8,9 @@ import assert from "node:assert/strict";
 import {
   createTechlinkTestAdapter,
   describeTechlinkApiError,
+  describeTechlinkContractError,
+  describeTechlinkTransportError,
+  fetchTechlinkTransport,
   type TechlinkContract,
   type TechlinkHttpRequest,
   type TechlinkHttpResponse,
@@ -17,6 +20,7 @@ import {
   submitTechlinkPurchase,
   TechlinkApiError,
   TechlinkContractError,
+  TechlinkTransportError,
   getTechlinkRuntimeStatus,
   unresolvedTechlinkStatus,
 } from "../src/lib/techlink";
@@ -316,8 +320,25 @@ async function main() {
   console.log("PASS purchase resolution rechecks the exact ID against a fresh catalogue");
 
   officialResponses.push({ status: 200, body: { success: true, provider: "fixture-techlink", bundles: [{ id: "x" }] } });
-  await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), TechlinkContractError);
-  console.log("PASS malformed catalogue response fails closed");
+  await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>
+    error instanceof TechlinkContractError && error.httpStatus === 200,
+  );
+  assert.deepEqual(describeTechlinkContractError(new TechlinkContractError(200)), {
+    category: "contract",
+    code: "techlink_response_invalid",
+    message: "Techlink catalogue response could not be verified",
+    upstreamStatus: 200,
+    responseStatus: 502,
+  });
+  assert.deepEqual(describeTechlinkTransportError(new TechlinkTransportError("timeout")), {
+    category: "timeout",
+    code: "techlink_timeout",
+    message: "Techlink catalogue request timed out",
+    upstreamStatus: null,
+    responseStatus: 503,
+  });
+  assert.equal(JSON.stringify(describeTechlinkTransportError(new TechlinkTransportError("network"))).includes(fixtureKey), false);
+  console.log("PASS malformed response preserves HTTP status; timeout/network diagnostics are safe and categorized");
 
   officialResponses.push({ status: 401, body: { success: false, message: "unauthorized fixture" } });
   await assert.rejects(fetchTechlinkCatalogue("MTN", order.recipient), (error: unknown) =>

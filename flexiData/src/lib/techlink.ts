@@ -105,16 +105,20 @@ export class TechlinkConfigurationError extends Error {
   }
 }
 
+export type TechlinkTransportFailureCategory = "timeout" | "network";
+
 export class TechlinkTransportError extends Error {
-  constructor() {
+  constructor(readonly category: TechlinkTransportFailureCategory = "network") {
     // Never include URL, headers, provider messages, or exception text.
-    super("Techlink request outcome is unresolved; do not resubmit automatically.");
+    super(category === "timeout"
+      ? "Techlink catalogue request timed out."
+      : "Techlink catalogue request could not reach the provider.");
     this.name = "TechlinkTransportError";
   }
 }
 
 export class TechlinkContractError extends Error {
-  constructor() {
+  constructor(readonly httpStatus: number | null = null) {
     // Contract/parser failures are deliberately generic and nonterminal.
     super("Techlink response could not be verified.");
     this.name = "TechlinkContractError";
@@ -198,7 +202,11 @@ export const fetchTechlinkTransport: TechlinkTransport = async (request, baseUrl
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     const response = await fetch(target, {
       method: request.method,
@@ -216,7 +224,7 @@ export const fetchTechlinkTransport: TechlinkTransport = async (request, baseUrl
     }
     return { status: response.status, body };
   } catch {
-    throw new TechlinkTransportError();
+    throw new TechlinkTransportError(timedOut ? "timeout" : "network");
   } finally {
     clearTimeout(timer);
   }
@@ -640,6 +648,51 @@ export function describeTechlinkApiError(error: TechlinkApiError): TechlinkApiFa
   }
 }
 
+export type TechlinkTransportFailureDiagnostic = {
+  category: TechlinkTransportFailureCategory;
+  code: "techlink_timeout" | "techlink_network_failure";
+  message: string;
+  upstreamStatus: null;
+  responseStatus: 503;
+};
+
+export function describeTechlinkTransportError(error: TechlinkTransportError): TechlinkTransportFailureDiagnostic {
+  if (error.category === "timeout") {
+    return {
+      category: error.category,
+      code: "techlink_timeout",
+      message: "Techlink catalogue request timed out",
+      upstreamStatus: null,
+      responseStatus: 503,
+    };
+  }
+  return {
+    category: error.category,
+    code: "techlink_network_failure",
+    message: "Techlink catalogue provider could not be reached",
+    upstreamStatus: null,
+    responseStatus: 503,
+  };
+}
+
+export type TechlinkContractFailureDiagnostic = {
+  category: "contract";
+  code: "techlink_response_invalid";
+  message: "Techlink catalogue response could not be verified";
+  upstreamStatus: number | null;
+  responseStatus: 502;
+};
+
+export function describeTechlinkContractError(error: TechlinkContractError): TechlinkContractFailureDiagnostic {
+  return {
+    category: "contract",
+    code: "techlink_response_invalid",
+    message: "Techlink catalogue response could not be verified",
+    upstreamStatus: error.httpStatus,
+    responseStatus: 502,
+  };
+}
+
 export class TechlinkCatalogueError extends Error {
   constructor(message = "The current Techlink catalogue does not contain the requested bundle.") {
     super(message);
@@ -716,14 +769,14 @@ async function officialRequest(
   try {
     return await fetchTechlinkTransport({ method, path, headers, body }, config.baseUrl, DEFAULT_TIMEOUT_MS);
   } catch (error) {
-    if (error instanceof TechlinkConfigurationError) throw error;
-    throw new TechlinkTransportError();
+    if (error instanceof TechlinkConfigurationError || error instanceof TechlinkTransportError) throw error;
+    throw new TechlinkTransportError("network");
   }
 }
 
 function responseObject(response: TechlinkHttpResponse): Record<string, unknown> {
   const body = apiObject(response.body);
-  if (!body) throw new TechlinkContractError();
+  if (!body) throw new TechlinkContractError(response.status);
   return body;
 }
 
@@ -753,7 +806,7 @@ function ensureSuccessEnvelope(response: TechlinkHttpResponse): Record<string, u
 
 function parseCatalogue(response: TechlinkHttpResponse): TechlinkCatalogue {
   const body = ensureSuccessEnvelope(response);
-  if (!Array.isArray(body.bundles) || !apiString(body.provider, 80)) throw new TechlinkContractError();
+  if (!Array.isArray(body.bundles) || !apiString(body.provider, 80)) throw new TechlinkContractError(response.status);
   const bundles: TechlinkBundle[] = [];
   for (const raw of body.bundles) {
     const item = apiObject(raw);
@@ -762,7 +815,7 @@ function parseCatalogue(response: TechlinkHttpResponse): TechlinkCatalogue {
     const size = apiString(item?.size, 80);
     const price = apiNumber(item?.price);
     const validity = apiString(item?.validity, 80);
-    if (!id || !name || !size || price === null || price < 0 || !validity) throw new TechlinkContractError();
+    if (!id || !name || !size || price === null || price < 0 || !validity) throw new TechlinkContractError(response.status);
     bundles.push({ id, name, size, price, validity });
   }
   return { provider: apiString(body.provider, 80)!, bundles };
@@ -847,7 +900,7 @@ export async function verifyTechlinkOrder(orderId: string): Promise<TechlinkVeri
   const success = apiBoolean(body.success);
   const message = apiString(body.message, MAX_MESSAGE_LENGTH);
   if (!responseOrderId || responseOrderId !== id || !status || changed === null || success === null || !message) {
-    throw new TechlinkContractError();
+    throw new TechlinkContractError(response.status);
   }
   return {
     orderId: responseOrderId,

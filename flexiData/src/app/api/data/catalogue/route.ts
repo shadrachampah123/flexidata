@@ -2,10 +2,14 @@ import { requireAccount } from "@/lib/api-auth";
 import { isTechlinkProviderCode, getDataProviderCode } from "@/lib/data-gateway";
 import {
   describeTechlinkApiError,
+  describeTechlinkContractError,
+  describeTechlinkTransportError,
   fetchTechlinkCatalogue,
   TechlinkApiError,
   TechlinkCatalogueError,
   TechlinkConfigurationError,
+  TechlinkContractError,
+  TechlinkTransportError,
 } from "@/lib/techlink";
 import { normalizeGhanaMobileStrict } from "@/lib/ghana-mobile";
 
@@ -63,6 +67,50 @@ export async function GET(req: Request) {
         { status: diagnostic.responseStatus },
       );
     }
-    return Response.json({ ok: false, error: "Techlink catalogue is temporarily unavailable" }, { status: 503 });
+    if (error instanceof TechlinkContractError) {
+      const diagnostic = describeTechlinkContractError(error);
+      console.warn("[flexidata] Techlink catalogue response contract failure", {
+        category: diagnostic.category,
+        upstreamStatus: diagnostic.upstreamStatus,
+      });
+      return Response.json(
+        {
+          ok: false,
+          error: diagnostic.message,
+          code: diagnostic.code,
+          upstreamStatus: diagnostic.upstreamStatus,
+        },
+        { status: diagnostic.responseStatus },
+      );
+    }
+    if (error instanceof TechlinkTransportError) {
+      const diagnostic = describeTechlinkTransportError(error);
+      console.warn("[flexidata] Techlink catalogue transport failure", {
+        category: diagnostic.category,
+        upstreamStatus: diagnostic.upstreamStatus,
+      });
+      return Response.json(
+        {
+          ok: false,
+          error: diagnostic.message,
+          code: diagnostic.code,
+          upstreamStatus: diagnostic.upstreamStatus,
+        },
+        { status: diagnostic.responseStatus },
+      );
+    }
+    console.error("[flexidata] Techlink catalogue unexpected failure", {
+      category: "unexpected",
+      upstreamStatus: null,
+    });
+    return Response.json(
+      {
+        ok: false,
+        error: "Techlink catalogue failed unexpectedly",
+        code: "techlink_unexpected_failure",
+        upstreamStatus: null,
+      },
+      { status: 503 },
+    );
   }
 }
