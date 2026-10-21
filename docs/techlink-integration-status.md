@@ -33,12 +33,28 @@ malformed provider when the optional field is present, and derives the internal
 provider identity from the trusted `TECHLINK_PROVIDER_CODE` constant rather than
 from an upstream value.
 
-The authenticated Preview response has since shown `bundles[].size` present with
-an allowlisted `null` type on at least one bundle. The supplied contract does not
-say whether null is permitted or define another size field, so the parser remains
-fail-closed for null and reports only the affected bundle index plus types for a
-small diagnostic-only allowlist of related field names. It does not invent a size
-or accept an alternate field until the official contract confirms its meaning.
+The latest sanitized authenticated Preview diagnostic is still HTTP 200 with
+`schemaCheck: "bundle_size_invalid"`; bundle index `0` has `size` present with
+JSON type `null`, and all eleven diagnostic-only related fields are absent:
+`data`, `dataSize`, `dataAmount`, `volume`, `quantity`, `unit`, `bundleSize`,
+`sizeMb`, `sizeGb`, `sizeInMb`, and `sizeInGb`. This confirms the observed shape
+but does not establish that null is valid or that any alternate field is
+authoritative. The parser therefore remains fail-closed for null and does not
+invent a size, a unit, or a substitute field.
+
+The official public pages currently establish only that Techlink offers data
+bundles. `https://api.techlinkgh.com/` exposes the API name and version, while
+an unauthenticated `GET https://api.techlinkgh.com/api/v1/data/bundles` exposes
+only an authentication error; neither publishes the bundle JSON schema. The
+public `https://techlinkgh.com/api`, `/developer`, and `/docs` paths are not
+API documentation pages. No official source reviewed here defines the JSON type,
+requiredness, nullability, unit, or alternate source for `bundles[].size`.
+
+A parser change requires an official OpenAPI/Postman schema or a sanitized
+provider example that preserves JSON types, plus an explicit statement of the
+meaning and unit of a null or any alternate size field. Until then, accepting
+null or substituting a related field would weaken validation and is intentionally
+not implemented.
 
 No generic provider response normalizer handles Techlink. `data-gateway.ts`
 directs Techlink submissions to `src/lib/techlink.ts`, which uses one HTTPS

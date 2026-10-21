@@ -48,8 +48,17 @@ normalizer or accept callbacks.
      category field exists. FlexiData will not infer a category or an ID.
    - Confirm whether `bundles[].size` is required, whether null is permitted,
      its JSON type and unit, and whether any documented alternate field supplies
-     the data amount. A current authenticated Preview response contained a null
-     size on one bundle; FlexiData will not invent or convert it.
+     the data amount. The latest sanitized authenticated Preview diagnostic was
+     HTTP 200 with `schemaCheck: bundle_size_invalid`: bundle index `0` had
+     `size` present with JSON type `null`, and each of the following fields was
+     absent: `data`, `dataSize`, `dataAmount`, `volume`, `quantity`, `unit`,
+     `bundleSize`, `sizeMb`, `sizeGb`, `sizeInMb`, and `sizeInGb`. FlexiData will
+     not invent, coerce, or substitute a size.
+   - Please send an official OpenAPI/Postman schema or a sanitized catalogue
+     example that preserves JSON types. If `size` may be null, specify how a
+     consumer obtains the data amount and unit. If another field is authoritative,
+     identify its exact JSON name, type, unit, requiredness, and nullability, and
+     state whether `size` is then deprecated or optional.
 3. **Order finality**
    - Please provide the complete `status` vocabulary returned by
      `/orders/:orderId/verify` and `/orders/:id`.
