@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { providerFloatBalances } from "@/db/schema";
 import { toGhanaMsisdn } from "@/lib/format";
 import { PROVIDER_FLOAT_TABLE, getSchemaCapabilities, isMissingRelationError } from "@/lib/schema-compat";
+import { getTechlinkRuntimeStatus, submitTechlinkPurchase } from "@/lib/techlink";
 
 export type GatewayTxStatus = "successful" | "pending" | "failed" | "reversed";
 export type GatewayFulfillmentStatus =
@@ -132,6 +133,10 @@ export function getDataProviderCode(): string {
   return env("DATA_API_PROVIDER")?.toLowerCase() ?? "mock";
 }
 
+export function isTechlinkProviderCode(value: string): boolean {
+  return ["techlink", "techlink_gh", "techlink-gh", "techlinkgh"].includes(value.trim().toLowerCase());
+}
+
 /**
  * Missing *kinds* of configuration. Deliberately categories, never the values:
  * health output and errors must never include a key, token, secret, URL, or any
@@ -143,6 +148,8 @@ export type DataProviderMissingConfig =
   | "base_url"
   | "auth_type"
   | "credentials"
+  | "mode"
+  | "purchase_opt_in"
   | "rollout_approval";
 
 export type DataProviderRuntimeStatus = {
@@ -243,6 +250,22 @@ export function getDataProviderRuntimeStatus(): DataProviderRuntimeStatus {
       ...base, safe: false, status: "unavailable",
       missing: ["rollout_approval"],
       warning: "Reloadly customer fulfillment is disabled pending verified Ghana data catalogue, sandbox access and durable settlement/reconciliation review.",
+    };
+  }
+
+  // Techlink must never fall through the generic HTTP adapter. The dedicated
+  // server-only adapter owns its confirmed paths and response validation; the
+  // generic normalizer could treat an HTTP 200 or success flag as delivery
+  // evidence. The adapter remains sandbox/configuration locked and its
+  // undocumented terminal status vocabulary is unresolved by default.
+  if (isTechlinkProviderCode(providerCode)) {
+    const techlink = getTechlinkRuntimeStatus();
+    return {
+      ...base,
+      safe: techlink.safe,
+      status: techlink.safe ? "ready" : "unavailable",
+      missing: techlink.missing,
+      warning: techlink.warning || null,
     };
   }
 
@@ -646,6 +669,7 @@ export async function submitDataBundleOrder(order: DataBundleOrder): Promise<Gat
   // before this can fail.
   assertDataProviderRuntimeSafe();
   const config = getGatewayConfig();
+  if (isTechlinkProviderCode(config.provider)) return submitTechlinkPurchase(order);
   const payload = buildPurchasePayload(order, config);
 
   if (config.provider === "mock") {

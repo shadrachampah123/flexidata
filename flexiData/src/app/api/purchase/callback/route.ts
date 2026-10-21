@@ -5,6 +5,7 @@ import { transactions, wallets } from "@/db/schema";
 import {
   extractCallbackReference,
   getStoredProviderFloatBalance,
+  isTechlinkProviderCode,
   getWebhookSecret,
   normalizeCallbackStatus,
   upsertProviderFloatBalance,
@@ -227,7 +228,7 @@ export async function POST(req: Request) {
     // even a valid legacy shared secret must not settle a Reloadly transaction.
     // New durable generic orders also require authoritative reconciliation,
     // not legacy heuristic callbacks. The reserved marker is written at claim.
-    if (tx.provider === "reloadly" || tx.subtitle.startsWith("[durable] ")) {
+    if (tx.provider === "reloadly" || (tx.provider !== null && isTechlinkProviderCode(tx.provider)) || tx.subtitle.startsWith("[durable] ")) {
       return Response.json({ ok: false, error: "Provider reconciliation unavailable" }, { status: 409 });
     }
 

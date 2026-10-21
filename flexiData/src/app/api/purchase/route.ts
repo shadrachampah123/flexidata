@@ -7,6 +7,7 @@ import { requireAccount } from "@/lib/api-auth";
 import { creditReferralReward } from "@/lib/referrals";
 import {
   getDataProviderCode,
+  isTechlinkProviderCode,
   DataProviderConfigError,
   DataProviderFloatError,
   DataProviderRequestError,
@@ -19,6 +20,7 @@ import {
   upsertProviderFloatBalance,
 } from "@/lib/data-gateway";
 import { estimateDeliverySeconds } from "@/lib/fulfillment";
+import { fetchTechlinkBundle, TechlinkApiError, TechlinkCatalogueError, TechlinkConfigurationError } from "@/lib/techlink";
 import {
   BUNDLE_PLAN_INSERT_FIELDS,
   buildCompatInsert,
@@ -38,6 +40,8 @@ type Body = {
   planLabel?: string;
   amount?: number;
   recipient?: string;
+  /** Exact ID returned by the authenticated live provider catalogue. */
+  providerProductCode?: string;
 };
 
 function rollLocalStatus(): "successful" | "pending" | "failed" {
@@ -57,16 +61,32 @@ type FoundPlan = {
 };
 
 /**
- * Plan lookup that tolerates a database without `provider_product_code`: the
- * aggregator SKU is then derived from the plan identity instead of failing the
- * whole purchase.
+ * Generic legacy providers may use the existing derived fallback. Techlink is
+ * different: the exact ID and price must be re-read from the authenticated
+ * catalogue immediately before a purchase, so no cached seeded row can act as
+ * a supplier mapping.
  */
 async function findBundlePlan(
   network: string,
   category: string,
   label: string,
+  recipient: string,
+  requestedProviderProductCode: string | undefined,
   compat: SchemaCapabilities,
 ): Promise<FoundPlan | null> {
+  if (isTechlinkProviderCode(getDataProviderCode())) {
+    const bundleId = requestedProviderProductCode?.trim();
+    if (!bundleId) return null;
+    const bundle = await fetchTechlinkBundle(network as "MTN" | "TELECEL", recipient, bundleId);
+    return {
+      id: 0,
+      network,
+      category: "techlink",
+      label: bundle.name,
+      price: bundle.price.toFixed(2),
+      providerProductCode: bundle.id,
+    };
+  }
   const where = and(
     eq(bundlePlans.network, network),
     eq(bundlePlans.category, category),
@@ -89,11 +109,8 @@ async function findBundlePlan(
 
     const row = rows[0];
     if (!row) return null;
-    return {
-      ...row,
-      providerProductCode:
-        row.providerProductCode?.trim() || deriveProviderProductCode(network, category, label),
-    };
+    const providerProductCode = row.providerProductCode?.trim() || deriveProviderProductCode(network, category, label);
+    return { ...row, providerProductCode };
   }
 
   const rows = await db
@@ -157,7 +174,14 @@ export async function POST(req: Request) {
 
     if (kind === "data") {
       const plan = await withSchemaFallback(
-        (compat) => findBundlePlan(network, body.category ?? "", body.planLabel ?? "", compat),
+        (compat) => findBundlePlan(
+          network,
+          body.category ?? "",
+          body.planLabel ?? "",
+          recipient,
+          body.providerProductCode,
+          compat,
+        ),
         "bundle plan lookup",
       );
       if (!plan) return Response.json({ ok: false, error: "Bundle not found" }, { status: 404 });
@@ -440,6 +464,15 @@ export async function POST(req: Request) {
   } catch (error) {
     if (error instanceof PurchaseConflict) return Response.json({ ok: false, error: error.message }, { status: 409 });
     if (error instanceof PurchaseFundsError) return Response.json({ ok: false, error: "insufficient_funds" }, { status: 402 });
+    if (error instanceof TechlinkCatalogueError) {
+      return Response.json({ ok: false, error: "Bundle is no longer available in the live catalogue", code: "catalogue_mismatch" }, { status: 409 });
+    }
+    if (error instanceof TechlinkConfigurationError) {
+      return Response.json({ ok: false, error: "Techlink is not configured for this environment", code: "provider_unavailable" }, { status: 503 });
+    }
+    if (error instanceof TechlinkApiError) {
+      return Response.json({ ok: false, error: "Techlink catalogue could not be verified", code: "provider_request_failed" }, { status: error.httpStatus === 401 ? 503 : 502 });
+    }
     if (error instanceof DataProviderConfigError) {
       return Response.json({ ok: false, error: error.message, code: "provider_unavailable" }, { status: 503 });
     }

@@ -53,6 +53,8 @@ export type PlanDTO = {
   price: number;
   retail: number;
   badge: string | null;
+  /** Present only when a live authenticated catalogue supplied an exact ID. */
+  providerProductCode?: string;
 };
 
 export type TxDTO = {

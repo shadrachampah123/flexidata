@@ -60,6 +60,10 @@ const ENV_KEYS = [
   "DATA_API_SCHEMA_FALLBACKS",
   "FLEXIDATA_TEST_USER_ID",
   "AUTH_SECRET",
+  "VERCEL_ENV",
+  "TECHLINK_MODE",
+  "TECHLINK_TEST_API_KEY",
+  "TECHLINK_ALLOW_PURCHASES",
 ] as const;
 
 const savedEnv: Record<string, string | undefined> = {};
@@ -82,6 +86,10 @@ function clearDataProviderEnv() {
   delete env.DATA_MOCK_RESULT;
   delete env.DATA_API_SCHEMA_FALLBACKS;
   delete env.FLEXIDATA_TEST_USER_ID;
+  delete env.VERCEL_ENV;
+  delete env.TECHLINK_MODE;
+  delete env.TECHLINK_TEST_API_KEY;
+  delete env.TECHLINK_ALLOW_PURCHASES;
 }
 
 function resetEnv(options: { nodeEnv: string; provider?: string | null }) {
@@ -299,6 +307,79 @@ async function main() {
     "production + fully configured real provider: safe/ready",
     status.safe === true && status.status === "ready" && status.mode === "live" && status.missing.length === 0,
     status,
+  );
+
+  for (const provider of ["techlink", "techlink_gh", "techlink-gh", "techlinkgh"]) {
+    resetEnv({ nodeEnv: "test", provider });
+    env.DATA_API_BASE_URL = "https://api.techlinkgh.com/api/v1";
+    env.DATA_API_AUTH_TYPE = "headers";
+    env.DATA_API_KEY = SENTINELS.key;
+    status = gateway.getDataProviderRuntimeStatus();
+    check(
+      `${provider} never falls through the generic adapter before an explicit verified adapter exists`,
+      status.provider === provider &&
+        status.safe === false &&
+        status.status === "unavailable" &&
+        status.missing.includes("credentials") &&
+        status.missing.includes("mode") &&
+        String(status.warning).includes("TECHLINK_TEST_API_KEY"),
+      status,
+    );
+  }
+
+  resetEnv({ nodeEnv: "production", provider: "techlink" });
+  env.VERCEL_ENV = "preview";
+  env.TECHLINK_MODE = "sandbox";
+  env.TECHLINK_TEST_API_KEY = SENTINELS.key;
+  status = gateway.getDataProviderRuntimeStatus();
+  check(
+    "Vercel Preview + NODE_ENV=production allows only the Techlink read-only catalogue",
+    status.safe === false &&
+      status.status === "unavailable" &&
+      status.missing.includes("purchase_opt_in") &&
+      String(status.warning).includes("read-only"),
+    status,
+  );
+
+  resetEnv({ nodeEnv: "test", provider: "techlink" });
+  env.DATA_API_BASE_URL = "https://api.techlinkgh.com/api/v1";
+  env.DATA_API_AUTH_TYPE = "headers";
+  env.DATA_API_KEY = SENTINELS.key;
+  let techlinkGuardError: unknown = null;
+  try {
+    gateway.assertDataProviderRuntimeSafe();
+  } catch (error) {
+    techlinkGuardError = error;
+  }
+  check(
+    "techlink activation fails closed before any request when sandbox config is absent",
+    techlinkGuardError instanceof gateway.DataProviderConfigError &&
+      (techlinkGuardError as Error).message.includes("TECHLINK_TEST_API_KEY") &&
+      serializedContainsSecrets((techlinkGuardError as Error).message).length === 0,
+    techlinkGuardError instanceof Error ? techlinkGuardError.message : techlinkGuardError,
+  );
+
+  setWalletBalance("100.00");
+  const txBeforeTechlink = txCount();
+  const techlinkRouteFetch = installFetchStub((url) => failFetch(url));
+  const techlinkRoute = await purchaseRoute.POST(jsonRequest("/api/purchase", purchaseBody()));
+  const techlinkRouteBody = await techlinkRoute.json();
+  techlinkRouteFetch.restore();
+  check(
+    "techlink purchase route rejects before wallet debit, ledger write or provider call",
+    techlinkRoute.status === 503 &&
+      techlinkRouteBody.code === "provider_unavailable" &&
+      wallet().balance === "100.00" &&
+      txCount() === txBeforeTechlink &&
+      techlinkRouteFetch.calls.length === 0 &&
+      serializedContainsSecrets(techlinkRouteBody).length === 0,
+    {
+      status: techlinkRoute.status,
+      body: techlinkRouteBody,
+      wallet: wallet().balance,
+      txCount: txCount(),
+      fetchCalls: techlinkRouteFetch.calls.length,
+    },
   );
 
   for (const nodeEnv of ["development", "test"]) {
@@ -840,6 +921,31 @@ async function main() {
       health.body.dataGateway.providerStatus === "unavailable" &&
       health.body.dataGateway.providerMissing.includes("base_url"),
     health.body.dataGateway,
+  );
+
+  health = await healthFor(
+    { nodeEnv: "test", provider: "techlink" },
+    () => {
+      env.DATA_API_BASE_URL = "https://api.techlinkgh.com/api/v1";
+      env.DATA_API_AUTH_TYPE = "headers";
+      env.DATA_API_KEY = SENTINELS.key;
+    },
+  );
+  check(
+    "health techlink: explicitly unavailable rather than generic-ready",
+    health.body.dataGateway.provider === "techlink" &&
+      health.body.dataGateway.providerMode === "live" &&
+      health.body.dataGateway.providerSafe === false &&
+      health.body.dataGateway.providerStatus === "unavailable" &&
+      health.body.dataGateway.providerMissing.includes("credentials") &&
+      health.body.dataGateway.providerMissing.includes("mode") &&
+      String(health.body.dataGateway.providerWarning ?? "").includes("TECHLINK_TEST_API_KEY"),
+    health.body.dataGateway,
+  );
+  check(
+    "health techlink: no key/token/secret/account/webhook secret",
+    serializedContainsSecrets(health.body).length === 0,
+    serializedContainsSecrets(health.body),
   );
 
   health = await healthFor(

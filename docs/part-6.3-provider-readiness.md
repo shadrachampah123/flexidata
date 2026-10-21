@@ -32,6 +32,12 @@ Hubtel's [official developer portal](https://developers.hubtel.com/) advertises
 Ghana data bundles across networks, but the accessible portal did not establish a
 purchase/status contract. It was not used to invent a second adapter.
 
+Techlink GH is tracked separately in the [Techlink integration status](techlink-integration-status.md).
+Its official contract and test access were not available in the current workspace,
+so no endpoint, payload, catalogue ID, status, or callback behavior was inferred.
+The shared runtime guard explicitly blocks Techlink slugs from the generic adapter
+until a documented, tested adapter exists.
+
 ## Implemented boundary
 
 `src/lib/reloadly.ts` is a sandbox-only transport, typed against the existing

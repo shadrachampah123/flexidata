@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -25,10 +25,13 @@ export function BuyData({
   wallet,
   plans,
   categories,
+  liveCatalogue = false,
 }: {
   wallet: WalletDTO;
   plans: PlanDTO[];
   categories: BundleCategory[];
+  /** Enables the authenticated, read-only Techlink catalogue seam. */
+  liveCatalogue?: boolean;
 }) {
   const router = useRouter();
   const [network, setNetwork] = useState<Network>("MTN");
@@ -41,15 +44,67 @@ export function BuyData({
   const closeDrop = useCallback(() => setDropOpen(false), []);
   const [balance, setBalance] = useState(wallet.balance);
   const [payMethod, setPayMethod] = useState<"wallet" | "paystack">("wallet");
+  const [liveResult, setLiveResult] = useState<{ key: string; plans: PlanDTO[] } | null>(null);
+  const catalogueKey = liveCatalogue ? `${network}:${phone}` : "";
+  const livePlans = liveResult?.key === catalogueKey ? liveResult.plans : null;
+
+  useEffect(() => {
+    if (!liveCatalogue || !isValidPhone(phone)) return;
+    const controller = new AbortController();
+    const requestKey = `${network}:${phone}`;
+    void fetch(`/api/data/catalogue?network=${encodeURIComponent(network)}&phone=${encodeURIComponent(phone)}`, {
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error("catalogue unavailable");
+        return (await res.json()) as {
+          ok: boolean;
+          bundles?: Array<{ id: string; name: string; price: number; validity: string }>;
+        };
+      })
+      .then((data) => {
+        if (!data.ok || !Array.isArray(data.bundles)) throw new Error("invalid catalogue");
+        const nextPlans = data.bundles.map((bundle, index) => ({
+          id: index + 1,
+          network,
+          category: "techlink",
+          label: bundle.name,
+          validity: bundle.validity,
+          price: bundle.price,
+          retail: bundle.price,
+          badge: null,
+          providerProductCode: bundle.id,
+        }));
+        setLiveResult({ key: requestKey, plans: nextPlans });
+        setCategory("techlink");
+        setPlanId(null);
+      })
+      .catch(() => {
+        // No seeded fallback is shown while Techlink is active; a purchase
+        // always requires a live catalogue ID.
+      });
+    return () => controller.abort();
+  }, [liveCatalogue, network, phone]);
 
   const [phase, setPhase] = useState<"idle" | "confirm" | "processing" | "result">("idle");
   const [result, setResult] = useState<FlowResult | null>(null);
 
-  const cats = useMemo(() => categories.filter((c) => c.network === network), [categories, network]);
+  const cats = useMemo(
+    () => liveCatalogue
+      ? livePlans
+        ? [{ id: "techlink", network, label: "Live bundles", hint: "Current Techlink catalogue" }]
+        : []
+      : categories.filter((c) => c.network === network),
+    [categories, liveCatalogue, livePlans, network],
+  );
   const activeCat = cats.find((c) => c.id === category) ?? cats[0];
+  const visiblePlans = useMemo(
+    () => liveCatalogue ? (livePlans ?? []) : plans,
+    [liveCatalogue, livePlans, plans],
+  );
   const filtered = useMemo(
-    () => plans.filter((p) => p.network === network && p.category === activeCat?.id),
-    [plans, network, activeCat],
+    () => visiblePlans.filter((p) => p.network === network && p.category === activeCat?.id),
+    [visiblePlans, network, activeCat],
   );
   const plan = filtered.find((p) => p.id === planId) ?? null;
 
@@ -80,6 +135,7 @@ export function BuyData({
             network,
             category: activeCat?.id,
             planLabel: plan.label,
+            providerProductCode: plan.providerProductCode,
             recipient: phone,
           }),
         });
@@ -116,6 +172,7 @@ export function BuyData({
           network,
           category: activeCat?.id,
           planLabel: plan.label,
+          providerProductCode: plan.providerProductCode,
           recipient: phone,
         }),
       });
